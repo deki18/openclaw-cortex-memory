@@ -1,123 +1,137 @@
+import logging
 import math
 from datetime import datetime
-from typing import List, Dict, Any
-from .embedding import EmbeddingModule
-from .vector_store import VectorStore
-from .bm25_store import BM25Store
-from .reranker import Reranker
-from .promotion_engine import PromotionEngine
+from typing import Any, Dict, List, Optional
+
 from .config import CONFIG
+from .lancedb_store import OpenClawMemory
+from .reranker import Reranker
+from .semantic_memory import SemanticMemory
+
+logger = logging.getLogger(__name__)
+
 
 class RetrievalPipeline:
     def __init__(self):
-        self.embedding_module = EmbeddingModule()
-        self.vector_store = VectorStore()
-        self.bm25_store = BM25Store()
+        self.semantic_memory = SemanticMemory()
         self.reranker = Reranker()
-        self.promotion = PromotionEngine()
-        self.halflife = CONFIG.get("time_decay_halflife", 30)
+        self.time_decay_halflife = CONFIG.get("time_decay_halflife", 30)
 
-    def retrieve(self, query: str, top_k: int = 3) -> List[Dict[str, Any]]:
-        # 1. Embed query
-        query_emb = self.embedding_module.embed_text([query])[0]
+    def search(
+        self,
+        query: str,
+        top_k: int = 10,
+        final_k: int = 3,
+        query_type: str = "hybrid",
+        memory_type: Optional[str] = None,
+        apply_time_decay: bool = True,
+        apply_rerank: bool = True
+    ) -> List[Dict[str, Any]]:
+        results = self.semantic_memory.search(
+            query=query,
+            top_k=top_k,
+            query_type=query_type,
+            memory_type=memory_type
+        )
         
-        # 2. Vector search (Top20)
-        vector_results = self.vector_store.query([query_emb], n_results=20)
-        
-        # 3. BM25 search (Top20)
-        bm25_results = self.bm25_store.search(query, top_k=20)
-        
-        # 4. RRF merge
-        merged_results = self._rrf_merge(vector_results, bm25_results)
-        
-        # 5. Time decay
-        decayed_results = self._apply_time_decay(merged_results)
-        
-        # 6. Reranker
-        if not decayed_results:
+        if not results:
             return []
-            
-        texts_to_rerank = [res["document"] for res in decayed_results]
-        rerank_scores = self.reranker.rerank(query, texts_to_rerank)
         
-        for idx, res in enumerate(decayed_results):
-            res["final_score"] = rerank_scores[idx]
-            
-        # 7. Return Top3
-        final_sorted = sorted(decayed_results, key=lambda x: x["final_score"], reverse=True)
-        top_results = final_sorted[:top_k]
-        self._increment_hit_counts(top_results)
-        return top_results
-
-    def _rrf_merge(self, vector_res, bm25_res):
-        scores = {}
-        docs = {}
-        metas = {}
+        if apply_time_decay:
+            results = self._apply_time_decay(results)
         
-        # Process vector results
-        if vector_res and vector_res["ids"] and len(vector_res["ids"]) > 0:
-            for rank, (doc_id, doc, meta) in enumerate(zip(vector_res["ids"][0], vector_res["documents"][0], vector_res["metadatas"][0])):
-                scores[doc_id] = scores.get(doc_id, 0) + 1.0 / (60 + rank + 1)
-                docs[doc_id] = doc
-                metas[doc_id] = meta
-                
-        # Process BM25 results
-        for rank, res in enumerate(bm25_res):
-            doc_id = res["id"]
-            scores[doc_id] = scores.get(doc_id, 0) + 1.0 / (60 + rank + 1)
-            docs[doc_id] = res["document"]
-            metas[doc_id] = res["metadata"]
-            
-        merged = []
-        for doc_id, score in scores.items():
-            merged.append({
-                "id": doc_id,
-                "document": docs[doc_id],
-                "metadata": metas[doc_id],
-                "rrf_score": score
-            })
-            
-        return sorted(merged, key=lambda x: x["rrf_score"], reverse=True)
+        if apply_rerank and self.reranker.is_available():
+            results = self._apply_rerank(query, results)
+        
+        results.sort(key=lambda x: x.get("final_score", 0), reverse=True)
+        
+        for r in results[:final_k]:
+            memory_id = r.get("id")
+            if memory_id:
+                self.semantic_memory.update_hit_count(memory_id)
+        
+        return results[:final_k]
 
-    def _apply_time_decay(self, results):
+    def _apply_time_decay(self, results: List[OpenClawMemory]) -> List[Dict[str, Any]]:
         now = datetime.utcnow()
-        for res in results:
-            meta = res["metadata"]
-            score = res["rrf_score"]
-            
-            if meta.get("type") != "core_rule":
-                try:
-                    date_str = meta.get("date", now.isoformat())
-                    # Handle basic ISO format parsing
-                    if date_str.endswith('Z'):
-                        date_str = date_str[:-1]
-                    doc_date = datetime.fromisoformat(date_str)
-                    delta_t = (now - doc_date).days
-                    if delta_t > 0:
-                        score = score * math.exp(-delta_t / self.halflife)
-                except Exception as e:
-                    pass # Ignore parsing errors
-            
-            res["decayed_score"] = score
+        processed = []
         
-        return sorted(results, key=lambda x: x["decayed_score"], reverse=True)
+        for memory in results:
+            memory_dict = memory.model_dump()
+            weight = memory_dict.get("weight", 1)
+            
+            if weight >= 10:
+                memory_dict["time_decay_score"] = 1.0
+                memory_dict["final_score"] = 1.0
+                processed.append(memory_dict)
+                continue
+            
+            date_str = memory_dict.get("date", "")
+            memory_date = self._parse_date(date_str)
+            if memory_date:
+                days_old = (now - memory_date).days
+                decay = math.exp(-days_old * math.log(2) / self.time_decay_halflife)
+            else:
+                decay = 1.0
+            
+            memory_dict["time_decay_score"] = decay
+            memory_dict["final_score"] = decay
+            processed.append(memory_dict)
+        
+        return processed
 
-    def _increment_hit_counts(self, results: List[Dict[str, Any]]):
-        ids = []
-        metadatas = []
-        for res in results:
-            meta = res.get("metadata") or {}
-            hit_count = int(meta.get("hit_count") or 0) + 1
-            meta["hit_count"] = hit_count
-            promoted = False
-            if meta.get("type") != "core_rule":
-                promoted = self.promotion.check_and_promote(hit_count, res.get("document", ""))
-            if promoted:
-                meta["type"] = "core_rule"
-            doc_id = res.get("id")
-            if doc_id:
-                ids.append(doc_id)
-                metadatas.append(meta)
-            res["metadata"] = meta
-        self.vector_store.update_metadatas(ids, metadatas)
-        self.bm25_store.update_metadatas(ids, metadatas)
+    def _parse_date(self, date_str: str) -> Optional[datetime]:
+        if not date_str:
+            return None
+        try:
+            if len(date_str) == 10:
+                return datetime.strptime(date_str, "%Y-%m-%d")
+            cleaned = date_str.replace("Z", "")
+            return datetime.fromisoformat(cleaned)
+        except Exception:
+            return None
+
+    def _apply_rerank(self, query: str, results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        if not results:
+            return results
+        
+        texts = [r.get("text", "") for r in results]
+        rerank_scores = self.reranker.rerank(query, texts)
+        
+        for i, r in enumerate(results):
+            if i < len(rerank_scores):
+                r["rerank_score"] = rerank_scores[i]
+                decay = r.get("time_decay_score", 1.0)
+                r["final_score"] = 0.6 * rerank_scores[i] + 0.4 * decay
+        
+        return results
+
+    def search_by_type(
+        self,
+        query: str,
+        memory_type: str,
+        top_k: int = 5
+    ) -> List[Dict[str, Any]]:
+        return self.search(
+            query=query,
+            top_k=top_k,
+            final_k=top_k,
+            memory_type=memory_type
+        )
+
+    def get_core_rules(self, limit: int = 10) -> List[Dict[str, Any]]:
+        memories = self.semantic_memory.store.get_core_rules(limit=limit)
+        return [m.model_dump() for m in memories]
+
+    def search_by_date_range(
+        self,
+        start_date: str,
+        end_date: str,
+        limit: int = 50
+    ) -> List[Dict[str, Any]]:
+        memories = self.semantic_memory.store.search_by_date_range(
+            start_date=start_date,
+            end_date=end_date,
+            limit=limit
+        )
+        return [m.model_dump() for m in memories]

@@ -1,0 +1,43 @@
+{
+  "name": "@openclaw/cortex-memory",
+  "version": "0.2.0",
+  "description": "Long-term memory system for OpenClaw AI Agent",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "openclaw",
+    "memory",
+    "ai",
+    "agent",
+    "rag"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "undici": "^6.21.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "typescript": "^5.7.2"
+  },
+  "peerDependencies": {
+    "openclaw": ">=2026.0.0"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "files": [
+    "dist/",
+    "openclaw.plugin.json",
+    "SKILL.md"
+  ],
+  "openclaw": {
+    "plugin": true,
+    "requiresPython": true
+  }
+}

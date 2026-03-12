@@ -1,16 +1,22 @@
-from .semantic_memory import SemanticMemory
+import glob
+import logging
+import os
+from datetime import datetime
+
+from .config import CONFIG
 from .episodic_memory import EpisodicMemory
-from .procedural_memory import ProceduralMemory
+from .hot_memory import HotMemory
 from .memory_graph import MemoryGraph
-from .retrieval_pipeline import RetrievalPipeline
-from .write_pipeline import WritePipeline
+from .metadata_schema import MemoryMetadata
+from .procedural_memory import ProceduralMemory
 from .promotion_engine import PromotionEngine
 from .reflection_engine import ReflectionEngine
-from .hot_memory import HotMemory
-from .metadata_schema import MemoryMetadata
-from datetime import datetime
-import os
-import glob
+from .retrieval_pipeline import RetrievalPipeline
+from .semantic_memory import SemanticMemory
+from .write_pipeline import WritePipeline
+
+logger = logging.getLogger(__name__)
+
 
 class MemoryController:
     def __init__(self):
@@ -27,17 +33,28 @@ class MemoryController:
     def write_memory(self, text: str, source: str = "manual"):
         meta = MemoryMetadata(
             type="event",
-            date=datetime.utcnow().isoformat() + "Z",
+            date=datetime.utcnow().strftime("%Y-%m-%d"),
             agent="openclaw",
             source_file=source
         )
-        self.semantic.add_memory(text, meta)
+        try:
+            return self.semantic.add_memory(text, meta)
+        except Exception as e:
+            logger.error(f"Failed to write memory: {e}")
+            return None
 
     def search_memory(self, query: str):
-        return self.retrieval.retrieve(query)
+        try:
+            return self.retrieval.search(query)
+        except Exception as e:
+            logger.error(f"Failed to search memory: {e}")
+            return []
 
     def store_event(self, summary: str, entities: list = None, outcome: str = "", relations: list = None):
-        event_id = self.episodic.store_event(summary, entities, outcome)
+        event_id = self.episodic.store_event(summary, entities, outcome, relations)
+        if not event_id:
+            return None
+            
         if entities:
             for entity in entities:
                 if isinstance(entity, dict):
@@ -60,7 +77,10 @@ class MemoryController:
         return event_id
 
     def reflect_memory(self):
-        self.reflection.reflect()
+        try:
+            self.reflection.reflect()
+        except Exception as e:
+            logger.error(f"Failed to reflect memory: {e}")
 
     def query_graph(self, entity: str):
         return self.graph.query_entity(entity)
@@ -72,77 +92,80 @@ class MemoryController:
         base_dir = os.path.expanduser(os.environ.get("OPENCLAW_BASE_PATH") or self.write_pipeline.base_dir or "~/.openclaw")
         sessions_dir = os.path.join(base_dir, "agents", "main", "sessions")
         local_sessions_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data", "memory", "sessions", "active"))
+        
         if os.path.isdir(sessions_dir):
             self.write_pipeline.process_sessions_dir(sessions_dir)
         if os.path.isdir(local_sessions_dir):
             self.write_pipeline.process_sessions_dir(local_sessions_dir)
+        
+        logger.info("Memory sync complete")
 
     def promote_memory(self):
-        data = self.semantic.vector_store.get_all()
-        ids = data.get("ids", [])
-        documents = data.get("documents", [])
-        metadatas = data.get("metadatas", [])
-        updated_ids = []
-        updated_metas = []
-        for doc_id, doc, meta in zip(ids, documents, metadatas):
-            if not meta:
-                continue
-            hit_count = int(meta.get("hit_count") or 0)
-            if meta.get("type") != "core_rule" and self.promotion.check_and_promote(hit_count, doc):
-                meta["type"] = "core_rule"
-                updated_ids.append(doc_id)
-                updated_metas.append(meta)
-        if updated_ids:
-            self.semantic.vector_store.update_metadatas(updated_ids, updated_metas)
-            self.semantic.bm25_store.update_metadatas(updated_ids, updated_metas)
+        try:
+            memories = self.semantic.list_all(limit=1000)
+            promoted_count = 0
+            for memory in memories:
+                if memory.type != "core_rule" and self.promotion.check_and_promote(memory.hit_count, memory.text):
+                    memory.type = "core_rule"
+                    memory.weight = 10
+                    self.semantic.store.add_memories([memory])
+                    promoted_count += 1
+            logger.info(f"Promoted {promoted_count} memories to core rules")
+        except Exception as e:
+            logger.error(f"Failed to promote memory: {e}")
 
     def import_legacy_data(self, data_dir: str = "~/.openclaw"):
-        print(f"Importing legacy data from {data_dir}...")
+        logger.info(f"Importing legacy data from {data_dir}...")
         base_dir = os.path.expanduser(data_dir)
         if not os.path.exists(base_dir):
-            print(f"Directory not found: {base_dir}")
+            logger.warning(f"Directory not found: {base_dir}")
             return
 
-        # 1. Import Long-term memory (MEMORY.md)
         memory_md_path = os.path.join(base_dir, "workspace", "MEMORY.md")
         if os.path.exists(memory_md_path):
-            print(f"Importing long-term memory: {memory_md_path}")
-            with open(memory_md_path, "r", encoding="utf-8") as f:
-                content = f.read()
-                if content.strip():
-                    meta = MemoryMetadata(
-                        type="core_rule",
-                        date=datetime.utcnow().isoformat() + "Z",
-                        agent="openclaw",
-                        source_file=memory_md_path
-                    )
-                    self.semantic.add_memory(content, meta)
+            logger.info(f"Importing long-term memory: {memory_md_path}")
+            try:
+                with open(memory_md_path, "r", encoding="utf-8") as f:
+                    content = f.read()
+                    if content.strip():
+                        meta = MemoryMetadata(
+                            type="core_rule",
+                            date=datetime.utcnow().strftime("%Y-%m-%d"),
+                            agent="openclaw",
+                            source_file=memory_md_path
+                        )
+                        self.semantic.add_memory(content, meta)
+            except Exception as e:
+                logger.error(f"Failed to import {memory_md_path}: {e}")
         
-        # 2. Import Daily records (*.md in workspace/memory/)
         daily_records_pattern = os.path.join(base_dir, "workspace", "memory", "*.md")
         for file_path in glob.glob(daily_records_pattern):
-            print(f"Importing daily record: {file_path}")
-            with open(file_path, "r", encoding="utf-8") as f:
-                content = f.read()
-                if content.strip():
-                    meta = MemoryMetadata(
-                        type="daily_log",
-                        date=datetime.utcnow().isoformat() + "Z",
-                        agent="openclaw",
-                        source_file=file_path
-                    )
-                    self.semantic.add_memory(content, meta)
+            logger.info(f"Importing daily record: {file_path}")
+            try:
+                with open(file_path, "r", encoding="utf-8") as f:
+                    content = f.read()
+                    if content.strip():
+                        meta = MemoryMetadata(
+                            type="daily_log",
+                            date=datetime.utcnow().strftime("%Y-%m-%d"),
+                            agent="openclaw",
+                            source_file=file_path
+                        )
+                        self.semantic.add_memory(content, meta)
+            except Exception as e:
+                logger.error(f"Failed to import {file_path}: {e}")
 
-        # 3. Import Conversation logs (*.jsonl in agents/main/sessions/)
         sessions_pattern = os.path.join(base_dir, "agents", "main", "sessions", "*.jsonl")
         for file_path in glob.glob(sessions_pattern):
-            print(f"Importing session log: {file_path}")
-            self.write_pipeline.process_sessions(file_path)
+            logger.info(f"Importing session log: {file_path}")
+            try:
+                self.write_pipeline.process_sessions(file_path)
+            except Exception as e:
+                logger.error(f"Failed to import {file_path}: {e}")
             
-        print("Import complete.")
+        logger.info("Import complete.")
 
     def inject_core_rule(self):
-        import os
         memory_md_path = os.path.expanduser("~/.openclaw/workspace/MEMORY.md")
         os.makedirs(os.path.dirname(memory_md_path), exist_ok=True)
         
@@ -150,22 +173,28 @@ class MemoryController:
         rule_content = """
 You are equipped with the **Cortex Memory** engine. You must proactively manage and utilize your memory using the provided skills.
 
-1. **Proactive Retrieval**: If a user asks about past interactions, projects, preferences, or technical context that is not in your immediate short-term memory, you MUST use the `search` skill to retrieve semantic memory before answering. Do not guess or hallucinate past events.
-2. **Relational Queries**: If the user asks about the relationship between entities (e.g., "Who worked on Project X?", "What technologies does Person Y use?"), use the `graph` skill to query the memory graph.
-3. **Memory Consolidation**: When you learn a new, important fact about the user, complete a significant milestone, or resolve a complex bug, you should summarize it and ensure it is recorded.
-4. **Self-Reflection**: Periodically, or when asked to review past performance, use the `reflect` skill to generate insights from your episodic memory.
+1. **Proactive Retrieval**: If a user asks about past interactions, projects, preferences, or technical context that is not in your immediate short-term memory, you MUST use the `search_memory` tool to retrieve semantic memory before answering. Do not guess or hallucinate past events.
+2. **Relational Queries**: If the user asks about the relationship between entities (e.g., "Who worked on Project X?", "What technologies does Person Y use?"), use the `query_graph` tool to query the memory graph.
+3. **Memory Consolidation**: When you learn a new, important fact about the user, complete a significant milestone, or resolve a complex bug, you should summarize it and use `store_event` to record it.
+4. **Self-Reflection**: Periodically, or when asked to review past performance, use the `reflect_memory` tool to generate insights from your episodic memory.
 5. **Trust the Engine**: The memory engine handles vector search, BM25 keyword matching, and time-decay automatically. Trust its top results.
 """
         
         content = ""
         if os.path.exists(memory_md_path):
-            with open(memory_md_path, "r", encoding="utf-8") as f:
-                content = f.read()
+            try:
+                with open(memory_md_path, "r", encoding="utf-8") as f:
+                    content = f.read()
+            except Exception as e:
+                logger.error(f"Failed to read MEMORY.md: {e}")
                 
         if rule_header in content:
-            print("Core rules already injected in MEMORY.md.")
+            logger.info("Core rules already injected in MEMORY.md.")
             return
             
-        with open(memory_md_path, "a", encoding="utf-8") as f:
-            f.write(f"\n\n{rule_header}\n{rule_content}")
-        print(f"Successfully injected Cortex Memory core rules into {memory_md_path}.")
+        try:
+            with open(memory_md_path, "a", encoding="utf-8") as f:
+                f.write(f"\n\n{rule_header}\n{rule_content}")
+            logger.info(f"Successfully injected Cortex Memory core rules into {memory_md_path}.")
+        except Exception as e:
+            logger.error(f"Failed to inject core rules: {e}")

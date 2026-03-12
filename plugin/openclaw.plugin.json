@@ -1,0 +1,170 @@
+{
+  "id": "cortex-memory",
+  "name": "Cortex Memory",
+  "version": "0.2.0",
+  "description": "Long-term memory system with semantic, episodic, and procedural memory for AI Agents",
+  "author": "OpenClaw Community",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/openclaw/openclaw-cortex-memory"
+  },
+  "entrypoint": "./dist/index.js",
+  "capabilities": {
+    "tools": true,
+    "hooks": true,
+    "cli": false,
+    "channels": false
+  },
+  "hooks": [
+    "onMessage",
+    "onSessionEnd",
+    "onTimer"
+  ],
+  "tools": [
+    {
+      "name": "search_memory",
+      "description": "Search the long-term semantic memory for relevant information about past interactions, projects, preferences, or technical context",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string",
+            "description": "The search query to find relevant memories"
+          },
+          "top_k": {
+            "type": "number",
+            "description": "Number of results to return (default: 3)",
+            "default": 3
+          }
+        },
+        "required": ["query"]
+      }
+    },
+    {
+      "name": "store_event",
+      "description": "Store a new episodic event or significant milestone in the memory system",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "summary": {
+            "type": "string",
+            "description": "A brief summary of the event"
+          },
+          "entities": {
+            "type": "array",
+            "description": "List of entities involved in the event",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": { "type": "string" },
+                "name": { "type": "string" },
+                "type": { "type": "string" }
+              }
+            }
+          },
+          "outcome": {
+            "type": "string",
+            "description": "The outcome or result of the event"
+          },
+          "relations": {
+            "type": "array",
+            "description": "Relationships between entities",
+            "items": {
+              "type": "object",
+              "properties": {
+                "source": { "type": "string" },
+                "target": { "type": "string" },
+                "type": { "type": "string" }
+              }
+            }
+          }
+        },
+        "required": ["summary"]
+      }
+    },
+    {
+      "name": "query_graph",
+      "description": "Query the memory graph for relationships involving a specific entity (person, project, technology, etc.)",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "entity": {
+            "type": "string",
+            "description": "The entity name to query relationships for"
+          }
+        },
+        "required": ["entity"]
+      }
+    },
+    {
+      "name": "get_hot_context",
+      "description": "Get the current hot context including SOUL.md and recent session data",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "limit": {
+            "type": "number",
+            "description": "Maximum number of recent items to include (default: 20)",
+            "default": 20
+          }
+        }
+      }
+    },
+    {
+      "name": "reflect_memory",
+      "description": "Trigger the reflection engine to process recent events into long-term semantic knowledge",
+      "parameters": {
+        "type": "object",
+        "properties": {}
+      }
+    },
+    {
+      "name": "sync_memory",
+      "description": "Synchronize memory by processing new session data",
+      "parameters": {
+        "type": "object",
+        "properties": {}
+      }
+    },
+    {
+      "name": "promote_memory",
+      "description": "Promote frequently accessed memories to core rules",
+      "parameters": {
+        "type": "object",
+        "properties": {}
+      }
+    }
+  ],
+  "config": {
+    "apiUrl": {
+      "type": "string",
+      "description": "URL of the Cortex Memory Python API server",
+      "default": "http://127.0.0.1:8765"
+    },
+    "autoSync": {
+      "type": "boolean",
+      "description": "Automatically sync memory on session end",
+      "default": true
+    },
+    "autoReflect": {
+      "type": "boolean",
+      "description": "Automatically trigger reflection periodically",
+      "default": false
+    }
+  },
+  "python": {
+    "required": true,
+    "version": ">=3.10",
+    "dependencies": [
+      "fastapi",
+      "lancedb",
+      "networkx",
+      "openai",
+      "pydantic",
+      "pyyaml",
+      "requests",
+      "uvicorn"
+    ]
+  }
+}

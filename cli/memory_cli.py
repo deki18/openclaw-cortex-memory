@@ -1,6 +1,8 @@
 import argparse
 import sys
 from memory_engine.memory_controller import MemoryController
+from memory_engine.lancedb_store import LanceDBStore
+from memory_engine.migration import migrate_from_chromadb
 
 def main():
     parser = argparse.ArgumentParser(description="OpenClaw Cortex Memory CLI")
@@ -12,18 +14,20 @@ def main():
     # Search
     search_parser = subparsers.add_parser("search", help="Search memory")
     search_parser.add_argument("query", type=str, help="Search query")
+    search_parser.add_argument("--top-k", type=int, default=5, help="Number of results")
 
     # Sync
     sync_parser = subparsers.add_parser("sync", help="Sync memory")
 
     # Rebuild
-    rebuild_parser = subparsers.add_parser("rebuild", help="Rebuild vector store")
+    rebuild_parser = subparsers.add_parser("rebuild", help="Rebuild FTS index")
 
     # Promote
     promote_parser = subparsers.add_parser("promote", help="Promote memory")
 
     # Events
     events_parser = subparsers.add_parser("events", help="List episodic events")
+    events_parser.add_argument("--limit", type=int, default=50, help="Max events to show")
 
     # Graph
     graph_parser = subparsers.add_parser("graph", help="Query memory graph")
@@ -34,32 +38,43 @@ def main():
 
     # Import
     import_parser = subparsers.add_parser("import", help="Import legacy OpenClaw memory data")
-    import_parser.add_argument("--path", type=str, default="~/.openclaw", help="Path to legacy data directory (default: ~/.openclaw)")
+    import_parser.add_argument("--path", type=str, default="~/.openclaw", help="Path to legacy data directory")
 
     # Install
     install_parser = subparsers.add_parser("install", help="Install Cortex Memory core rules into OpenClaw")
+
+    # Count
+    count_parser = subparsers.add_parser("count", help="Count total memories")
+
+    # Migrate
+    migrate_parser = subparsers.add_parser("migrate", help="Migrate from legacy ChromaDB")
+    migrate_parser.add_argument("--chromadb-path", type=str, required=True, help="Path to ChromaDB database")
 
     args = parser.parse_args()
     controller = MemoryController()
 
     if args.command == "status":
-        print("Memory system is online.")
+        count = controller.semantic.count()
+        print(f"Memory system is online.")
+        print(f"Total memories: {count}")
     elif args.command == "search":
         results = controller.search_memory(args.query)
         print(f"Search results for '{args.query}':")
-        for res in results:
-            print(f"- {res}")
+        for i, res in enumerate(results, 1):
+            text = res.get("text", "")[:100] + "..." if len(res.get("text", "")) > 100 else res.get("text", "")
+            score = res.get("final_score", 0)
+            print(f"{i}. [score: {score:.3f}] {text}")
     elif args.command == "sync":
         controller.sync_memory()
         print("Sync complete.")
     elif args.command == "rebuild":
-        controller.semantic.vector_store.rebuild()
-        print("Vector store rebuilt.")
+        controller.semantic.store.rebuild_fts_index()
+        print("FTS index rebuilt.")
     elif args.command == "promote":
         controller.promote_memory()
         print("Promotion complete.")
     elif args.command == "events":
-        events = controller.episodic.load_events()
+        events = controller.episodic.load_events(limit=args.limit)
         for e in events:
             print(e)
     elif args.command == "graph":
@@ -72,6 +87,13 @@ def main():
         controller.import_legacy_data(args.path)
     elif args.command == "install":
         controller.inject_core_rule()
+    elif args.command == "count":
+        count = controller.semantic.count()
+        print(f"Total memories: {count}")
+    elif args.command == "migrate":
+        store = LanceDBStore()
+        migrated = migrate_from_chromadb(args.chromadb_path, store)
+        print(f"Migrated {migrated} records from ChromaDB to LanceDB")
     else:
         parser.print_help()
 

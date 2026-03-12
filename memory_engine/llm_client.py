@@ -1,18 +1,40 @@
-import os
 import json
+import logging
+import os
 from typing import Optional
+
 from .config import CONFIG
+
+logger = logging.getLogger(__name__)
+
 try:
     from openai import OpenAI
 except Exception:
-    OpenAI = None
+    OpenAI = None  # type: ignore
+
 
 class LLMClient:
     def __init__(self):
         self.api_key = os.environ.get("OPENAI_API_KEY")
         self.model = self._resolve_model()
         self.base_url = self._resolve_base_url()
-        self.client = OpenAI(api_key=self.api_key, base_url=self.base_url) if self.api_key and self.model and OpenAI else None
+        self._client: Optional["OpenAI"] = None
+        
+        if not self.api_key:
+            logger.warning("OPENAI_API_KEY not set, LLM features will use fallback")
+        if not self.model:
+            logger.warning("llm_model not configured, LLM features will use fallback")
+
+    @property
+    def client(self) -> Optional["OpenAI"]:
+        if self._client is not None:
+            return self._client
+        
+        if not self.api_key or not self.model or OpenAI is None:
+            return None
+        
+        self._client = OpenAI(api_key=self.api_key, base_url=self.base_url)
+        return self._client
 
     def is_available(self) -> bool:
         return self.client is not None
@@ -32,7 +54,8 @@ class LLMClient:
                 temperature=0.2
             )
             return response.choices[0].message.content.strip()
-        except Exception:
+        except Exception as e:
+            logger.error(f"LLM summarize error: {e}")
             return self._fallback_summary(text, max_words)
 
     def extract_knowledge(self, text: str) -> str:
@@ -50,7 +73,8 @@ class LLMClient:
                 temperature=0.2
             )
             return response.choices[0].message.content.strip()
-        except Exception:
+        except Exception as e:
+            logger.error(f"LLM extract_knowledge error: {e}")
             return self._fallback_knowledge(text)
 
     def _fallback_summary(self, text: str, max_words: int) -> str:
@@ -72,7 +96,12 @@ class LLMClient:
         return from_openclaw or (CONFIG.get("llm_model") or "")
 
     def _resolve_base_url(self) -> Optional[str]:
-        return os.environ.get("OPENAI_BASE_URL") or os.environ.get("OPENCLAW_OPENAI_BASE_URL") or CONFIG.get("openai_base_url") or None
+        return (
+            os.environ.get("OPENAI_BASE_URL")
+            or os.environ.get("OPENCLAW_OPENAI_BASE_URL")
+            or CONFIG.get("openai_base_url")
+            or None
+        )
 
     def _read_openclaw_primary_model(self) -> Optional[str]:
         base_dir = CONFIG.get("openclaw_base_path", "~/.openclaw")
@@ -91,6 +120,6 @@ class LLMClient:
                     return primary
             if isinstance(model_cfg, str):
                 return model_cfg
-        except Exception:
-            return None
+        except Exception as e:
+            logger.debug(f"Failed to read OpenClaw config: {e}")
         return None

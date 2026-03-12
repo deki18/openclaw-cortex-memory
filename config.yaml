@@ -2,7 +2,7 @@ embedding_model: ""
 llm_model: ""
 openai_base_url: ""
 openclaw_base_path: ~/.openclaw
-vector_db_path: ~/.openclaw/vector_store
+lancedb_path: ~/.openclaw/agents/main/lancedb_store
 reranker_api:
   url: https://api.siliconflow.cn/v1/rerank
   model: ""

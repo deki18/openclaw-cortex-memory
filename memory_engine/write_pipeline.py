@@ -1,11 +1,17 @@
-import os
+import glob
 import json
+import logging
+import os
 from datetime import datetime
 from typing import Dict, List
-from .semantic_memory import SemanticMemory
-from .metadata_schema import MemoryMetadata
-from .llm_client import LLMClient
+
 from .config import CONFIG
+from .llm_client import LLMClient
+from .metadata_schema import MemoryMetadata
+from .semantic_memory import SemanticMemory
+
+logger = logging.getLogger(__name__)
+
 
 class WritePipeline:
     def __init__(self, base_dir: str = None):
@@ -17,10 +23,13 @@ class WritePipeline:
 
     def process_sessions(self, sessions_file: str, archive_dir: str = None, daily_summary_dir: str = None, state_path: str = None):
         if not os.path.exists(sessions_file):
+            logger.debug(f"Sessions file not found: {sessions_file}")
             return
+            
         archive_dir = archive_dir or os.path.join(self.base_dir, "workspace", "memory", "sessions", "archive")
         daily_summary_dir = daily_summary_dir or os.path.join(self.base_dir, "workspace", "memory", "daily-summary")
         state_path = state_path or os.path.join(self.base_dir, "workspace", "memory", ".cortex_sync_state.json")
+        
         os.makedirs(archive_dir, exist_ok=True)
         os.makedirs(daily_summary_dir, exist_ok=True)
 
@@ -29,20 +38,24 @@ class WritePipeline:
         new_items = []
         last_seen_idx = last_index
 
-        with open(sessions_file, "r", encoding="utf-8") as f:
-            for idx, line in enumerate(f):
-                if idx <= last_index:
-                    continue
-                if not line.strip():
-                    continue
-                try:
-                    session = json.loads(line.strip())
-                    content = self._extract_content(session)
-                    if content:
-                        new_items.append((self._extract_date(session), content, session))
-                    last_seen_idx = idx
-                except Exception as e:
-                    print(f"Error processing session line: {e}")
+        try:
+            with open(sessions_file, "r", encoding="utf-8") as f:
+                for idx, line in enumerate(f):
+                    if idx <= last_index:
+                        continue
+                    if not line.strip():
+                        continue
+                    try:
+                        session = json.loads(line.strip())
+                        content = self._extract_content(session)
+                        if content:
+                            new_items.append((self._extract_date(session), content, session))
+                        last_seen_idx = idx
+                    except json.JSONDecodeError as e:
+                        logger.warning(f"Error parsing session line {idx}: {e}")
+        except Exception as e:
+            logger.error(f"Error reading sessions file: {e}")
+            return
 
         if not new_items:
             return
@@ -61,6 +74,7 @@ class WritePipeline:
 
     def process_sessions_dir(self, sessions_dir: str, archive_dir: str = None, daily_summary_dir: str = None, state_path: str = None):
         if not os.path.isdir(sessions_dir):
+            logger.debug(f"Sessions directory not found: {sessions_dir}")
             return
         for name in os.listdir(sessions_dir):
             if name.endswith(".jsonl"):
@@ -73,8 +87,11 @@ class WritePipeline:
 
     def _write_daily_summary(self, daily_summary_dir: str, date_key: str, summary: str):
         path = os.path.join(daily_summary_dir, f"{date_key}.md")
-        with open(path, "a", encoding="utf-8") as f:
-            f.write(summary.strip() + "\n")
+        try:
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(summary.strip() + "\n")
+        except Exception as e:
+            logger.error(f"Failed to write daily summary: {e}")
 
     def _group_by_date(self, items: List[tuple]) -> Dict[str, List[str]]:
         grouped: Dict[str, List[str]] = {}
@@ -105,22 +122,26 @@ class WritePipeline:
             if os.path.abspath(archive_path) != os.path.abspath(sessions_file):
                 with open(sessions_file, "r", encoding="utf-8") as src, open(archive_path, "w", encoding="utf-8") as dst:
                     dst.write(src.read())
+                logger.debug(f"Archived {sessions_file} to {archive_path}")
         except Exception as e:
-            print(f"Archive error: {e}")
+            logger.error(f"Archive error: {e}")
 
     def _load_state(self, state_path: str) -> Dict:
         if os.path.exists(state_path):
             try:
                 with open(state_path, "r", encoding="utf-8") as f:
                     return json.load(f)
-            except Exception:
-                return {}
+            except Exception as e:
+                logger.warning(f"Failed to load sync state: {e}")
         return {}
 
     def _save_state(self, state_path: str, state: Dict):
-        os.makedirs(os.path.dirname(state_path), exist_ok=True)
-        with open(state_path, "w", encoding="utf-8") as f:
-            json.dump(state, f)
+        try:
+            os.makedirs(os.path.dirname(state_path), exist_ok=True)
+            with open(state_path, "w", encoding="utf-8") as f:
+                json.dump(state, f)
+        except Exception as e:
+            logger.error(f"Failed to save sync state: {e}")
 
     def _chunk_and_store(self, text: str, source: str):
         chunks = []
@@ -134,8 +155,11 @@ class WritePipeline:
         for chunk in chunks:
             meta = MemoryMetadata(
                 type="daily_log",
-                date=datetime.utcnow().isoformat() + "Z",
+                date=datetime.utcnow().strftime("%Y-%m-%d"),
                 agent="openclaw",
                 source_file=source
             )
-            self.semantic_memory.add_memory(chunk, meta)
+            try:
+                self.semantic_memory.add_memory(chunk, meta)
+            except Exception as e:
+                logger.error(f"Failed to store chunk: {e}")

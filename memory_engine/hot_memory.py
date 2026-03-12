@@ -1,7 +1,11 @@
-import os
 import json
-from typing import List
+import logging
+import os
 from datetime import datetime
+from typing import List
+
+logger = logging.getLogger(__name__)
+
 
 class HotMemory:
     def __init__(self, base_dir: str = "~/.openclaw"):
@@ -15,8 +19,11 @@ class HotMemory:
         for path in [self.soul_path, self.local_soul_path]:
             full_path = os.path.abspath(path)
             if os.path.exists(full_path):
-                with open(full_path, "r", encoding="utf-8") as f:
-                    return f.read()
+                try:
+                    with open(full_path, "r", encoding="utf-8") as f:
+                        return f.read()
+                except Exception as e:
+                    logger.warning(f"Failed to load SOUL.md from {full_path}: {e}")
         return ""
 
     def load_recent_sessions(self, limit: int = 20) -> List[str]:
@@ -43,25 +50,47 @@ class HotMemory:
                 for name in os.listdir(base_path):
                     if name.endswith(".jsonl"):
                         candidates.append(os.path.join(base_path, name))
-        candidates.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+        try:
+            candidates.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+        except Exception as e:
+            logger.warning(f"Failed to sort session files: {e}")
         return candidates
 
     def _read_last_lines(self, file_path: str, limit: int) -> List[str]:
         if not os.path.exists(file_path):
             return []
-        lines = []
-        with open(file_path, "r", encoding="utf-8") as f:
-            for line in f:
-                if not line.strip():
-                    continue
-                lines.append(line.strip())
-        recent = lines[-limit:]
+        collected: List[str] = []
+        try:
+            with open(file_path, "rb") as f:
+                f.seek(0, os.SEEK_END)
+                position = f.tell()
+                buffer = b""
+                while position > 0 and len(collected) < limit:
+                    read_size = min(4096, position)
+                    position -= read_size
+                    f.seek(position)
+                    chunk = f.read(read_size)
+                    buffer = chunk + buffer
+                    parts = buffer.split(b"\n")
+                    buffer = parts[0]
+                    for line in reversed(parts[1:]):
+                        if len(collected) >= limit:
+                            break
+                        if line.strip():
+                            collected.append(line.decode("utf-8", errors="ignore").strip())
+                if buffer.strip() and len(collected) < limit:
+                    collected.append(buffer.decode("utf-8", errors="ignore").strip())
+        except Exception as e:
+            logger.warning(f"Failed to read session file {file_path}: {e}")
+            return []
+
+        recent = list(reversed(collected))
         results = []
         for line in recent:
             try:
                 obj = json.loads(line)
                 content = obj.get("content") or obj.get("text") or obj.get("message") or json.dumps(obj)
                 results.append(content)
-            except Exception:
+            except json.JSONDecodeError:
                 results.append(line)
         return results
