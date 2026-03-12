@@ -3,7 +3,7 @@ import logging
 import os
 import threading
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
 
@@ -17,7 +17,7 @@ class EpisodicMemory:
     def store_event(self, summary: str, entities: list = None, outcome: str = "", relations: list = None, source_file: str = ""):
         event = {
             "id": str(uuid.uuid4()),
-            "timestamp": datetime.utcnow().isoformat() + "Z",
+            "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
             "summary": summary,
             "entities": entities or [],
             "outcome": outcome,

@@ -1,5 +1,6 @@
 import logging
 import os
+import re
 from typing import Optional, List
 
 import lancedb
@@ -8,6 +9,26 @@ from lancedb.pydantic import LanceModel, Vector
 logger = logging.getLogger(__name__)
 
 VECTOR_DIM = 3072
+
+VALID_MEMORY_TYPES = {"core_rule", "daily_log", "event", "episodic", "procedural"}
+ID_PATTERN = re.compile(r'^[a-zA-Z0-9_-]+$')
+DATE_PATTERN = re.compile(r'^\d{4}-\d{2}-\d{2}$')
+
+
+def _escape_sql_string(value: str) -> str:
+    return value.replace("'", "''")
+
+
+def _validate_id(memory_id: str) -> bool:
+    return bool(ID_PATTERN.match(memory_id))
+
+
+def _validate_date(date_str: str) -> bool:
+    return bool(DATE_PATTERN.match(date_str))
+
+
+def _validate_memory_type(memory_type: str) -> bool:
+    return memory_type in VALID_MEMORY_TYPES
 
 
 class OpenClawMemory(LanceModel):
@@ -88,7 +109,10 @@ class LanceDBStore:
                 query_builder = table.search(query_text, query_type="fts").limit(limit)
             
             if memory_type:
-                query_builder = query_builder.where(f"type = '{memory_type}'")
+                if not _validate_memory_type(memory_type):
+                    logger.warning(f"Invalid memory_type: {memory_type}")
+                    return []
+                query_builder = query_builder.where(f"type = '{_escape_sql_string(memory_type)}'")
             
             return query_builder.to_pydantic(OpenClawMemory)
         except Exception as e:
@@ -101,11 +125,14 @@ class LanceDBStore:
         end_date: str,
         limit: int = 100
     ) -> List[OpenClawMemory]:
+        if not _validate_date(start_date) or not _validate_date(end_date):
+            logger.warning(f"Invalid date format: {start_date} or {end_date}")
+            return []
         table = self._get_table()
         try:
             return (
                 table.search()
-                .where(f"date >= '{start_date}' AND date <= '{end_date}'")
+                .where(f"date >= '{_escape_sql_string(start_date)}' AND date <= '{_escape_sql_string(end_date)}'")
                 .limit(limit)
                 .to_pydantic(OpenClawMemory)
             )
@@ -127,11 +154,14 @@ class LanceDBStore:
             return []
 
     def get_by_id(self, memory_id: str) -> Optional[OpenClawMemory]:
+        if not _validate_id(memory_id):
+            logger.warning(f"Invalid memory_id format: {memory_id}")
+            return None
         table = self._get_table()
         try:
             results = (
                 table.search()
-                .where(f"id = '{memory_id}'")
+                .where(f"id = '{_escape_sql_string(memory_id)}'")
                 .limit(1)
                 .to_pydantic(OpenClawMemory)
             )
@@ -141,19 +171,25 @@ class LanceDBStore:
             return None
 
     def update_hit_count(self, memory_id: str, increment: int = 1):
+        if not _validate_id(memory_id):
+            logger.warning(f"Invalid memory_id format: {memory_id}")
+            return
         table = self._get_table()
         try:
             memory = self.get_by_id(memory_id)
             if memory:
                 new_hit_count = memory.hit_count + increment
-                table.update(where=f"id = '{memory_id}'", values={"hit_count": new_hit_count})
+                table.update(where=f"id = '{_escape_sql_string(memory_id)}'", values={"hit_count": new_hit_count})
         except Exception as e:
             logger.warning(f"Failed to update hit count: {e}")
 
     def delete_by_id(self, memory_id: str):
+        if not _validate_id(memory_id):
+            logger.warning(f"Invalid memory_id format: {memory_id}")
+            return
         table = self._get_table()
         try:
-            table.delete(f"id = '{memory_id}'")
+            table.delete(f"id = '{_escape_sql_string(memory_id)}'")
             logger.info(f"Deleted memory: {memory_id}")
         except Exception as e:
             logger.error(f"Failed to delete memory: {e}")
@@ -163,9 +199,12 @@ class LanceDBStore:
         return table.count_rows()
 
     def count_by_type(self, memory_type: str) -> int:
+        if not _validate_memory_type(memory_type):
+            logger.warning(f"Invalid memory_type: {memory_type}")
+            return 0
         table = self._get_table()
         try:
-            return len(table.search().where(f"type = '{memory_type}'").to_pydantic(OpenClawMemory))
+            return len(table.search().where(f"type = '{_escape_sql_string(memory_type)}'").to_pydantic(OpenClawMemory))
         except Exception as e:
             logger.error(f"Failed to count by type: {e}")
             return 0

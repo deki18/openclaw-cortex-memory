@@ -1,7 +1,35 @@
+/// <reference types="node" />
+import { spawn, ChildProcess } from "child_process";
+import * as path from "path";
+import * as fs from "fs";
+
+interface EmbeddingConfig {
+  provider: string;
+  model: string;
+  apiKey?: string;
+  baseURL?: string;
+  dimensions?: number;
+}
+
+interface LLMConfig {
+  provider: string;
+  model: string;
+}
+
+interface RerankerConfig {
+  provider?: string;
+  model: string;
+  apiKey?: string;
+  endpoint?: string;
+}
+
 interface CortexMemoryConfig {
-  apiUrl: string;
-  autoSync: boolean;
-  autoReflect: boolean;
+  embedding: EmbeddingConfig;
+  llm: LLMConfig;
+  reranker: RerankerConfig;
+  dbPath?: string;
+  autoSync?: boolean;
+  autoReflect?: boolean;
 }
 
 interface ToolContext {
@@ -34,39 +62,176 @@ interface OpenClawPluginApi {
   };
 }
 
-declare const process: { env?: Record<string, string | undefined> };
-
-const defaultConfig: CortexMemoryConfig = {
-  apiUrl:
-    (typeof process !== "undefined" && process.env?.CORTEX_MEMORY_API_URL) ||
-    "http://127.0.0.1:8765",
+const defaultConfig: Partial<CortexMemoryConfig> = {
   autoSync: true,
   autoReflect: false,
 };
 
-let config: CortexMemoryConfig = { ...defaultConfig };
+let config: CortexMemoryConfig | null = null;
 let logger: ReturnType<OpenClawPluginApi["getLogger"]>;
+let pythonProcess: ChildProcess | null = null;
+
+// Find plugin root directory (go up from plugin/dist to project root)
+function findProjectRoot(): string {
+  let current = __dirname;
+  while (current !== path.dirname(current)) {
+    if (fs.existsSync(path.join(current, "api")) && fs.existsSync(path.join(current, "memory_engine"))) {
+      return current;
+    }
+    current = path.dirname(current);
+  }
+  throw new Error("Cannot find project root directory");
+}
+
+// Validate required configuration
+function validateConfig(cfg: CortexMemoryConfig): string[] {
+  const errors: string[] = [];
+  
+  if (!cfg.embedding?.provider || !cfg.embedding?.model) {
+    errors.push("embedding.provider and embedding.model are required. Please configure them in openclaw.json");
+  }
+  if (!cfg.llm?.provider || !cfg.llm?.model) {
+    errors.push("llm.provider and llm.model are required. Please configure them in openclaw.json");
+  }
+  if (!cfg.reranker?.model) {
+    errors.push("reranker.model is required. Please configure it in openclaw.json");
+  }
+  
+  return errors;
+}
+
+// Start Python backend service
+async function startPythonService(): Promise<void> {
+  if (!config) {
+    throw new Error("Configuration not loaded");
+  }
+
+  const projectRoot = findProjectRoot();
+  const venvDir = path.join(projectRoot, "venv");
+  
+  const pythonCmd = process.platform === "win32"
+    ? path.join(venvDir, "Scripts", "python.exe")
+    : path.join(venvDir, "bin", "python");
+
+  if (!fs.existsSync(pythonCmd)) {
+    throw new Error("Python environment not found. Please run 'npm install' first.");
+  }
+
+  const errors = validateConfig(config);
+  if (errors.length > 0) {
+    throw new Error(`Configuration errors:\n${errors.join("\n")}`);
+  }
+
+  logger.info("Starting Cortex Memory Python service...");
+
+  const env: Record<string, string> = {
+    ...process.env as Record<string, string>,
+    CORTEX_MEMORY_EMBEDDING_PROVIDER: config.embedding.provider,
+    CORTEX_MEMORY_EMBEDDING_MODEL: config.embedding.model,
+    CORTEX_MEMORY_LLM_PROVIDER: config.llm.provider,
+    CORTEX_MEMORY_LLM_MODEL: config.llm.model,
+    CORTEX_MEMORY_RERANKER_PROVIDER: config.reranker.provider || "",
+    CORTEX_MEMORY_RERANKER_MODEL: config.reranker.model,
+    CORTEX_MEMORY_DB_PATH: config.dbPath || path.join(
+      process.env.USERPROFILE || process.env.HOME || "", 
+      ".openclaw", "agents", "main", "lancedb_store"
+    ),
+  };
+
+  // Pass optional API keys and endpoints if specified
+  if (config.embedding.apiKey) {
+    env.CORTEX_MEMORY_EMBEDDING_API_KEY = config.embedding.apiKey;
+  }
+  if (config.embedding.baseURL) {
+    env.CORTEX_MEMORY_EMBEDDING_BASE_URL = config.embedding.baseURL;
+  }
+  if (config.reranker.apiKey) {
+    env.CORTEX_MEMORY_RERANKER_API_KEY = config.reranker.apiKey;
+  }
+  if (config.reranker.endpoint) {
+    env.CORTEX_MEMORY_RERANKER_ENDPOINT = config.reranker.endpoint;
+  }
+
+  return new Promise((resolve, reject) => {
+    pythonProcess = spawn(pythonCmd, ["-m", "api.server"], {
+      cwd: projectRoot,
+      detached: false,
+      windowsHide: true,
+      env,
+    });
+
+    let started = false;
+
+    pythonProcess.stdout?.on("data", (data: Buffer) => {
+      const output = data.toString();
+      logger.info(`[Python] ${output.trim()}`);
+      if (output.includes("Cortex Memory API started") || output.includes("Application startup complete")) {
+        started = true;
+        resolve();
+      }
+    });
+
+    pythonProcess.stderr?.on("data", (data: Buffer) => {
+      const output = data.toString();
+      logger.warn(`[Python] ${output.trim()}`);
+      if (output.includes("Cortex Memory API started") && !started) {
+        started = true;
+        resolve();
+      }
+    });
+
+    pythonProcess.on("error", (error: Error) => {
+      logger.error("Failed to start Python service:", error.message);
+      reject(error);
+    });
+
+    pythonProcess.on("exit", (code: number | null) => {
+      if (!started && code !== 0) {
+        reject(new Error(`Python service exited with code ${code}`));
+      }
+    });
+
+    setTimeout(() => {
+      if (!started) {
+        pythonProcess?.kill();
+        reject(new Error("Timeout waiting for Python service to start"));
+      }
+    }, 30000);
+  });
+}
+
+function stopPythonService(): void {
+  if (pythonProcess) {
+    logger.info("Stopping Cortex Memory Python service...");
+    pythonProcess.kill();
+    pythonProcess = null;
+  }
+}
+
+async function waitForService(maxAttempts = 30): Promise<void> {
+  const apiUrl = "http://127.0.0.1:8765";
+  for (let i = 0; i < maxAttempts; i++) {
+    try {
+      const response = await fetch(`${apiUrl}/health`, { signal: AbortSignal.timeout(1000) });
+      if (response.ok) return;
+    } catch {}
+    await new Promise(resolve => setTimeout(resolve, 1000));
+  }
+  throw new Error("Service failed to become ready");
+}
 
 function formatApiError(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
   const lower = message.toLowerCase();
-  if (
-    lower.includes("econnrefused") ||
-    lower.includes("enotfound") ||
-    lower.includes("abort") ||
-    lower.includes("timed out")
-  ) {
-    return `Cortex Memory API not reachable or timed out. Ensure it is running at ${config.apiUrl}. Details: ${message}`;
+  if (lower.includes("econnrefused") || lower.includes("enotfound") || 
+      lower.includes("abort") || lower.includes("timed out") || lower.includes("fetch failed")) {
+    return `Cortex Memory API not reachable. The Python service may not be running. Details: ${message}`;
   }
   return message;
 }
 
-async function apiCall<T>(
-  endpoint: string,
-  method: "GET" | "POST" = "GET",
-  body?: unknown
-): Promise<T> {
-  const url = `${config.apiUrl}${endpoint}`;
+async function apiCall<T>(endpoint: string, method: "GET" | "POST" = "GET", body?: unknown): Promise<T> {
+  const url = `http://127.0.0.1:8765${endpoint}`;
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 8000);
   const options: RequestInit = {
@@ -74,26 +239,15 @@ async function apiCall<T>(
     headers: { "Content-Type": "application/json" },
     signal: controller.signal,
   };
-
-  if (body) {
-    options.body = JSON.stringify(body);
-  }
+  if (body) options.body = JSON.stringify(body);
 
   try {
     const response = await fetch(url, options);
     const text = await response.text();
-    if (!response.ok) {
-      const detail = text || response.statusText;
-      throw new Error(`HTTP ${response.status}: ${detail}`);
-    }
-    if (!text) {
-      return {} as T;
-    }
-    try {
-      return JSON.parse(text) as T;
-    } catch {
-      throw new Error("Invalid JSON response from Cortex Memory API");
-    }
+    if (!response.ok) throw new Error(`HTTP ${response.status}: ${text || response.statusText}`);
+    if (!text) return {} as T;
+    try { return JSON.parse(text) as T; } 
+    catch { throw new Error("Invalid JSON response"); }
   } catch (error) {
     throw new Error(formatApiError(error));
   } finally {
@@ -101,10 +255,7 @@ async function apiCall<T>(
   }
 }
 
-async function searchMemory(
-  args: { query: string; top_k?: number },
-  _context: ToolContext
-): Promise<ToolResult> {
+async function searchMemory(args: { query: string; top_k?: number }, _context: ToolContext): Promise<ToolResult> {
   try {
     const result = await apiCall<{ results: unknown[] }>("/search", "POST", {
       query: args.query,
@@ -142,14 +293,9 @@ async function storeEvent(
   }
 }
 
-async function queryGraph(
-  args: { entity: string },
-  _context: ToolContext
-): Promise<ToolResult> {
+async function queryGraph(args: { entity: string }, _context: ToolContext): Promise<ToolResult> {
   try {
-    const result = await apiCall<{ graph: unknown }>("/graph/query", "POST", {
-      entity: args.entity,
-    });
+    const result = await apiCall<{ graph: unknown }>("/graph/query", "POST", { entity: args.entity });
     return { success: true, data: result.graph };
   } catch (error) {
     const message = formatApiError(error);
@@ -158,15 +304,9 @@ async function queryGraph(
   }
 }
 
-async function getHotContext(
-  args: { limit?: number },
-  _context: ToolContext
-): Promise<ToolResult> {
+async function getHotContext(args: { limit?: number }, _context: ToolContext): Promise<ToolResult> {
   try {
-    const limit = args.limit || 20;
-    const result = await apiCall<{ context: string }>(
-      `/hot-context?limit=${limit}`
-    );
+    const result = await apiCall<{ context: string }>(`/hot-context?limit=${args.limit || 20}`);
     return { success: true, data: result.context };
   } catch (error) {
     const message = formatApiError(error);
@@ -175,10 +315,7 @@ async function getHotContext(
   }
 }
 
-async function reflectMemory(
-  _args: Record<string, unknown>,
-  _context: ToolContext
-): Promise<ToolResult> {
+async function reflectMemory(_args: Record<string, unknown>, _context: ToolContext): Promise<ToolResult> {
   try {
     await apiCall("/reflect", "POST");
     return { success: true, data: { message: "Reflection complete" } };
@@ -189,10 +326,7 @@ async function reflectMemory(
   }
 }
 
-async function syncMemory(
-  _args: Record<string, unknown>,
-  _context: ToolContext
-): Promise<ToolResult> {
+async function syncMemory(_args: Record<string, unknown>, _context: ToolContext): Promise<ToolResult> {
   try {
     await apiCall("/sync", "POST");
     return { success: true, data: { message: "Sync complete" } };
@@ -203,10 +337,7 @@ async function syncMemory(
   }
 }
 
-async function promoteMemory(
-  _args: Record<string, unknown>,
-  _context: ToolContext
-): Promise<ToolResult> {
+async function promoteMemory(_args: Record<string, unknown>, _context: ToolContext): Promise<ToolResult> {
   try {
     await apiCall("/promote", "POST");
     return { success: true, data: { message: "Promotion complete" } };
@@ -217,51 +348,36 @@ async function promoteMemory(
   }
 }
 
-async function onMessageHandler(
-  payload: { content?: string; text?: string; source?: string },
-  context: ToolContext
-): Promise<void> {
-  const text = payload.content || payload.text;
+async function onMessageHandler(payload: unknown, context: ToolContext): Promise<void> {
+  const data = payload as { content?: string; text?: string; source?: string };
+  const text = data.content || data.text;
   if (!text) return;
-
   try {
-    await apiCall("/write", "POST", {
-      text,
-      source: payload.source || "message",
-    });
+    await apiCall("/write", "POST", { text, source: data.source || "message" });
     logger.info(`Stored message for session ${context.sessionId}`);
   } catch (error) {
-    const message = formatApiError(error);
-    logger.warn(`Failed to store message: ${message}`);
+    logger.warn(`Failed to store message: ${formatApiError(error)}`);
   }
 }
 
-async function onSessionEndHandler(
-  payload: { path?: string },
-  context: ToolContext
-): Promise<void> {
-  if (!config.autoSync) return;
-
+async function onSessionEndHandler(payload: unknown, context: ToolContext): Promise<void> {
+  if (!config?.autoSync) return;
   try {
     await apiCall("/sync", "POST");
     logger.info(`Synced memory for session ${context.sessionId}`);
   } catch (error) {
-    const message = formatApiError(error);
-    logger.warn(`Failed to sync on session end: ${message}`);
+    logger.warn(`Failed to sync on session end: ${formatApiError(error)}`);
   }
 }
 
-async function onTimerHandler(
-  payload: { action?: string },
-  _context: ToolContext
-): Promise<void> {
-  const action = payload.action;
-
+async function onTimerHandler(payload: unknown, _context: ToolContext): Promise<void> {
+  const data = payload as { action?: string };
+  const action = data.action;
   try {
     if (action === "sync") {
       await apiCall("/sync", "POST");
       logger.info("Scheduled sync complete");
-    } else if (action === "reflect" || (config.autoReflect && !action)) {
+    } else if (action === "reflect" || (config?.autoReflect && !action)) {
       await apiCall("/reflect", "POST");
       logger.info("Scheduled reflection complete");
     } else if (action === "promote") {
@@ -269,188 +385,115 @@ async function onTimerHandler(
       logger.info("Scheduled promotion complete");
     }
   } catch (error) {
-    const message = formatApiError(error);
-    logger.warn(`Timer action failed: ${message}`);
+    logger.warn(`Timer action failed: ${formatApiError(error)}`);
   }
 }
 
-export function register(api: OpenClawPluginApi, userConfig?: Partial<CortexMemoryConfig>): void {
-  config = { ...defaultConfig, ...userConfig };
+export async function register(api: OpenClawPluginApi, userConfig?: Partial<CortexMemoryConfig>): Promise<void> {
+  config = { 
+    embedding: userConfig?.embedding || { provider: "openai", model: "" },
+    llm: userConfig?.llm || { model: "" },
+    reranker: userConfig?.reranker || { model: "" },
+    dbPath: userConfig?.dbPath,
+    autoSync: userConfig?.autoSync ?? defaultConfig.autoSync,
+    autoReflect: userConfig?.autoReflect ?? defaultConfig.autoReflect,
+  } as CortexMemoryConfig;
+  
   logger = api.getLogger();
-
   logger.info("Registering Cortex Memory plugin...");
+  logger.info(`Embedding: ${config.embedding.model} (${config.embedding.provider})`);
+  logger.info(`LLM: ${config.llm.model}`);
+  logger.info(`Reranker: ${config.reranker.model}`);
+
+  try {
+    await startPythonService();
+    await waitForService();
+    logger.info("Cortex Memory Python service started successfully");
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    logger.error("Failed to start Cortex Memory service:", message);
+    throw new Error(`Cortex Memory plugin initialization failed: ${message}`);
+  }
+
+  process.on("exit", stopPythonService);
+  process.on("SIGINT", () => { stopPythonService(); process.exit(0); });
+  process.on("SIGTERM", () => { stopPythonService(); process.exit(0); });
 
   api.registerTool({
     name: "search_memory",
-    description: "Search the long-term semantic memory for relevant information about past interactions, projects, preferences, or technical context",
+    description: "Search the long-term semantic memory for relevant information",
     parameters: {
       type: "object",
       properties: {
-        query: {
-          type: "string",
-          description: "The search query to find relevant memories",
-        },
-        top_k: {
-          type: "number",
-          description: "Number of results to return (default: 3)",
-          default: 3,
-        },
+        query: { type: "string", description: "Search query" },
+        top_k: { type: "number", description: "Number of results", default: 3 },
       },
       required: ["query"],
     },
-    execute: async ({ args, context }) => {
-      return searchMemory(args as { query: string; top_k?: number }, context);
-    },
+    execute: async ({ args, context }) => searchMemory(args as { query: string; top_k?: number }, context),
   });
 
   api.registerTool({
     name: "store_event",
-    description: "Store a new episodic event or significant milestone in the memory system",
+    description: "Store a new episodic event in the memory system",
     parameters: {
       type: "object",
       properties: {
-        summary: {
-          type: "string",
-          description: "A brief summary of the event",
-        },
-        entities: {
-          type: "array",
-          description: "List of entities involved in the event",
-          items: {
-            type: "object",
-            properties: {
-              id: { type: "string" },
-              name: { type: "string" },
-              type: { type: "string" },
-            },
-          },
-        },
-        outcome: {
-          type: "string",
-          description: "The outcome or result of the event",
-        },
-        relations: {
-          type: "array",
-          description: "Relationships between entities",
-          items: {
-            type: "object",
-            properties: {
-              source: { type: "string" },
-              target: { type: "string" },
-              type: { type: "string" },
-            },
-          },
-        },
+        summary: { type: "string", description: "Event summary" },
+        entities: { type: "array", description: "Involved entities" },
+        outcome: { type: "string", description: "Event outcome" },
+        relations: { type: "array", description: "Entity relationships" },
       },
       required: ["summary"],
     },
-    execute: async ({ args, context }) => {
-      return storeEvent(
-        args as {
-          summary: string;
-          entities?: Array<{ id?: string; name?: string; type?: string }>;
-          outcome?: string;
-          relations?: Array<{ source: string; target: string; type: string }>;
-        },
-        context
-      );
-    },
+    execute: async ({ args, context }) => storeEvent(args as any, context),
   });
 
   api.registerTool({
     name: "query_graph",
-    description: "Query the memory graph for relationships involving a specific entity (person, project, technology, etc.)",
+    description: "Query the memory graph for entity relationships",
     parameters: {
       type: "object",
-      properties: {
-        entity: {
-          type: "string",
-          description: "The entity name to query relationships for",
-        },
-      },
+      properties: { entity: { type: "string", description: "Entity name" } },
       required: ["entity"],
     },
-    execute: async ({ args, context }) => {
-      return queryGraph(args as { entity: string }, context);
-    },
+    execute: async ({ args, context }) => queryGraph(args as { entity: string }, context),
   });
 
   api.registerTool({
     name: "get_hot_context",
-    description: "Get the current hot context including SOUL.md and recent session data",
+    description: "Get current hot context including SOUL.md and recent data",
     parameters: {
       type: "object",
-      properties: {
-        limit: {
-          type: "number",
-          description: "Maximum number of recent items to include (default: 20)",
-          default: 20,
-        },
-      },
+      properties: { limit: { type: "number", description: "Max items", default: 20 } },
     },
-    execute: async ({ args, context }) => {
-      return getHotContext(args as { limit?: number }, context);
-    },
+    execute: async ({ args, context }) => getHotContext(args as { limit?: number }, context),
   });
 
   api.registerTool({
     name: "reflect_memory",
-    description: "Trigger the reflection engine to process recent events into long-term semantic knowledge",
-    parameters: {
-      type: "object",
-      properties: {},
-    },
-    execute: async ({ context }) => {
-      return reflectMemory({}, context);
-    },
+    description: "Trigger reflection to convert episodic events into semantic knowledge",
+    parameters: { type: "object", properties: {} },
+    execute: async ({ args, context }) => reflectMemory(args, context),
   });
 
   api.registerTool({
     name: "sync_memory",
-    description: "Synchronize memory by processing new session data",
-    parameters: {
-      type: "object",
-      properties: {},
-    },
-    execute: async ({ context }) => {
-      return syncMemory({}, context);
-    },
+    description: "Sync session data from OpenClaw to memory system",
+    parameters: { type: "object", properties: {} },
+    execute: async ({ args, context }) => syncMemory(args, context),
   });
 
   api.registerTool({
     name: "promote_memory",
     description: "Promote frequently accessed memories to core rules",
-    parameters: {
-      type: "object",
-      properties: {},
-    },
-    execute: async ({ context }) => {
-      return promoteMemory({}, context);
-    },
+    parameters: { type: "object", properties: {} },
+    execute: async ({ args, context }) => promoteMemory(args, context),
   });
 
-  api.registerHook({
-    event: "onMessage",
-    handler: async (payload, context) => {
-      await onMessageHandler(payload as { content?: string; text?: string; source?: string }, context);
-    },
-  });
-
-  api.registerHook({
-    event: "onSessionEnd",
-    handler: async (payload, context) => {
-      await onSessionEndHandler(payload as { path?: string }, context);
-    },
-  });
-
-  api.registerHook({
-    event: "onTimer",
-    handler: async (payload, context) => {
-      await onTimerHandler(payload as { action?: string }, context);
-    },
-  });
+  api.registerHook({ event: "message", handler: onMessageHandler });
+  api.registerHook({ event: "session_end", handler: onSessionEndHandler });
+  api.registerHook({ event: "timer", handler: onTimerHandler });
 
   logger.info("Cortex Memory plugin registered successfully");
 }
-
-export default { register };

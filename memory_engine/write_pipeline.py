@@ -2,7 +2,7 @@ import glob
 import json
 import logging
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, List
 
 from .config import CONFIG
@@ -11,6 +11,25 @@ from .metadata_schema import MemoryMetadata
 from .semantic_memory import SemanticMemory
 
 logger = logging.getLogger(__name__)
+
+
+def _parse_timestamp(ts) -> str:
+    if ts is None:
+        return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    try:
+        if isinstance(ts, (int, float)):
+            return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d")
+        if isinstance(ts, str):
+            ts_clean = ts.replace("Z", "").replace("+00:00", "")
+            if "T" in ts_clean:
+                dt = datetime.fromisoformat(ts_clean)
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                return dt.strftime("%Y-%m-%d")
+            return ts_clean[:10]
+    except Exception:
+        pass
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
 
 class WritePipeline:
@@ -104,16 +123,7 @@ class WritePipeline:
 
     def _extract_date(self, session: Dict) -> str:
         ts = session.get("timestamp") or session.get("date") or session.get("created_at")
-        if ts:
-            try:
-                if isinstance(ts, (int, float)):
-                    return datetime.utcfromtimestamp(ts).strftime("%Y-%m-%d")
-                if isinstance(ts, str):
-                    t = ts.replace("Z", "")
-                    return datetime.fromisoformat(t).strftime("%Y-%m-%d")
-            except Exception:
-                pass
-        return datetime.utcnow().strftime("%Y-%m-%d")
+        return _parse_timestamp(ts)
 
     def _archive_file(self, sessions_file: str, archive_dir: str):
         try:
@@ -155,7 +165,7 @@ class WritePipeline:
         for chunk in chunks:
             meta = MemoryMetadata(
                 type="daily_log",
-                date=datetime.utcnow().strftime("%Y-%m-%d"),
+                date=datetime.now(timezone.utc).strftime("%Y-%m-%d"),
                 agent="openclaw",
                 source_file=source
             )

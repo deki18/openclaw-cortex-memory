@@ -1,6 +1,6 @@
 import logging
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Optional
 
 from .embedding import EmbeddingModule
@@ -24,7 +24,7 @@ class SemanticMemory:
             vector=embedding,
             text=text,
             type=metadata.type or "daily_log",
-            date=metadata.date or datetime.utcnow().strftime("%Y-%m-%d"),
+            date=metadata.date or datetime.now(timezone.utc).strftime("%Y-%m-%d"),
             agent=metadata.agent or "openclaw",
             source_file=metadata.source_file,
             hit_count=metadata.hit_count or 0,

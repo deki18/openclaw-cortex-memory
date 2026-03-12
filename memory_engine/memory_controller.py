@@ -1,7 +1,7 @@
 import glob
 import logging
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 
 from .config import CONFIG
 from .episodic_memory import EpisodicMemory
@@ -33,7 +33,7 @@ class MemoryController:
     def write_memory(self, text: str, source: str = "manual"):
         meta = MemoryMetadata(
             type="event",
-            date=datetime.utcnow().strftime("%Y-%m-%d"),
+            date=datetime.now(timezone.utc).strftime("%Y-%m-%d"),
             agent="openclaw",
             source_file=source
         )
@@ -51,30 +51,34 @@ class MemoryController:
             return []
 
     def store_event(self, summary: str, entities: list = None, outcome: str = "", relations: list = None):
-        event_id = self.episodic.store_event(summary, entities, outcome, relations)
-        if not event_id:
+        try:
+            event_id = self.episodic.store_event(summary, entities, outcome, relations)
+            if not event_id:
+                return None
+                
+            if entities:
+                for entity in entities:
+                    if isinstance(entity, dict):
+                        node_id = entity.get("id") or entity.get("name")
+                        node_type = entity.get("type") or "Person"
+                        if node_id:
+                            self.graph.add_node(node_id, node_type, entity.get("attributes"))
+                    else:
+                        self.graph.add_node(str(entity), "Person")
+            if relations:
+                for rel in relations:
+                    if isinstance(rel, dict):
+                        source = rel.get("source")
+                        target = rel.get("target")
+                        edge_type = rel.get("type")
+                    else:
+                        source, target, edge_type = rel
+                    if source and target and edge_type:
+                        self.graph.add_edge(source, target, edge_type)
+            return event_id
+        except Exception as e:
+            logger.error(f"Failed to store event: {e}")
             return None
-            
-        if entities:
-            for entity in entities:
-                if isinstance(entity, dict):
-                    node_id = entity.get("id") or entity.get("name")
-                    node_type = entity.get("type") or "Person"
-                    if node_id:
-                        self.graph.add_node(node_id, node_type, entity.get("attributes"))
-                else:
-                    self.graph.add_node(str(entity), "Person")
-        if relations:
-            for rel in relations:
-                if isinstance(rel, dict):
-                    source = rel.get("source")
-                    target = rel.get("target")
-                    edge_type = rel.get("type")
-                else:
-                    source, target, edge_type = rel
-                if source and target and edge_type:
-                    self.graph.add_edge(source, target, edge_type)
-        return event_id
 
     def reflect_memory(self):
         try:
@@ -83,22 +87,33 @@ class MemoryController:
             logger.error(f"Failed to reflect memory: {e}")
 
     def query_graph(self, entity: str):
-        return self.graph.query_entity(entity)
+        try:
+            return self.graph.query_entity(entity)
+        except Exception as e:
+            logger.error(f"Failed to query graph: {e}")
+            return []
 
     def get_hot_context(self, limit: int = 20):
-        return self.hot.build_hot_context(limit=limit)
+        try:
+            return self.hot.build_hot_context(limit=limit)
+        except Exception as e:
+            logger.error(f"Failed to get hot context: {e}")
+            return []
 
     def sync_memory(self):
-        base_dir = os.path.expanduser(os.environ.get("OPENCLAW_BASE_PATH") or self.write_pipeline.base_dir or "~/.openclaw")
-        sessions_dir = os.path.join(base_dir, "agents", "main", "sessions")
-        local_sessions_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data", "memory", "sessions", "active"))
-        
-        if os.path.isdir(sessions_dir):
-            self.write_pipeline.process_sessions_dir(sessions_dir)
-        if os.path.isdir(local_sessions_dir):
-            self.write_pipeline.process_sessions_dir(local_sessions_dir)
-        
-        logger.info("Memory sync complete")
+        try:
+            base_dir = os.path.expanduser(os.environ.get("OPENCLAW_BASE_PATH") or self.write_pipeline.base_dir or "~/.openclaw")
+            sessions_dir = os.path.join(base_dir, "agents", "main", "sessions")
+            local_sessions_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data", "memory", "sessions", "active"))
+            
+            if os.path.isdir(sessions_dir):
+                self.write_pipeline.process_sessions_dir(sessions_dir)
+            if os.path.isdir(local_sessions_dir):
+                self.write_pipeline.process_sessions_dir(local_sessions_dir)
+            
+            logger.info("Memory sync complete")
+        except Exception as e:
+            logger.error(f"Failed to sync memory: {e}")
 
     def promote_memory(self):
         try:
@@ -130,7 +145,7 @@ class MemoryController:
                     if content.strip():
                         meta = MemoryMetadata(
                             type="core_rule",
-                            date=datetime.utcnow().strftime("%Y-%m-%d"),
+                            date=datetime.now(timezone.utc).strftime("%Y-%m-%d"),
                             agent="openclaw",
                             source_file=memory_md_path
                         )
@@ -147,7 +162,7 @@ class MemoryController:
                     if content.strip():
                         meta = MemoryMetadata(
                             type="daily_log",
-                            date=datetime.utcnow().strftime("%Y-%m-%d"),
+                            date=datetime.now(timezone.utc).strftime("%Y-%m-%d"),
                             agent="openclaw",
                             source_file=file_path
                         )

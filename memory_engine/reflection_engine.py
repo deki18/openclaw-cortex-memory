@@ -1,5 +1,5 @@
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 
 from .episodic_memory import EpisodicMemory
 from .llm_client import LLMClient
@@ -30,7 +30,7 @@ class ReflectionEngine:
             return
         meta = MemoryMetadata(
             type="core_rule",
-            date=datetime.utcnow().strftime("%Y-%m-%d"),
+            date=datetime.now(timezone.utc).strftime("%Y-%m-%d"),
             agent="openclaw",
             source_file="reflection"
         )

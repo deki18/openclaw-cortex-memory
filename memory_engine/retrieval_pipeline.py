@@ -1,6 +1,6 @@
 import logging
 import math
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from .config import CONFIG
@@ -53,7 +53,7 @@ class RetrievalPipeline:
         return results[:final_k]
 
     def _apply_time_decay(self, results: List[OpenClawMemory]) -> List[Dict[str, Any]]:
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         processed = []
         
         for memory in results:

@@ -6,9 +6,9 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
 from memory_engine.memory_controller import MemoryController
-from memory_engine.config import load_config, CONFIG
+from memory_engine.config import load_config, CONFIG, setup_logging
 
-logging.basicConfig(level=logging.INFO)
+setup_logging()
 logger = logging.getLogger(__name__)
 
 controller: Optional[MemoryController] = None

@@ -15,15 +15,6 @@ except Exception:
 _client: Optional["OpenAI"] = None
 
 
-def _resolve_base_url() -> Optional[str]:
-    return (
-        os.environ.get("OPENAI_BASE_URL")
-        or os.environ.get("OPENCLAW_OPENAI_BASE_URL")
-        or CONFIG.get("openai_base_url")
-        or None
-    )
-
-
 def _get_client() -> Optional["OpenAI"]:
     global _client
     if _client is not None:
@@ -33,21 +24,23 @@ def _get_client() -> Optional["OpenAI"]:
         logger.warning("OpenAI library not installed")
         return None
     
-    api_key = os.environ.get("OPENAI_API_KEY")
+    # Get API key and base URL from config
+    api_key = CONFIG.get("embedding_api_key") or os.environ.get("OPENAI_API_KEY")
     if not api_key:
-        logger.warning("OPENAI_API_KEY not set, embedding will return zero vectors")
+        logger.warning("API key not set, embedding will return zero vectors")
         return None
     
-    base_url = _resolve_base_url()
-    _client = OpenAI(api_key=api_key, base_url=base_url)
+    base_url = CONFIG.get("embedding_base_url") or os.environ.get("OPENAI_BASE_URL")
+    _client = OpenAI(api_key=api_key, base_url=base_url) if base_url else OpenAI(api_key=api_key)
     return _client
 
 
 class EmbeddingModule:
     def __init__(self):
-        self.model = CONFIG.get("embedding_model") or None
-        if not self.model:
-            logger.warning("embedding_model not configured, embedding will return zero vectors")
+        self.provider = CONFIG.get("embedding_provider")
+        self.model = CONFIG.get("embedding_model")
+        if not self.provider or not self.model:
+            logger.warning("embedding provider and model not configured")
         
     @lru_cache(maxsize=1000)
     def _embed_single(self, text: str) -> tuple:
