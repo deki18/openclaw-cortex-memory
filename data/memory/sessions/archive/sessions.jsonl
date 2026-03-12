@@ -1,0 +1,2 @@
+{"id": "1", "timestamp": "2023-10-01T10:00:00Z", "summary": "User asked about Python memory management.", "entities": ["User", "Python"], "outcome": "Explained garbage collection.", "source_file": "session_1"}
+{"id": "2", "timestamp": "2023-10-01T11:00:00Z", "summary": "User requested a script to parse JSON logs.", "entities": ["User", "JSON"], "outcome": "Provided a Python script.", "source_file": "session_2"}

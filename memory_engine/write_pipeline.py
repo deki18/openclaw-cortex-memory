@@ -1,0 +1,141 @@
+import os
+import json
+from datetime import datetime
+from typing import Dict, List
+from .semantic_memory import SemanticMemory
+from .metadata_schema import MemoryMetadata
+from .llm_client import LLMClient
+from .config import CONFIG
+
+class WritePipeline:
+    def __init__(self, base_dir: str = None):
+        self.semantic_memory = SemanticMemory()
+        self.llm = LLMClient()
+        self.base_dir = os.path.expanduser(base_dir or CONFIG.get("openclaw_base_path", "~/.openclaw"))
+        self.chunk_size = CONFIG.get("chunk", {}).get("size", 600)
+        self.chunk_overlap = CONFIG.get("chunk", {}).get("overlap", 100)
+
+    def process_sessions(self, sessions_file: str, archive_dir: str = None, daily_summary_dir: str = None, state_path: str = None):
+        if not os.path.exists(sessions_file):
+            return
+        archive_dir = archive_dir or os.path.join(self.base_dir, "workspace", "memory", "sessions", "archive")
+        daily_summary_dir = daily_summary_dir or os.path.join(self.base_dir, "workspace", "memory", "daily-summary")
+        state_path = state_path or os.path.join(self.base_dir, "workspace", "memory", ".cortex_sync_state.json")
+        os.makedirs(archive_dir, exist_ok=True)
+        os.makedirs(daily_summary_dir, exist_ok=True)
+
+        state = self._load_state(state_path)
+        last_index = state.get(os.path.abspath(sessions_file), -1)
+        new_items = []
+        last_seen_idx = last_index
+
+        with open(sessions_file, "r", encoding="utf-8") as f:
+            for idx, line in enumerate(f):
+                if idx <= last_index:
+                    continue
+                if not line.strip():
+                    continue
+                try:
+                    session = json.loads(line.strip())
+                    content = self._extract_content(session)
+                    if content:
+                        new_items.append((self._extract_date(session), content, session))
+                    last_seen_idx = idx
+                except Exception as e:
+                    print(f"Error processing session line: {e}")
+
+        if not new_items:
+            return
+
+        grouped = self._group_by_date(new_items)
+        for date_key, contents in grouped.items():
+            combined = "\n".join(contents).strip()
+            summary = self.llm.summarize(combined)
+            if summary:
+                self._write_daily_summary(daily_summary_dir, date_key, summary)
+                self._chunk_and_store(summary, f"daily-summary:{date_key}")
+
+        self._archive_file(sessions_file, archive_dir)
+        state[os.path.abspath(sessions_file)] = last_seen_idx
+        self._save_state(state_path, state)
+
+    def process_sessions_dir(self, sessions_dir: str, archive_dir: str = None, daily_summary_dir: str = None, state_path: str = None):
+        if not os.path.isdir(sessions_dir):
+            return
+        for name in os.listdir(sessions_dir):
+            if name.endswith(".jsonl"):
+                self.process_sessions(
+                    os.path.join(sessions_dir, name),
+                    archive_dir=archive_dir,
+                    daily_summary_dir=daily_summary_dir,
+                    state_path=state_path
+                )
+
+    def _write_daily_summary(self, daily_summary_dir: str, date_key: str, summary: str):
+        path = os.path.join(daily_summary_dir, f"{date_key}.md")
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(summary.strip() + "\n")
+
+    def _group_by_date(self, items: List[tuple]) -> Dict[str, List[str]]:
+        grouped: Dict[str, List[str]] = {}
+        for date_key, content, _ in items:
+            grouped.setdefault(date_key, []).append(content)
+        return grouped
+
+    def _extract_content(self, session: Dict) -> str:
+        return session.get("content") or session.get("summary") or session.get("text") or session.get("message") or json.dumps(session)
+
+    def _extract_date(self, session: Dict) -> str:
+        ts = session.get("timestamp") or session.get("date") or session.get("created_at")
+        if ts:
+            try:
+                if isinstance(ts, (int, float)):
+                    return datetime.utcfromtimestamp(ts).strftime("%Y-%m-%d")
+                if isinstance(ts, str):
+                    t = ts.replace("Z", "")
+                    return datetime.fromisoformat(t).strftime("%Y-%m-%d")
+            except Exception:
+                pass
+        return datetime.utcnow().strftime("%Y-%m-%d")
+
+    def _archive_file(self, sessions_file: str, archive_dir: str):
+        try:
+            name = os.path.basename(sessions_file)
+            archive_path = os.path.join(archive_dir, name)
+            if os.path.abspath(archive_path) != os.path.abspath(sessions_file):
+                with open(sessions_file, "r", encoding="utf-8") as src, open(archive_path, "w", encoding="utf-8") as dst:
+                    dst.write(src.read())
+        except Exception as e:
+            print(f"Archive error: {e}")
+
+    def _load_state(self, state_path: str) -> Dict:
+        if os.path.exists(state_path):
+            try:
+                with open(state_path, "r", encoding="utf-8") as f:
+                    return json.load(f)
+            except Exception:
+                return {}
+        return {}
+
+    def _save_state(self, state_path: str, state: Dict):
+        os.makedirs(os.path.dirname(state_path), exist_ok=True)
+        with open(state_path, "w", encoding="utf-8") as f:
+            json.dump(state, f)
+
+    def _chunk_and_store(self, text: str, source: str):
+        chunks = []
+        start = 0
+        size = self.chunk_size
+        overlap = self.chunk_overlap
+        while start < len(text):
+            end = start + size
+            chunks.append(text[start:end])
+            start += max(size - overlap, 1)
+        for chunk in chunks:
+            meta = MemoryMetadata(
+                type="daily_log",
+                date=datetime.utcnow().isoformat() + "Z",
+                agent="openclaw",
+                source_file=source
+            )
+            self.semantic_memory.add_memory(chunk, meta)
