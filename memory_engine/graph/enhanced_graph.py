@@ -1,7 +1,9 @@
+import json
 import logging
+import os
 import threading
 from collections import defaultdict
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Set, Tuple
 
@@ -37,8 +39,14 @@ class GraphPath:
 
 
 class EnhancedMemoryGraph:
-    def __init__(self, config: dict = None):
+    def __init__(self, config: dict = None, graph_path: str = None):
         config = config or {}
+        
+        if graph_path is None:
+            from ..config import get_openclaw_base_path
+            base_path = get_openclaw_base_path()
+            graph_path = os.path.join(base_path, "knowledge_graph.json")
+        self.graph_path = os.path.expanduser(graph_path)
         
         self._nodes: Dict[str, GraphNode] = {}
         self._edges: Dict[Tuple[str, str], GraphEdge] = {}
@@ -50,6 +58,9 @@ class EnhancedMemoryGraph:
         
         self.max_path_length = config.get("max_path_length", 5)
         self.min_edge_weight = config.get("min_edge_weight", 0.1)
+        
+        os.makedirs(os.path.dirname(self.graph_path), exist_ok=True)
+        self._load()
 
     def add_node(
         self,
@@ -66,6 +77,7 @@ class EnhancedMemoryGraph:
                     node.memory_ids.append(memory_id)
                 if attributes:
                     node.attributes.update(attributes)
+                self._save()
                 return node
             
             node = GraphNode(
@@ -85,6 +97,7 @@ class EnhancedMemoryGraph:
             if memory_id:
                 self._memory_index[memory_id].add(node_id)
             
+            self._save()
             return node
 
     def add_edge(
@@ -109,6 +122,7 @@ class EnhancedMemoryGraph:
                     edge.evidence.append(evidence)
                 if attributes:
                     edge.attributes.update(attributes)
+                self._save()
                 return edge
             
             edge = GraphEdge(
@@ -121,6 +135,7 @@ class EnhancedMemoryGraph:
             )
             
             self._edges[edge_key] = edge
+            self._save()
             return edge
 
     def get_node(self, node_id: str) -> Optional[GraphNode]:
@@ -371,6 +386,88 @@ class EnhancedMemoryGraph:
                 del self._edges[key]
             
             del self._nodes[node_id]
+            self._save()
+
+    def _save(self):
+        try:
+            data = {
+                "nodes": [
+                    {
+                        "id": node.id,
+                        "node_type": node.node_type,
+                        "name": node.name,
+                        "attributes": node.attributes,
+                        "memory_ids": node.memory_ids,
+                        "created_at": node.created_at
+                    }
+                    for node in self._nodes.values()
+                ],
+                "edges": [
+                    {
+                        "source_id": edge.source_id,
+                        "target_id": edge.target_id,
+                        "relation_type": edge.relation_type,
+                        "weight": edge.weight,
+                        "attributes": edge.attributes,
+                        "evidence": edge.evidence
+                    }
+                    for edge in self._edges.values()
+                ]
+            }
+            
+            temp_path = self.graph_path + ".tmp"
+            with open(temp_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            os.replace(temp_path, self.graph_path)
+        except Exception as e:
+            logger.error(f"Failed to save graph: {e}")
+
+    def _load(self):
+        if not os.path.exists(self.graph_path):
+            return
+        
+        try:
+            with open(self.graph_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            
+            for node_data in data.get("nodes", []):
+                node = GraphNode(
+                    id=node_data["id"],
+                    node_type=node_data["node_type"],
+                    name=node_data["name"],
+                    attributes=node_data.get("attributes", {}),
+                    memory_ids=node_data.get("memory_ids", []),
+                    created_at=node_data.get("created_at", datetime.now(timezone.utc).timestamp())
+                )
+                self._nodes[node.id] = node
+                self._type_index[node.node_type].add(node.id)
+                self._node_index[node.name.lower()].add(node.id)
+                for memory_id in node.memory_ids:
+                    self._memory_index[memory_id].add(node.id)
+            
+            for edge_data in data.get("edges", []):
+                edge = GraphEdge(
+                    source_id=edge_data["source_id"],
+                    target_id=edge_data["target_id"],
+                    relation_type=edge_data["relation_type"],
+                    weight=edge_data.get("weight", 1.0),
+                    attributes=edge_data.get("attributes", {}),
+                    evidence=edge_data.get("evidence", [])
+                )
+                self._edges[(edge.source_id, edge.target_id)] = edge
+            
+            logger.info(f"Loaded graph with {len(self._nodes)} nodes and {len(self._edges)} edges")
+        except Exception as e:
+            logger.error(f"Failed to load graph: {e}")
+
+    def clear(self):
+        with self._lock:
+            self._nodes.clear()
+            self._edges.clear()
+            self._node_index.clear()
+            self._type_index.clear()
+            self._memory_index.clear()
+            self._save()
 
     def get_stats(self) -> Dict[str, Any]:
         with self._lock:

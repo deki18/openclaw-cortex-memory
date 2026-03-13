@@ -291,68 +291,131 @@ class InformationDensityCalculator:
 
 class AutoTagger:
     CATEGORY_KEYWORDS = {
-        # 操作指南类
-        "instruction": ["how to", "step", "guide", "tutorial", "方法", "步骤", "教程", "操作", "流程", "配置", "安装", "部署"],
+        "instruction": [
+            "how to", "step", "guide", "tutorial", "walkthrough", "procedure",
+            "方法", "步骤", "教程", "操作", "流程", "配置", "安装", "部署",
+            "设置", "指南", "说明", "怎么做", "如何"
+        ],
         
-        # 事实定义类
-        "fact": ["is", "are", "was", "were", "means", "定义", "是指", "意思是", "本质", "原理", "特性"],
+        "fact": [
+            "is", "are", "was", "were", "means", "defined as",
+            "定义", "是指", "意思是", "本质", "原理", "特性",
+            "事实", "实际上", "客观"
+        ],
         
-        # 事件记录类
-        "event": ["happened", "occurred", "event", "meeting", "发生", "事件", "会议", "活动", "经历", "访问", "出行"],
+        "event": [
+            "happened", "occurred", "event", "meeting", "appointment", "conference",
+            "会议", "事件", "活动", "日程", "约会", "经历", "访问", "出行",
+            "发生", "举行", "参加", "出席"
+        ],
         
-        # 决策类
-        "decision": ["decided", "chose", "selected", "决定", "选择", "确定", "采用", "选定", "方案", "计划"],
+        "decision": [
+            "decided", "chose", "selected", "determined", "concluded",
+            "决定", "选择", "确定", "采用", "选定", "方案", "计划",
+            "拍板", "定下", "决议", "决策"
+        ],
         
-        # 问题类
-        "problem": ["error", "issue", "problem", "bug", "failed", "错误", "问题", "失败", "异常", "故障", "崩溃", "报错"],
+        "problem": [
+            "error", "issue", "problem", "bug", "failed", "crash", "exception",
+            "错误", "问题", "失败", "异常", "故障", "崩溃", "报错",
+            "无法", "不能", "不工作", "卡住", "死机", "闪退", "报异常"
+        ],
         
-        # 解决方案类
-        "solution": ["solved", "fixed", "resolved", "解决", "修复", "方案", "对策", "处理", "workaround", "绕过"],
+        "solution": [
+            "solved", "fixed", "resolved", "workaround", "patch",
+            "解决", "修复", "方案", "对策", "处理", "绕过", "补丁",
+            "修复了", "解决了", "处理了"
+        ],
         
-        # 知识发现类
-        "knowledge": ["learned", "discovered", "found", "学到", "发现", "了解到", "认识到", "总结", "归纳", "心得"],
+        "knowledge": [
+            "learned", "discovered", "found", "insight", "understanding",
+            "学到", "发现", "了解到", "认识到", "总结", "归纳", "心得",
+            "知识", "学习", "理解", "掌握", "原理", "概念"
+        ],
         
-        # 偏好类
-        "preference": ["prefer", "like", "want", "喜欢", "偏好", "想要", "倾向", "习惯", "推荐", "建议"],
+        "preference": [
+            "prefer", "like", "want", "favorite", "recommend",
+            "喜欢", "偏好", "想要", "倾向", "习惯", "推荐", "建议",
+            "更愿意", "倾向于", "首选"
+        ],
         
-        # 提醒类
-        "reminder": ["remember", "don't forget", "note", "记住", "别忘了", "注意", "提醒", "警告", "alert", "caution"],
+        "reminder": [
+            "remember", "don't forget", "note", "alert", "caution",
+            "记住", "别忘了", "注意", "提醒", "警告", "小心", "留意",
+            "切记", "谨记", "重视"
+        ],
         
-        # 需求类
-        "requirement": ["need", "require", "must", "should", "需求", "需要", "要求", "应该", "必须", "期望"],
+        "requirement": [
+            "need", "require", "must", "should", "necessary",
+            "需求", "需要", "要求", "应该", "必须", "期望", "必要",
+            "不可或缺", "必备条件"
+        ],
         
-        # 目标类
-        "goal": ["goal", "target", "objective", "aim", "目标", "目的", "计划", "规划", "愿景", "里程碑"],
+        "goal": [
+            "goal", "target", "objective", "aim", "milestone",
+            "目标", "目的", "计划", "规划", "愿景", "里程碑",
+            "指标", "方向", "期望达成"
+        ],
         
-        # 进度类
-        "progress": ["progress", "status", "update", "进展", "进度", "状态", "更新", "完成", "进行中", "pending"],
+        "progress": [
+            "progress", "status", "update", "ongoing", "pending",
+            "进展", "进度", "状态", "更新", "完成", "进行中",
+            "已完成", "待处理", "推进"
+        ],
         
-        # 资源类
-        "resource": ["resource", "link", "reference", "material", "资源", "链接", "参考", "资料", "文档", "文献"],
+        "resource": [
+            "resource", "link", "reference", "material", "document",
+            "资源", "链接", "参考", "资料", "文档", "文献",
+            "教程链接", "参考资料", "相关文档"
+        ],
         
-        # 工具类
-        "tool": ["tool", "software", "app", "plugin", "工具", "软件", "应用", "插件", "库", "框架", "framework"],
+        "tool": [
+            "tool", "software", "app", "plugin", "framework", "library",
+            "工具", "软件", "应用", "插件", "库", "框架",
+            "组件", "模块", "扩展"
+        ],
         
-        # 性能类
-        "performance": ["performance", "speed", "optimization", "性能", "速度", "优化", "效率", "延迟", "throughput"],
+        "performance": [
+            "performance", "speed", "optimization", "latency", "throughput",
+            "性能", "速度", "优化", "效率", "延迟", "吞吐量",
+            "响应时间", "加载", "运行速度"
+        ],
         
-        # 安全类
-        "security": ["security", "safe", "protect", "auth", "安全", "保护", "认证", "加密", "权限", "漏洞"],
+        "security": [
+            "security", "safe", "protect", "auth", "permission",
+            "安全", "保护", "认证", "加密", "权限", "漏洞",
+            "防护", "隐私", "风险"
+        ],
         
-        # 设计类
-        "design": ["design", "architecture", "pattern", "设计", "架构", "模式", "结构", "规范", "标准"],
+        "design": [
+            "design", "architecture", "pattern", "structure",
+            "设计", "架构", "模式", "结构", "规范", "标准",
+            "蓝图", "方案设计", "系统设计"
+        ],
         
-        # 测试类
-        "testing": ["test", "testing", "verify", "validate", "测试", "验证", "检查", "确认", "单元测试", "集成测试"],
+        "testing": [
+            "test", "testing", "verify", "validate", "qa",
+            "测试", "验证", "检查", "确认", "单元测试", "集成测试",
+            "回归测试", "测试用例"
+        ],
         
-        # 沟通类
-        "communication": ["discuss", "talk", "chat", "沟通", "讨论", "交流", "对话", "协商", "反馈", "汇报"],
+        "communication": [
+            "discuss", "talk", "chat", "feedback", "report",
+            "沟通", "讨论", "交流", "对话", "协商", "反馈", "汇报",
+            "回复", "通知"
+        ],
         
-        # 数据类
-        "data": ["data", "dataset", "statistics", "数据", "数据集", "统计", "分析", "指标", "图表", "报告"],
+        "data": [
+            "data", "dataset", "statistics", "analysis", "report",
+            "数据", "数据集", "统计", "分析", "指标", "图表", "报告",
+            "数据源", "数据统计"
+        ],
         
-        # 团队类
-        "team": ["team", "member", "collaborate", "团队", "成员", "协作", "合作", "分工", "角色", "职责"]
+        "team": [
+            "team", "member", "collaborate", "partner",
+            "团队", "成员", "协作", "合作", "分工", "角色", "职责",
+            "同事", "伙伴", "项目组"
+        ]
     }
 
     def tag(self, text: str, existing_tags: List[str] = None) -> List[str]:

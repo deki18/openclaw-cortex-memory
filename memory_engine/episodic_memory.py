@@ -24,7 +24,14 @@ class EpisodicMemory:
         self._buffer_size = 10
         os.makedirs(os.path.dirname(self.store_path), exist_ok=True)
 
-    def store_event(self, summary: str, entities: list = None, outcome: str = "", relations: list = None, source_file: str = ""):
+    def store_event(
+        self, 
+        summary: str, 
+        memory_id: str = None,
+        entity_refs: list = None, 
+        outcome: str = "", 
+        source_file: str = ""
+    ):
         if not summary or not summary.strip():
             logger.warning("Empty summary provided, skipping event storage")
             return None
@@ -33,9 +40,9 @@ class EpisodicMemory:
             "id": str(uuid.uuid4()),
             "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
             "summary": summary.strip(),
-            "entities": entities or [],
+            "memory_id": memory_id,
+            "entity_refs": entity_refs or [],
             "outcome": outcome,
-            "relations": relations or [],
             "source_file": source_file
         }
         
