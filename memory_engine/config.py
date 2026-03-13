@@ -23,13 +23,25 @@ DEFAULTS = {
         "url": None,
         "model": None
     },
-    "openclaw_base_path": "~/.openclaw",
-    "lancedb_path": "~/.openclaw/agents/main/lancedb_store",
+    "openclaw_base_path": None,
+    "lancedb_path": None,
     "chunk": {"size": 600, "overlap": 100},
     "time_decay_halflife": 30,
     "promotion_hit_threshold": 3,
     "log_level": "INFO"
 }
+
+
+def get_openclaw_base_path() -> str:
+    config = load_config()
+    base_path = config.get("openclaw_base_path")
+    if base_path:
+        return os.path.expanduser(base_path)
+    if os.environ.get("OPENCLAW_BASE_PATH"):
+        return os.path.expanduser(os.environ["OPENCLAW_BASE_PATH"])
+    home = Path.home()
+    default_path = home / ".openclaw"
+    return str(default_path)
 
 
 def setup_logging(level: str = None):
@@ -85,11 +97,16 @@ def load_config(config_path: str = "config.yaml") -> Dict[str, Any]:
     if os.environ.get("CORTEX_MEMORY_DB_PATH"):
         config["lancedb_path"] = os.environ["CORTEX_MEMORY_DB_PATH"]
     
-    # Optional API keys and endpoints
     if os.environ.get("CORTEX_MEMORY_EMBEDDING_API_KEY"):
         config["embedding_api_key"] = os.environ["CORTEX_MEMORY_EMBEDDING_API_KEY"]
     if os.environ.get("CORTEX_MEMORY_EMBEDDING_BASE_URL"):
         config["embedding_base_url"] = os.environ["CORTEX_MEMORY_EMBEDDING_BASE_URL"]
+    if os.environ.get("CORTEX_MEMORY_EMBEDDING_DIMENSIONS"):
+        config["embedding_dimensions"] = int(os.environ["CORTEX_MEMORY_EMBEDDING_DIMENSIONS"])
+    if os.environ.get("CORTEX_MEMORY_LLM_API_KEY"):
+        config["llm_api_key"] = os.environ["CORTEX_MEMORY_LLM_API_KEY"]
+    if os.environ.get("CORTEX_MEMORY_LLM_BASE_URL"):
+        config["llm_base_url"] = os.environ["CORTEX_MEMORY_LLM_BASE_URL"]
     if os.environ.get("CORTEX_MEMORY_RERANKER_API_KEY"):
         config["reranker_api_key"] = os.environ["CORTEX_MEMORY_RERANKER_API_KEY"]
     if os.environ.get("CORTEX_MEMORY_RERANKER_ENDPOINT"):

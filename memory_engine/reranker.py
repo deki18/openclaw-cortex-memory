@@ -37,7 +37,7 @@ class Reranker:
         }
         
         try:
-            response = requests.post(self.url, json=payload, headers=headers, timeout=8)
+            response = requests.post(self.url, json=payload, headers=headers, timeout=30)
             response.raise_for_status()
             data = response.json()
             

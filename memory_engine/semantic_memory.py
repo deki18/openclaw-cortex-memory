@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from typing import List, Optional
 
 from .embedding import EmbeddingModule
-from .lancedb_store import LanceDBStore, OpenClawMemory
+from .lancedb_store import LanceDBStore, get_memory_model
 from .metadata_schema import MemoryMetadata
 
 logger = logging.getLogger(__name__)
@@ -19,7 +19,8 @@ class SemanticMemory:
         doc_id = str(uuid.uuid4())
         embedding = self.embedding_module.embed_text([text])[0]
         
-        memory = OpenClawMemory(
+        MemoryModel = get_memory_model()
+        memory = MemoryModel(
             id=doc_id,
             vector=embedding,
             text=text,
@@ -45,7 +46,7 @@ class SemanticMemory:
         top_k: int = 10,
         query_type: str = "hybrid",
         memory_type: Optional[str] = None
-    ) -> List[OpenClawMemory]:
+    ) -> List:
         embedding = self.embedding_module.embed_text([query])[0]
         return self.store.search(
             query_vector=embedding,
@@ -55,7 +56,7 @@ class SemanticMemory:
             memory_type=memory_type
         )
 
-    def get_by_id(self, memory_id: str) -> Optional[OpenClawMemory]:
+    def get_by_id(self, memory_id: str) -> Optional:
         return self.store.get_by_id(memory_id)
 
     def update_hit_count(self, memory_id: str, increment: int = 1):
@@ -64,16 +65,19 @@ class SemanticMemory:
     def delete_by_id(self, memory_id: str):
         self.store.delete_by_id(memory_id)
 
+    def update_memory(self, memory_id: str, updates: dict):
+        self.store.update_memory(memory_id, updates)
+
     def count(self) -> int:
         return self.store.count()
 
     def count_by_type(self, memory_type: str) -> int:
         return self.store.count_by_type(memory_type)
 
-    def list_all(self, limit: int = 100) -> List[OpenClawMemory]:
-        return self.store.list_all(limit)
+    def list_all(self, limit: int = 100, offset: int = 0) -> List:
+        return self.store.list_all(limit, offset)
 
-    def get_core_rules(self, limit: int = 50) -> List[OpenClawMemory]:
+    def get_core_rules(self, limit: int = 50) -> List:
         return self.store.get_core_rules(limit)
 
     def search_by_date_range(
@@ -81,5 +85,5 @@ class SemanticMemory:
         start_date: str,
         end_date: str,
         limit: int = 100
-    ) -> List[OpenClawMemory]:
+    ) -> List:
         return self.store.search_by_date_range(start_date, end_date, limit)

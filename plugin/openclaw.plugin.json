@@ -134,6 +134,71 @@
         "type": "object",
         "properties": {}
       }
+    },
+    {
+      "name": "delete_memory",
+      "description": "Delete a specific memory by ID",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "memory_id": {
+            "type": "string",
+            "description": "Memory ID to delete"
+          }
+        },
+        "required": ["memory_id"]
+      }
+    },
+    {
+      "name": "update_memory",
+      "description": "Update a specific memory's content, type, or weight",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "memory_id": {
+            "type": "string",
+            "description": "Memory ID to update"
+          },
+          "text": {
+            "type": "string",
+            "description": "New text content"
+          },
+          "type": {
+            "type": "string",
+            "description": "New memory type"
+          },
+          "weight": {
+            "type": "number",
+            "description": "New weight value"
+          }
+        },
+        "required": ["memory_id"]
+      }
+    },
+    {
+      "name": "cleanup_memories",
+      "description": "Clean up old memories beyond specified days",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "days_old": {
+            "type": "number",
+            "description": "Delete memories older than this many days (default: 90)"
+          },
+          "memory_type": {
+            "type": "string",
+            "description": "Only clean up memories of this type"
+          }
+        }
+      }
+    },
+    {
+      "name": "diagnostics",
+      "description": "Run system diagnostics to check configuration and connectivity",
+      "parameters": {
+        "type": "object",
+        "properties": {}
+      }
     }
   ],
   "config": {

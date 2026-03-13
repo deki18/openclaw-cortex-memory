@@ -14,6 +14,8 @@ interface EmbeddingConfig {
 interface LLMConfig {
   provider: string;
   model: string;
+  apiKey?: string;
+  baseURL?: string;
 }
 
 interface RerankerConfig {
@@ -55,6 +57,10 @@ interface OpenClawPluginApi {
     event: string;
     handler: (payload: unknown, context: ToolContext) => Promise<void>;
   }): void;
+  registerGatewayMethod?(method: string, handler: Function): void;
+  registerHttpRoute?(path: string, handler: Function): void;
+  registerCli?(registerFn: Function, metadata: Record<string, unknown>): void;
+  registerService?(service: { id: string; start: Function; stop: Function }): void;
   getLogger(): {
     info: (message: string, ...args: unknown[]) => void;
     warn: (message: string, ...args: unknown[]) => void;
@@ -145,6 +151,15 @@ async function startPythonService(): Promise<void> {
   if (config.embedding.baseURL) {
     env.CORTEX_MEMORY_EMBEDDING_BASE_URL = config.embedding.baseURL;
   }
+  if (config.embedding.dimensions) {
+    env.CORTEX_MEMORY_EMBEDDING_DIMENSIONS = String(config.embedding.dimensions);
+  }
+  if (config.llm.apiKey) {
+    env.CORTEX_MEMORY_LLM_API_KEY = config.llm.apiKey;
+  }
+  if (config.llm.baseURL) {
+    env.CORTEX_MEMORY_LLM_BASE_URL = config.llm.baseURL;
+  }
   if (config.reranker.apiKey) {
     env.CORTEX_MEMORY_RERANKER_API_KEY = config.reranker.apiKey;
   }
@@ -194,9 +209,9 @@ async function startPythonService(): Promise<void> {
     setTimeout(() => {
       if (!started) {
         pythonProcess?.kill();
-        reject(new Error("Timeout waiting for Python service to start"));
+        reject(new Error("Timeout waiting for Python service to start (300s)"));
       }
-    }, 30000);
+    }, 300000);
   });
 }
 
@@ -348,6 +363,64 @@ async function promoteMemory(_args: Record<string, unknown>, _context: ToolConte
   }
 }
 
+async function deleteMemory(args: { memory_id: string }, _context: ToolContext): Promise<ToolResult> {
+  try {
+    const result = await apiCall<{ deleted_id: string }>(`/memory/${args.memory_id}`, "DELETE");
+    return { success: true, data: { deletedId: result.deleted_id } };
+  } catch (error) {
+    const message = formatApiError(error);
+    logger.error(`delete_memory failed: ${message}`);
+    return { success: false, error: message };
+  }
+}
+
+async function updateMemory(
+  args: { memory_id: string; text?: string; type?: string; weight?: number },
+  _context: ToolContext
+): Promise<ToolResult> {
+  try {
+    const result = await apiCall<{ memory_id: string }>(`/memory/${args.memory_id}`, "PATCH", {
+      text: args.text,
+      type: args.type,
+      weight: args.weight,
+    });
+    return { success: true, data: { memoryId: result.memory_id } };
+  } catch (error) {
+    const message = formatApiError(error);
+    logger.error(`update_memory failed: ${message}`);
+    return { success: false, error: message };
+  }
+}
+
+async function cleanupMemories(args: { days_old?: number; memory_type?: string }, _context: ToolContext): Promise<ToolResult> {
+  try {
+    const result = await apiCall<{ deleted_count: number }>("/cleanup", "POST", {
+      days_old: args.days_old || 90,
+      memory_type: args.memory_type,
+    });
+    return { success: true, data: { deletedCount: result.deleted_count } };
+  } catch (error) {
+    const message = formatApiError(error);
+    logger.error(`cleanup_memories failed: ${message}`);
+    return { success: false, error: message };
+  }
+}
+
+async function runDiagnostics(_args: Record<string, unknown>, _context: ToolContext): Promise<ToolResult> {
+  try {
+    const result = await apiCall<{
+      status: string;
+      checks: Array<{ name: string; passed: boolean; message: string }>;
+      recommendations: string[];
+    }>("/doctor", "GET");
+    return { success: true, data: result };
+  } catch (error) {
+    const message = formatApiError(error);
+    logger.error(`diagnostics failed: ${message}`);
+    return { success: false, error: message };
+  }
+}
+
 async function onMessageHandler(payload: unknown, context: ToolContext): Promise<void> {
   const data = payload as { content?: string; text?: string; source?: string };
   const text = data.content || data.text;
@@ -489,6 +562,53 @@ export async function register(api: OpenClawPluginApi, userConfig?: Partial<Cort
     description: "Promote frequently accessed memories to core rules",
     parameters: { type: "object", properties: {} },
     execute: async ({ args, context }) => promoteMemory(args, context),
+  });
+
+  api.registerTool({
+    name: "delete_memory",
+    description: "Delete a specific memory by ID",
+    parameters: {
+      type: "object",
+      properties: { memory_id: { type: "string", description: "Memory ID to delete" } },
+      required: ["memory_id"],
+    },
+    execute: async ({ args, context }) => deleteMemory(args as { memory_id: string }, context),
+  });
+
+  api.registerTool({
+    name: "update_memory",
+    description: "Update a specific memory's content, type, or weight",
+    parameters: {
+      type: "object",
+      properties: {
+        memory_id: { type: "string", description: "Memory ID to update" },
+        text: { type: "string", description: "New text content" },
+        type: { type: "string", description: "New memory type" },
+        weight: { type: "number", description: "New weight value" },
+      },
+      required: ["memory_id"],
+    },
+    execute: async ({ args, context }) => updateMemory(args as { memory_id: string; text?: string; type?: string; weight?: number }, context),
+  });
+
+  api.registerTool({
+    name: "cleanup_memories",
+    description: "Clean up old memories beyond specified days",
+    parameters: {
+      type: "object",
+      properties: {
+        days_old: { type: "number", description: "Delete memories older than this many days (default: 90)" },
+        memory_type: { type: "string", description: "Only clean up memories of this type" },
+      },
+    },
+    execute: async ({ args, context }) => cleanupMemories(args as { days_old?: number; memory_type?: string }, context),
+  });
+
+  api.registerTool({
+    name: "diagnostics",
+    description: "Run system diagnostics to check configuration and connectivity",
+    parameters: { type: "object", properties: {} },
+    execute: async ({ args, context }) => runDiagnostics(args, context),
   });
 
   api.registerHook({ event: "message", handler: onMessageHandler });

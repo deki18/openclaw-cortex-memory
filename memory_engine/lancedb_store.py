@@ -8,7 +8,8 @@ from lancedb.pydantic import LanceModel, Vector
 
 logger = logging.getLogger(__name__)
 
-VECTOR_DIM = 3072
+DEFAULT_VECTOR_DIM = 3072
+VECTOR_DIM = None
 
 VALID_MEMORY_TYPES = {"core_rule", "daily_log", "event", "episodic", "procedural"}
 ID_PATTERN = re.compile(r'^[a-zA-Z0-9_-]+$')
@@ -31,53 +32,113 @@ def _validate_memory_type(memory_type: str) -> bool:
     return memory_type in VALID_MEMORY_TYPES
 
 
-class OpenClawMemory(LanceModel):
-    id: str
-    vector: Vector(VECTOR_DIM)
-    text: str
-    type: str
-    date: str
-    agent: str
-    source_file: Optional[str] = None
-    hit_count: int = 0
-    weight: int = 1
-
-    class Config:
-        extra = "allow"
-
-
-def get_lancedb_path() -> str:
+def get_vector_dim() -> int:
+    global VECTOR_DIM
+    if VECTOR_DIM is not None:
+        return VECTOR_DIM
     from .config import CONFIG
-    return os.path.expanduser(CONFIG.get("lancedb_path", "~/.openclaw/agents/main/lancedb_store"))
+    VECTOR_DIM = CONFIG.get("embedding_dimensions", DEFAULT_VECTOR_DIM)
+    return VECTOR_DIM
+
+
+def create_memory_model(vector_dim: int):
+    class OpenClawMemory(LanceModel):
+        id: str
+        vector: Vector(vector_dim)
+        text: str
+        type: str
+        date: str
+        agent: str
+        source_file: Optional[str] = None
+        hit_count: int = 0
+        weight: int = 1
+
+        class Config:
+            extra = "allow"
+    
+    return OpenClawMemory
+
+
+OpenClawMemory = None
+
+
+def get_memory_model():
+    global OpenClawMemory
+    if OpenClawMemory is None:
+        OpenClawMemory = create_memory_model(get_vector_dim())
+    return OpenClawMemory
+
+
+def get_db_path() -> str:
+    from .config import CONFIG, get_openclaw_base_path
+    if CONFIG.get("lancedb_path"):
+        return os.path.expanduser(CONFIG.get("lancedb_path"))
+    base_path = get_openclaw_base_path()
+    return os.path.join(base_path, "agents", "main", "lancedb_store")
 
 
 class LanceDBStore:
     def __init__(self, db_path: Optional[str] = None):
-        self.db_path = db_path or get_lancedb_path()
+        self.db_path = db_path or get_db_path()
         os.makedirs(self.db_path, exist_ok=True)
         self.db = lancedb.connect(self.db_path)
         self.table_name = "memories"
+        self._fts_indexed = False
         self._ensure_table()
 
     def _ensure_table(self):
         if self.table_name not in self.db.table_names():
-            self.db.create_table(self.table_name, schema=OpenClawMemory)
+            MemoryModel = get_memory_model()
+            self.db.create_table(self.table_name, schema=MemoryModel)
             logger.info(f"Created LanceDB table: {self.table_name}")
 
     def _get_table(self):
         return self.db.open_table(self.table_name)
 
-    def add_memories(self, memories: List[OpenClawMemory]):
+    def add_memories(self, memories: List):
         if not memories:
             return
         table = self._get_table()
         try:
-            table.add([m.model_dump() for m in memories])
-            self._ensure_fts_index()
-            logger.info(f"Added {len(memories)} memories to LanceDB")
+            unique_memories = []
+            for memory in memories:
+                existing = self._find_similar_memory(memory.text, threshold=0.95)
+                if not existing:
+                    unique_memories.append(memory)
+                else:
+                    logger.debug(f"Skipping duplicate memory: {memory.text[:50]}...")
+            
+            if unique_memories:
+                table.add([m.model_dump() for m in unique_memories])
+                if not self._fts_indexed:
+                    self._ensure_fts_index()
+                    self._fts_indexed = True
+                logger.info(f"Added {len(unique_memories)} memories to LanceDB (skipped {len(memories) - len(unique_memories)} duplicates)")
         except Exception as e:
             logger.error(f"Failed to add memories: {e}")
             raise
+
+    def _find_similar_memory(self, text: str, threshold: float = 0.95):
+        table = self._get_table()
+        try:
+            results = table.search(text).limit(1).to_list()
+            if results:
+                existing_text = results[0].get("text", "")
+                similarity = self._text_similarity(text, existing_text)
+                if similarity >= threshold:
+                    return results[0]
+        except Exception:
+            pass
+        return None
+
+    def _text_similarity(self, text1: str, text2: str) -> float:
+        text1_words = set(text1.lower().split())
+        text2_words = set(text2.lower().split())
+        if not text1_words or not text2_words:
+            return 0.0
+        intersection = text1_words & text2_words
+        union = text1_words | text2_words
+        return len(intersection) / len(union)
 
     def _ensure_fts_index(self):
         table = self._get_table()
@@ -93,7 +154,8 @@ class LanceDBStore:
         limit: int = 10,
         query_type: str = "hybrid",
         memory_type: Optional[str] = None,
-    ) -> List[OpenClawMemory]:
+    ) -> List:
+        MemoryModel = get_memory_model()
         table = self._get_table()
         try:
             if query_type == "hybrid":
@@ -114,7 +176,7 @@ class LanceDBStore:
                     return []
                 query_builder = query_builder.where(f"type = '{_escape_sql_string(memory_type)}'")
             
-            return query_builder.to_pydantic(OpenClawMemory)
+            return query_builder.to_pydantic(MemoryModel)
         except Exception as e:
             logger.error(f"Search failed: {e}")
             return []
@@ -124,7 +186,8 @@ class LanceDBStore:
         start_date: str,
         end_date: str,
         limit: int = 100
-    ) -> List[OpenClawMemory]:
+    ) -> List:
+        MemoryModel = get_memory_model()
         if not _validate_date(start_date) or not _validate_date(end_date):
             logger.warning(f"Invalid date format: {start_date} or {end_date}")
             return []
@@ -134,26 +197,28 @@ class LanceDBStore:
                 table.search()
                 .where(f"date >= '{_escape_sql_string(start_date)}' AND date <= '{_escape_sql_string(end_date)}'")
                 .limit(limit)
-                .to_pydantic(OpenClawMemory)
+                .to_pydantic(MemoryModel)
             )
         except Exception as e:
             logger.error(f"Date range search failed: {e}")
             return []
 
-    def get_core_rules(self, limit: int = 50) -> List[OpenClawMemory]:
+    def get_core_rules(self, limit: int = 50) -> List:
+        MemoryModel = get_memory_model()
         table = self._get_table()
         try:
             return (
                 table.search()
                 .where("type = 'core_rule'")
                 .limit(limit)
-                .to_pydantic(OpenClawMemory)
+                .to_pydantic(MemoryModel)
             )
         except Exception as e:
             logger.error(f"Failed to get core rules: {e}")
             return []
 
-    def get_by_id(self, memory_id: str) -> Optional[OpenClawMemory]:
+    def get_by_id(self, memory_id: str) -> Optional:
+        MemoryModel = get_memory_model()
         if not _validate_id(memory_id):
             logger.warning(f"Invalid memory_id format: {memory_id}")
             return None
@@ -163,7 +228,7 @@ class LanceDBStore:
                 table.search()
                 .where(f"id = '{_escape_sql_string(memory_id)}'")
                 .limit(1)
-                .to_pydantic(OpenClawMemory)
+                .to_pydantic(MemoryModel)
             )
             return results[0] if results else None
         except Exception as e:
@@ -194,6 +259,20 @@ class LanceDBStore:
         except Exception as e:
             logger.error(f"Failed to delete memory: {e}")
 
+    def update_memory(self, memory_id: str, updates: dict):
+        if not _validate_id(memory_id):
+            logger.warning(f"Invalid memory_id format: {memory_id}")
+            return
+        table = self._get_table()
+        try:
+            valid_fields = {"text", "type", "weight", "hit_count", "source_file"}
+            filtered_updates = {k: v for k, v in updates.items() if k in valid_fields}
+            if filtered_updates:
+                table.update(where=f"id = '{_escape_sql_string(memory_id)}'", values=filtered_updates)
+                logger.info(f"Updated memory: {memory_id}")
+        except Exception as e:
+            logger.error(f"Failed to update memory: {e}")
+
     def count(self) -> int:
         table = self._get_table()
         return table.count_rows()
@@ -204,15 +283,17 @@ class LanceDBStore:
             return 0
         table = self._get_table()
         try:
-            return len(table.search().where(f"type = '{_escape_sql_string(memory_type)}'").to_pydantic(OpenClawMemory))
+            return len(table.search().where(f"type = '{_escape_sql_string(memory_type)}'").limit(10000).to_pandas())
         except Exception as e:
             logger.error(f"Failed to count by type: {e}")
             return 0
 
-    def list_all(self, limit: int = 100) -> List[OpenClawMemory]:
+    def list_all(self, limit: int = 100, offset: int = 0) -> List:
+        MemoryModel = get_memory_model()
         table = self._get_table()
         try:
-            return table.search().limit(limit).to_pydantic(OpenClawMemory)
+            results = table.search().limit(limit + offset).to_pydantic(MemoryModel)
+            return results[offset:] if offset > 0 else results
         except Exception as e:
             logger.error(f"Failed to list memories: {e}")
             return []

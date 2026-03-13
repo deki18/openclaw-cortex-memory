@@ -40,10 +40,10 @@ try {
   console.log('[Cortex Memory] Setup complete!');
   console.log('');
   console.log('Next steps:');
-  console.log('  1. Edit config.yaml to set your models');
-  console.log('  2. Set OPENAI_API_KEY environment variable');
-  console.log('  3. Run: npm run start');
-  console.log('  4. Install to OpenClaw: openclaw plugins install .');
+  console.log('  1. Add plugin config to your openclaw.json (see SKILL.md for example)');
+  console.log('  2. Set required API keys (OPENAI_API_KEY, etc.)');
+  console.log('  3. Run: openclaw gateway restart');
+  console.log('');
 } catch (error) {
   console.error('[ERROR] Setup failed:', error.message);
   process.exit(1);

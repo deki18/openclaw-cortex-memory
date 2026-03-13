@@ -39,14 +39,18 @@ class EmbeddingModule:
     def __init__(self):
         self.provider = CONFIG.get("embedding_provider")
         self.model = CONFIG.get("embedding_model")
+        self.dimensions = CONFIG.get("embedding_dimensions", 3072)
         if not self.provider or not self.model:
             logger.warning("embedding provider and model not configured")
         
+    def _get_cache_key(self, text: str) -> str:
+        return f"{self.provider}:{self.model}:{text}"
+    
     @lru_cache(maxsize=1000)
-    def _embed_single(self, text: str) -> tuple:
+    def _embed_single_cached(self, cache_key: str, text: str) -> tuple:
         client = _get_client()
         if not client or not self.model:
-            return tuple([0.0] * 3072)
+            return tuple([0.0] * self.dimensions)
         try:
             response = client.embeddings.create(
                 input=text,
@@ -55,12 +59,13 @@ class EmbeddingModule:
             return tuple(response.data[0].embedding)
         except Exception as e:
             logger.error(f"Embedding error: {e}")
-            return tuple([0.0] * 3072)
+            return tuple([0.0] * self.dimensions)
 
     def embed_text(self, texts: List[str]) -> List[List[float]]:
         embeddings = []
         for text in texts:
-            emb = self._embed_single(text)
+            cache_key = self._get_cache_key(text)
+            emb = self._embed_single_cached(cache_key, text)
             embeddings.append(list(emb))
         return embeddings
     

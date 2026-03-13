@@ -8,7 +8,10 @@ logger = logging.getLogger(__name__)
 
 
 class HotMemory:
-    def __init__(self, base_dir: str = "~/.openclaw"):
+    def __init__(self, base_dir=None):
+        if base_dir is None:
+            from .config import get_openclaw_base_path
+            base_dir = get_openclaw_base_path()
         self.base_dir = os.path.expanduser(base_dir)
         self.soul_path = os.path.join(self.base_dir, "workspace", "SOUL.md")
         self.local_soul_path = os.path.join(os.path.dirname(__file__), "..", "data", "memory", "SOUL.md")

@@ -25,7 +25,11 @@ def _safe_path(rules_dir: str, rule_name: str) -> str:
 
 
 class ProceduralMemory:
-    def __init__(self, rules_dir="~/.openclaw/workspace/procedures"):
+    def __init__(self, rules_dir=None):
+        if rules_dir is None:
+            from .config import get_openclaw_base_path
+            base_path = get_openclaw_base_path()
+            rules_dir = os.path.join(base_path, "workspace", "procedures")
         self.rules_dir = os.path.expanduser(rules_dir)
         os.makedirs(self.rules_dir, exist_ok=True)
 

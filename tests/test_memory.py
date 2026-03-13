@@ -2,8 +2,8 @@ import unittest
 from memory_engine.metadata_schema import MemoryMetadata
 from memory_engine.embedding import EmbeddingModule
 from memory_engine.reranker import Reranker
-from memory_engine.config import CONFIG, validate_config, check_environment
-from memory_engine.lancedb_store import OpenClawMemory, VECTOR_DIM
+from memory_engine.config import CONFIG, validate_config
+from memory_engine.lancedb_store import get_memory_model, DEFAULT_VECTOR_DIM
 
 
 class TestMemorySystem(unittest.TestCase):
@@ -30,15 +30,11 @@ class TestMemorySystem(unittest.TestCase):
         warnings = validate_config(CONFIG)
         self.assertIsInstance(warnings, list)
 
-    def test_environment_check(self):
-        issues = check_environment()
-        self.assertIsInstance(issues, list)
-
     def test_embedding_fallback(self):
         emb = EmbeddingModule()
         res = emb.embed_text(["test"])
         self.assertEqual(len(res), 1)
-        self.assertEqual(len(res[0]), VECTOR_DIM)
+        self.assertEqual(len(res[0]), emb.dimensions)
 
     def test_embedding_is_available(self):
         emb = EmbeddingModule()
@@ -60,9 +56,10 @@ class TestMemorySystem(unittest.TestCase):
         self.assertEqual(res, [])
 
     def test_openclaw_memory_schema(self):
-        memory = OpenClawMemory(
+        MemoryModel = get_memory_model()
+        memory = MemoryModel(
             id="test-id",
-            vector=[0.0] * VECTOR_DIM,
+            vector=[0.0] * DEFAULT_VECTOR_DIM,
             text="test memory",
             type="daily_log",
             date="2023-01-01",
@@ -75,9 +72,10 @@ class TestMemorySystem(unittest.TestCase):
         self.assertEqual(memory.weight, 1)
 
     def test_openclaw_memory_optional_fields(self):
-        memory = OpenClawMemory(
+        MemoryModel = get_memory_model()
+        memory = MemoryModel(
             id="test-id",
-            vector=[0.0] * VECTOR_DIM,
+            vector=[0.0] * DEFAULT_VECTOR_DIM,
             text="test memory",
             type="core_rule",
             date="2023-01-01",
@@ -91,9 +89,10 @@ class TestMemorySystem(unittest.TestCase):
         self.assertEqual(memory.weight, 10)
 
     def test_openclaw_memory_model_dump(self):
-        memory = OpenClawMemory(
+        MemoryModel = get_memory_model()
+        memory = MemoryModel(
             id="test-id",
-            vector=[0.0] * VECTOR_DIM,
+            vector=[0.0] * DEFAULT_VECTOR_DIM,
             text="test memory",
             type="daily_log",
             date="2023-01-01",
@@ -105,8 +104,8 @@ class TestMemorySystem(unittest.TestCase):
         self.assertEqual(dumped["type"], "daily_log")
         self.assertIn("vector", dumped)
 
-    def test_vector_dim_constant(self):
-        self.assertEqual(VECTOR_DIM, 3072)
+    def test_default_vector_dim(self):
+        self.assertEqual(DEFAULT_VECTOR_DIM, 3072)
 
 
 class TestRetrievalPipeline(unittest.TestCase):

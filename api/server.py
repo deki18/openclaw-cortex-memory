@@ -39,7 +39,7 @@ class QueryGraphRequest(BaseModel):
 
 
 class ImportRequest(BaseModel):
-    path: str = "~/.openclaw"
+    path: str = None
 
 
 class DateRangeRequest(BaseModel):
@@ -58,7 +58,8 @@ async def lifespan(app: FastAPI):
     config = load_config()
     errors = validate_config(config)
     if errors:
-        logger.warning(f"Configuration warnings: {errors}")
+        for err in errors:
+            logger.warning(f"Configuration warning: {err}")
     controller = MemoryController()
     logger.info("Cortex Memory API started")
     yield
@@ -75,16 +76,45 @@ app = FastAPI(
 
 def validate_config(config: Dict[str, Any]) -> List[str]:
     errors = []
+    if not config.get("embedding_provider"):
+        errors.append("embedding.provider is required in openclaw.json (e.g., 'openai', 'openai-compatible')")
     if not config.get("embedding_model"):
-        errors.append("embedding_model is not configured")
+        errors.append("embedding.model is required in openclaw.json (e.g., 'text-embedding-3-large')")
+    if not config.get("llm_provider"):
+        errors.append("llm.provider is required in openclaw.json (e.g., 'openai')")
     if not config.get("llm_model"):
-        errors.append("llm_model is not configured")
+        errors.append("llm.model is required in openclaw.json (e.g., 'gpt-4')")
     return errors
 
 
 @app.get("/health")
 async def health_check():
-    return {"status": "ok", "service": "cortex-memory-api", "version": "2.0.0"}
+    health_status = {
+        "status": "ok",
+        "service": "cortex-memory-api",
+        "version": "2.0.0",
+        "checks": {}
+    }
+    
+    try:
+        from memory_engine.config import CONFIG
+        health_status["checks"]["embedding_configured"] = bool(CONFIG.get("embedding_model"))
+        health_status["checks"]["llm_configured"] = bool(CONFIG.get("llm_model"))
+        health_status["checks"]["reranker_configured"] = bool(CONFIG.get("reranker_api", {}).get("model"))
+        health_status["checks"]["db_path"] = CONFIG.get("lancedb_path", "not set")
+    except Exception as e:
+        health_status["checks"]["config_load"] = f"error: {str(e)}"
+    
+    if controller:
+        try:
+            health_status["checks"]["database"] = "connected"
+            health_status["checks"]["total_memories"] = controller.semantic.count()
+        except Exception as e:
+            health_status["checks"]["database"] = f"error: {str(e)}"
+    else:
+        health_status["checks"]["controller"] = "not initialized"
+    
+    return health_status
 
 
 @app.get("/config")
@@ -110,6 +140,86 @@ async def get_status():
             "daily_logs": daily_logs_count
         }
     }
+
+
+@app.get("/doctor")
+async def run_diagnostics():
+    diagnostics = {
+        "status": "running",
+        "checks": [],
+        "recommendations": []
+    }
+    
+    def add_check(name: str, passed: bool, message: str, fix: str = None):
+        diagnostics["checks"].append({
+            "name": name,
+            "passed": passed,
+            "message": message
+        })
+        if not passed and fix:
+            diagnostics["recommendations"].append(fix)
+    
+    add_check(
+        "Config Loading",
+        True,
+        "Configuration loaded successfully"
+    )
+    
+    embedding_model = CONFIG.get("embedding_model")
+    add_check(
+        "Embedding Model",
+        bool(embedding_model),
+        f"Embedding model: {embedding_model or 'NOT SET'}",
+        "Add 'embedding.model' to openclaw.json (e.g., 'text-embedding-3-large')"
+    )
+    
+    llm_model = CONFIG.get("llm_model")
+    add_check(
+        "LLM Model",
+        bool(llm_model),
+        f"LLM model: {llm_model or 'NOT SET'}",
+        "Add 'llm.model' to openclaw.json (e.g., 'gpt-4')"
+    )
+    
+    try:
+        from memory_engine.config import get_openclaw_base_path
+        base_path = get_openclaw_base_path()
+        add_check(
+            "OpenClaw Base Path",
+            os.path.exists(base_path),
+            f"Base path: {base_path}",
+            f"Ensure OpenClaw is initialized at {base_path}"
+        )
+    except Exception as e:
+        add_check("OpenClaw Base Path", False, f"Error: {e}")
+    
+    if controller:
+        try:
+            count = controller.semantic.count()
+            add_check(
+                "Database Connection",
+                True,
+                f"Connected, {count} memories stored"
+            )
+        except Exception as e:
+            add_check(
+                "Database Connection",
+                False,
+                f"Database error: {e}",
+                "Check if LanceDB path is writable"
+            )
+    else:
+        add_check(
+            "Memory Controller",
+            False,
+            "Controller not initialized",
+            "Restart the service"
+        )
+    
+    all_passed = all(c["passed"] for c in diagnostics["checks"])
+    diagnostics["status"] = "healthy" if all_passed else "issues_found"
+    
+    return diagnostics
 
 
 @app.post("/search")
@@ -323,6 +433,82 @@ async def count_memories():
         }
     except Exception as e:
         logger.error(f"Count error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+class DeleteMemoryRequest(BaseModel):
+    memory_id: str
+
+
+class UpdateMemoryRequest(BaseModel):
+    memory_id: str
+    text: Optional[str] = None
+    type: Optional[str] = None
+    weight: Optional[int] = None
+
+
+class CleanupRequest(BaseModel):
+    days_old: int = 90
+    memory_type: Optional[str] = None
+
+
+@app.delete("/memory/{memory_id}")
+async def delete_memory(memory_id: str):
+    if not controller:
+        raise HTTPException(status_code=503, detail="Service not initialized")
+    try:
+        memory = controller.semantic.get_by_id(memory_id)
+        if not memory:
+            raise HTTPException(status_code=404, detail=f"Memory not found: {memory_id}")
+        controller.semantic.delete_by_id(memory_id)
+        return {"status": "ok", "deleted_id": memory_id}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Delete memory error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.patch("/memory/{memory_id}")
+async def update_memory(memory_id: str, request: UpdateMemoryRequest):
+    if not controller:
+        raise HTTPException(status_code=503, detail="Service not initialized")
+    try:
+        memory = controller.semantic.get_by_id(memory_id)
+        if not memory:
+            raise HTTPException(status_code=404, detail=f"Memory not found: {memory_id}")
+        
+        update_data = {}
+        if request.text is not None:
+            update_data["text"] = request.text
+        if request.type is not None:
+            update_data["type"] = request.type
+        if request.weight is not None:
+            update_data["weight"] = request.weight
+        
+        if update_data:
+            controller.semantic.update_memory(memory_id, update_data)
+        
+        return {"status": "ok", "memory_id": memory_id}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Update memory error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/cleanup")
+async def cleanup_old_memories(request: CleanupRequest):
+    if not controller:
+        raise HTTPException(status_code=503, detail="Service not initialized")
+    try:
+        deleted_count = controller.cleanup_old_memories(
+            days_old=request.days_old,
+            memory_type=request.memory_type
+        )
+        return {"status": "ok", "deleted_count": deleted_count}
+    except Exception as e:
+        logger.error(f"Cleanup error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

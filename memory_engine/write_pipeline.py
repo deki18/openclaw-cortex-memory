@@ -36,7 +36,10 @@ class WritePipeline:
     def __init__(self, base_dir: str = None):
         self.semantic_memory = SemanticMemory()
         self.llm = LLMClient()
-        self.base_dir = os.path.expanduser(base_dir or CONFIG.get("openclaw_base_path", "~/.openclaw"))
+        if base_dir is None:
+            from .config import get_openclaw_base_path
+            base_dir = get_openclaw_base_path()
+        self.base_dir = os.path.expanduser(base_dir)
         self.chunk_size = CONFIG.get("chunk", {}).get("size", 600)
         self.chunk_overlap = CONFIG.get("chunk", {}).get("overlap", 100)
 

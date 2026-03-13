@@ -27,7 +27,7 @@
     "typescript": "^5.7.2"
   },
   "peerDependencies": {
-    "openclaw": ">=2026.0.0"
+    "openclaw": ">=2025.1.1"
   },
   "engines": {
     "node": ">=22.0.0"

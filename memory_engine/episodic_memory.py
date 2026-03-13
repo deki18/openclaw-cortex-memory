@@ -9,7 +9,11 @@ logger = logging.getLogger(__name__)
 
 
 class EpisodicMemory:
-    def __init__(self, store_path="~/.openclaw/episodic_memory.jsonl"):
+    def __init__(self, store_path=None):
+        if store_path is None:
+            from .config import get_openclaw_base_path
+            base_path = get_openclaw_base_path()
+            store_path = os.path.join(base_path, "episodic_memory.jsonl")
         self.store_path = os.path.expanduser(store_path)
         self._lock = threading.Lock()
         os.makedirs(os.path.dirname(self.store_path), exist_ok=True)

@@ -102,7 +102,7 @@ class MemoryController:
 
     def sync_memory(self):
         try:
-            base_dir = os.path.expanduser(os.environ.get("OPENCLAW_BASE_PATH") or self.write_pipeline.base_dir or "~/.openclaw")
+            base_dir = self.write_pipeline.base_dir
             sessions_dir = os.path.join(base_dir, "agents", "main", "sessions")
             local_sessions_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data", "memory", "sessions", "active"))
             
@@ -129,7 +129,10 @@ class MemoryController:
         except Exception as e:
             logger.error(f"Failed to promote memory: {e}")
 
-    def import_legacy_data(self, data_dir: str = "~/.openclaw"):
+    def import_legacy_data(self, data_dir: str = None):
+        from .config import get_openclaw_base_path
+        if data_dir is None:
+            data_dir = get_openclaw_base_path()
         logger.info(f"Importing legacy data from {data_dir}...")
         base_dir = os.path.expanduser(data_dir)
         if not os.path.exists(base_dir):
@@ -181,7 +184,9 @@ class MemoryController:
         logger.info("Import complete.")
 
     def inject_core_rule(self):
-        memory_md_path = os.path.expanduser("~/.openclaw/workspace/MEMORY.md")
+        from .config import get_openclaw_base_path
+        base_path = get_openclaw_base_path()
+        memory_md_path = os.path.join(base_path, "workspace", "MEMORY.md")
         os.makedirs(os.path.dirname(memory_md_path), exist_ok=True)
         
         rule_header = "## Cortex Memory Integration Rules"
@@ -213,3 +218,24 @@ You are equipped with the **Cortex Memory** engine. You must proactively manage 
             logger.info(f"Successfully injected Cortex Memory core rules into {memory_md_path}.")
         except Exception as e:
             logger.error(f"Failed to inject core rules: {e}")
+
+    def cleanup_old_memories(self, days_old: int = 90, memory_type: str = None):
+        from datetime import timedelta
+        cutoff_date = (datetime.now(timezone.utc) - timedelta(days=days_old)).strftime("%Y-%m-%d")
+        deleted_count = 0
+        
+        try:
+            all_memories = self.semantic.list_all(limit=10000)
+            for memory in all_memories:
+                if memory.date < cutoff_date:
+                    if memory_type and memory.type != memory_type:
+                        continue
+                    if memory.type == "core_rule":
+                        continue
+                    self.semantic.delete_by_id(memory.id)
+                    deleted_count += 1
+            logger.info(f"Cleaned up {deleted_count} old memories")
+        except Exception as e:
+            logger.error(f"Failed to cleanup old memories: {e}")
+        
+        return deleted_count

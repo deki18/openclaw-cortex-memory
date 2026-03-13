@@ -9,7 +9,11 @@ logger = logging.getLogger(__name__)
 
 
 class MemoryGraph:
-    def __init__(self, graph_path="~/.openclaw/memory_graph.json"):
+    def __init__(self, graph_path=None):
+        if graph_path is None:
+            from .config import get_openclaw_base_path
+            base_path = get_openclaw_base_path()
+            graph_path = os.path.join(base_path, "memory_graph.json")
         self.graph_path = os.path.expanduser(graph_path)
         self.graph = nx.DiGraph()
         self._lock = threading.RLock()
@@ -53,10 +57,38 @@ class MemoryGraph:
         with self._lock:
             if entity not in self.graph:
                 return None
-                
-            neighbors = list(self.graph.successors(entity)) + list(self.graph.predecessors(entity))
-            subgraph = self.graph.subgraph([entity] + neighbors)
-            return nx.node_link_data(subgraph)
+            
+            node_data = dict(self.graph.nodes[entity])
+            node_type = node_data.get("type", "unknown")
+            
+            relationships = []
+            for _, target, edge_data in self.graph.out_edges(entity, data=True):
+                target_type = self.graph.nodes[target].get("type", "unknown") if target in self.graph else "unknown"
+                relationships.append({
+                    "direction": "outgoing",
+                    "target": target,
+                    "target_type": target_type,
+                    "relationship": edge_data.get("type", "related_to"),
+                    "details": {k: v for k, v in edge_data.items() if k != "type"}
+                })
+            
+            for source, _, edge_data in self.graph.in_edges(entity, data=True):
+                source_type = self.graph.nodes[source].get("type", "unknown") if source in self.graph else "unknown"
+                relationships.append({
+                    "direction": "incoming",
+                    "source": source,
+                    "source_type": source_type,
+                    "relationship": edge_data.get("type", "related_to"),
+                    "details": {k: v for k, v in edge_data.items() if k != "type"}
+                })
+            
+            return {
+                "entity": entity,
+                "type": node_type,
+                "attributes": {k: v for k, v in node_data.items() if k != "type"},
+                "relationships": relationships,
+                "relationship_count": len(relationships)
+            }
 
     def get_node(self, node_id: str):
         with self._lock:
