@@ -1,17 +1,159 @@
 import logging
+import os
 from contextlib import asynccontextmanager
+from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
 from memory_engine.memory_controller import MemoryController
-from memory_engine.config import load_config, CONFIG, setup_logging
+from memory_engine.config import load_config, get_config, setup_logging, validate_config
 
 setup_logging()
 logger = logging.getLogger(__name__)
 
 controller: Optional[MemoryController] = None
+
+
+class CircuitBreaker:
+    def __init__(self, failure_threshold: int = 5, recovery_timeout: int = 60):
+        self.failure_threshold = failure_threshold
+        self.recovery_timeout = recovery_timeout
+        self.failure_count = 0
+        self.last_failure_time: Optional[float] = None
+        self.state = "closed"
+    
+    def record_failure(self):
+        self.failure_count += 1
+        self.last_failure_time = datetime.now().timestamp()
+        if self.failure_count >= self.failure_threshold:
+            self.state = "open"
+    
+    def record_success(self):
+        self.failure_count = 0
+        self.state = "closed"
+    
+    def is_available(self) -> bool:
+        if self.state == "closed":
+            return True
+        if self.last_failure_time:
+            elapsed = datetime.now().timestamp() - self.last_failure_time
+            if elapsed >= self.recovery_timeout:
+                self.state = "half-open"
+                return True
+        return False
+
+
+circuit_breaker = CircuitBreaker()
+
+
+class HealthChecker:
+    def __init__(self):
+        self._last_check_time: Optional[float] = None
+        self._cached_status: Optional[Dict[str, Any]] = None
+        self._cache_ttl = 5
+    
+    def check_embedding_service(self) -> Dict[str, Any]:
+        try:
+            from memory_engine.embedding import EmbeddingModule
+            emb = EmbeddingModule()
+            return {
+                "status": "healthy" if emb.is_available() else "degraded",
+                "provider": emb.provider,
+                "model": emb.model
+            }
+        except Exception as e:
+            return {"status": "unhealthy", "error": str(e)}
+    
+    def check_database(self) -> Dict[str, Any]:
+        if not controller:
+            return {"status": "unhealthy", "error": "Controller not initialized"}
+        try:
+            count = controller.semantic.count()
+            return {"status": "healthy", "memory_count": count}
+        except Exception as e:
+            return {"status": "unhealthy", "error": str(e)}
+    
+    def check_config(self) -> Dict[str, Any]:
+        try:
+            config = get_config()
+            warnings = validate_config(config)
+            return {
+                "status": "healthy" if not warnings else "degraded",
+                "warnings": warnings
+            }
+        except Exception as e:
+            return {"status": "unhealthy", "error": str(e)}
+    
+    def get_full_status(self, use_cache: bool = True) -> Dict[str, Any]:
+        now = datetime.now().timestamp()
+        if use_cache and self._cached_status and self._last_check_time:
+            if now - self._last_check_time < self._cache_ttl:
+                return self._cached_status
+        
+        checks = {
+            "embedding": self.check_embedding_service(),
+            "database": self.check_database(),
+            "config": self.check_config(),
+            "circuit_breaker": {
+                "state": circuit_breaker.state,
+                "failure_count": circuit_breaker.failure_count
+            }
+        }
+        
+        all_healthy = all(
+            c.get("status") == "healthy" or c.get("status") == "degraded"
+            for c in checks.values() if isinstance(c, dict) and "status" in c
+        )
+        
+        status = {
+            "status": "healthy" if all_healthy else "unhealthy",
+            "service": "cortex-memory-api",
+            "version": "2.0.0",
+            "timestamp": datetime.now().isoformat(),
+            "checks": checks
+        }
+        
+        self._cached_status = status
+        self._last_check_time = now
+        return status
+
+
+health_checker = HealthChecker()
+
+
+class ErrorResponse(BaseModel):
+    success: bool = False
+    error: str
+    error_code: str
+    details: Optional[Dict[str, Any]] = None
+
+
+ERROR_CODES = {
+    "SERVICE_NOT_INITIALIZED": "E503",
+    "CONFIG_ERROR": "E001",
+    "DATABASE_ERROR": "E002",
+    "INVALID_INPUT": "E003",
+    "NOT_FOUND": "E404",
+    "INTERNAL_ERROR": "E500"
+}
+
+
+def create_error_response(message: str, error_code: str, details: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    return {
+        "success": False,
+        "error": message,
+        "error_code": error_code,
+        "details": details
+    }
+
+
+def raise_api_error(status_code: int, message: str, error_code: str, details: Optional[Dict[str, Any]] = None):
+    raise HTTPException(
+        status_code=status_code,
+        detail=create_error_response(message, error_code, details)
+    )
 
 
 class SearchRequest(BaseModel):
@@ -74,47 +216,23 @@ app = FastAPI(
 )
 
 
-def validate_config(config: Dict[str, Any]) -> List[str]:
-    errors = []
-    if not config.get("embedding_provider"):
-        errors.append("embedding.provider is required in openclaw.json (e.g., 'openai', 'openai-compatible')")
-    if not config.get("embedding_model"):
-        errors.append("embedding.model is required in openclaw.json (e.g., 'text-embedding-3-large')")
-    if not config.get("llm_provider"):
-        errors.append("llm.provider is required in openclaw.json (e.g., 'openai')")
-    if not config.get("llm_model"):
-        errors.append("llm.model is required in openclaw.json (e.g., 'gpt-4')")
-    return errors
-
-
 @app.get("/health")
 async def health_check():
-    health_status = {
-        "status": "ok",
-        "service": "cortex-memory-api",
-        "version": "2.0.0",
-        "checks": {}
-    }
-    
-    try:
-        from memory_engine.config import CONFIG
-        health_status["checks"]["embedding_configured"] = bool(CONFIG.get("embedding_model"))
-        health_status["checks"]["llm_configured"] = bool(CONFIG.get("llm_model"))
-        health_status["checks"]["reranker_configured"] = bool(CONFIG.get("reranker_api", {}).get("model"))
-        health_status["checks"]["db_path"] = CONFIG.get("lancedb_path", "not set")
-    except Exception as e:
-        health_status["checks"]["config_load"] = f"error: {str(e)}"
-    
-    if controller:
-        try:
-            health_status["checks"]["database"] = "connected"
-            health_status["checks"]["total_memories"] = controller.semantic.count()
-        except Exception as e:
-            health_status["checks"]["database"] = f"error: {str(e)}"
-    else:
-        health_status["checks"]["controller"] = "not initialized"
-    
-    return health_status
+    return health_checker.get_full_status()
+
+
+@app.get("/health/live")
+async def liveness_check():
+    return {"status": "alive", "timestamp": datetime.now().isoformat()}
+
+
+@app.get("/health/ready")
+async def readiness_check():
+    if not circuit_breaker.is_available():
+        raise HTTPException(status_code=503, detail="Service unavailable due to circuit breaker")
+    if not controller:
+        raise HTTPException(status_code=503, detail="Service not initialized")
+    return {"status": "ready", "timestamp": datetime.now().isoformat()}
 
 
 @app.get("/config")

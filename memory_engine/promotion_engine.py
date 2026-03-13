@@ -2,19 +2,20 @@ import logging
 import os
 import threading
 
-from .config import CONFIG
+from .config import get_config
 
 logger = logging.getLogger(__name__)
 
 
 class PromotionEngine:
     def __init__(self, memory_file=None):
+        config = get_config()
         if memory_file is None:
             from .config import get_openclaw_base_path
             base_path = get_openclaw_base_path()
             memory_file = os.path.join(base_path, "workspace", "MEMORY.md")
         self.memory_file = os.path.expanduser(memory_file)
-        self.threshold = CONFIG.get("promotion_hit_threshold", 3)
+        self.threshold = config.get("promotion_hit_threshold", 3)
         self._lock = threading.Lock()
         os.makedirs(os.path.dirname(self.memory_file), exist_ok=True)
 

@@ -5,7 +5,7 @@ import os
 from datetime import datetime, timezone
 from typing import Dict, List
 
-from .config import CONFIG
+from .config import get_config
 from .llm_client import LLMClient
 from .metadata_schema import MemoryMetadata
 from .semantic_memory import SemanticMemory
@@ -36,12 +36,13 @@ class WritePipeline:
     def __init__(self, base_dir: str = None):
         self.semantic_memory = SemanticMemory()
         self.llm = LLMClient()
+        config = get_config()
         if base_dir is None:
             from .config import get_openclaw_base_path
             base_dir = get_openclaw_base_path()
         self.base_dir = os.path.expanduser(base_dir)
-        self.chunk_size = CONFIG.get("chunk", {}).get("size", 600)
-        self.chunk_overlap = CONFIG.get("chunk", {}).get("overlap", 100)
+        self.chunk_size = config.get("chunk", {}).get("size", 600)
+        self.chunk_overlap = config.get("chunk", {}).get("overlap", 100)
 
     def process_sessions(self, sessions_file: str, archive_dir: str = None, daily_summary_dir: str = None, state_path: str = None):
         if not os.path.exists(sessions_file):
@@ -157,15 +158,44 @@ class WritePipeline:
             logger.error(f"Failed to save sync state: {e}")
 
     def _chunk_and_store(self, text: str, source: str):
+        if not text or not text.strip():
+            logger.warning(f"Empty text provided, skipping storage for source: {source}")
+            return
+        
+        text = text.strip()
+        min_chunk_size = 50
+        if len(text) < min_chunk_size:
+            meta = MemoryMetadata(
+                type="daily_log",
+                date=datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+                agent="openclaw",
+                source_file=source
+            )
+            try:
+                self.semantic_memory.add_memory(text, meta)
+                logger.debug(f"Stored small text as single chunk: {len(text)} chars")
+            except Exception as e:
+                logger.error(f"Failed to store chunk: {e}")
+            return
+        
         chunks = []
         start = 0
         size = self.chunk_size
         overlap = self.chunk_overlap
         while start < len(text):
             end = start + size
-            chunks.append(text[start:end])
+            chunk = text[start:end].strip()
+            if chunk:
+                chunks.append(chunk)
             start += max(size - overlap, 1)
+        
+        if not chunks:
+            logger.warning(f"No valid chunks generated for source: {source}")
+            return
+            
         for chunk in chunks:
+            if not chunk or len(chunk) < 10:
+                continue
             meta = MemoryMetadata(
                 type="daily_log",
                 date=datetime.now(timezone.utc).strftime("%Y-%m-%d"),

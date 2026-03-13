@@ -70,6 +70,57 @@ npm install
 | `dbPath` | 否 | LanceDB 存储路径 |
 | `autoSync` | 否 | 会话结束时自动同步，默认 `true` |
 | `autoReflect` | 否 | 自动触发反思，默认 `false` |
+| `enabled` | 否 | 插件开关，默认 `true` |
+| `fallbackToBuiltin` | 否 | 禁用时回退到内置记忆系统，默认 `true` |
+
+## 热插拔功能
+
+支持动态启用/禁用插件，无需重启 OpenClaw。
+
+### CLI 命令
+
+```bash
+cortex-memory enable    # 启用插件
+cortex-memory disable   # 禁用插件（回退到内置记忆）
+cortex-memory status    # 查看状态
+```
+
+### 配置方式
+
+在 `openclaw.json` 中设置：
+
+```json
+{
+  "plugins": {
+    "cortex-memory": {
+      "enabled": false,
+      "fallbackToBuiltin": true
+    }
+  }
+}
+```
+
+禁用时，`search_memory` 和 `store_event` 自动回退到 OpenClaw 内置记忆系统。
+
+## 卸载插件
+
+```bash
+# 完全卸载（删除所有数据）
+cortex-memory uninstall
+
+# 卸载但保留记忆数据
+cortex-memory uninstall --keep-data
+
+# 卸载但保留配置
+cortex-memory uninstall --keep-config
+```
+
+卸载操作会：
+1. 停止 Python 后端服务
+2. 删除 Python 虚拟环境
+3. 删除 node_modules 和构建产物
+4. 删除记忆数据文件（除非 `--keep-data`）
+5. 从 openclaw.json 移除插件配置（除非 `--keep-config`）
 
 ## 启动
 

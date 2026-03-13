@@ -3,7 +3,7 @@ import math
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from .config import CONFIG
+from .config import get_config
 from .lancedb_store import OpenClawMemory
 from .reranker import Reranker
 from .semantic_memory import SemanticMemory
@@ -13,9 +13,10 @@ logger = logging.getLogger(__name__)
 
 class RetrievalPipeline:
     def __init__(self):
+        config = get_config()
         self.semantic_memory = SemanticMemory()
         self.reranker = Reranker()
-        self.time_decay_halflife = CONFIG.get("time_decay_halflife", 30)
+        self.time_decay_halflife = config.get("time_decay_halflife", 30)
 
     def search(
         self,

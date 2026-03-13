@@ -4,18 +4,19 @@ from typing import List
 
 import requests
 
-from .config import CONFIG
+from .config import get_config
 
 logger = logging.getLogger(__name__)
 
 
 class Reranker:
     def __init__(self):
-        reranker_config = CONFIG.get("reranker_api", {})
-        self.provider = CONFIG.get("reranker_provider")
+        config = get_config()
+        reranker_config = config.get("reranker_api", {})
+        self.provider = config.get("reranker_provider")
         self.model = reranker_config.get("model", "")
         self.url = reranker_config.get("url")
-        self.api_key = CONFIG.get("reranker_api_key") or os.environ.get("RERANKER_API_KEY")
+        self.api_key = config.get("reranker_api_key") or os.environ.get("RERANKER_API_KEY")
 
     def is_available(self) -> bool:
         return bool(self.api_key and self.model)

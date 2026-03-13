@@ -4,6 +4,9 @@
   "description": "Long-term memory system for OpenClaw AI Agent",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "bin": {
+    "cortex-memory": "./scripts/cli.js"
+  },
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch",
@@ -27,18 +30,20 @@
     "typescript": "^5.7.2"
   },
   "peerDependencies": {
-    "openclaw": ">=2025.1.1"
+    "openclaw": ">=2026.3.8"
   },
   "engines": {
     "node": ">=22.0.0"
   },
   "files": [
     "dist/",
+    "scripts/",
     "openclaw.plugin.json",
     "SKILL.md"
   ],
   "openclaw": {
     "plugin": true,
-    "requiresPython": true
+    "requiresPython": true,
+    "cli": "cortex-memory"
   }
 }

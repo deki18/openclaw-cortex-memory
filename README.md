@@ -128,6 +128,56 @@ const graph = await tools.query_graph({
                         └──────────────┘          └──────────────┘
 ```
 
+## Hot-plug Support
+
+The plugin supports hot-plug functionality - enable/disable without restarting OpenClaw.
+
+### CLI Commands
+
+```bash
+cortex-memory enable              # Enable plugin
+cortex-memory disable             # Disable plugin (fallback to builtin memory)
+cortex-memory status              # Check current status
+cortex-memory uninstall           # Uninstall plugin completely
+cortex-memory uninstall --keep-data  # Uninstall but keep memory data
+```
+
+### Uninstall Options
+
+| Option | Description |
+|--------|-------------|
+| `--keep-data` | Keep memory data files (LanceDB, episodic memory, etc.) |
+| `--keep-config` | Keep plugin entry in openclaw.json |
+
+Uninstall will:
+1. Stop the Python backend service
+2. Remove the Python virtual environment
+3. Remove node_modules and build artifacts
+4. Remove memory data files (unless `--keep-data`)
+5. Remove plugin from openclaw.json (unless `--keep-config`)
+
+### Configuration
+
+Set in `openclaw.json`:
+
+```json
+{
+  "plugins": {
+    "cortex-memory": {
+      "enabled": true,
+      "fallbackToBuiltin": true
+    }
+  }
+}
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `enabled` | `true` | Enable/disable the plugin |
+| `fallbackToBuiltin` | `true` | Fall back to OpenClaw builtin memory when disabled |
+
+When disabled, `search_memory` and `store_event` automatically fall back to OpenClaw's builtin memory system.
+
 ## Available Tools
 
 | Tool | Description |
@@ -143,6 +193,7 @@ const graph = await tools.query_graph({
 | `update_memory` | Update memory content, type, or weight |
 | `cleanup_memories` | Clean up old memories beyond specified days |
 | `diagnostics` | Run system diagnostics |
+| `cortex_memory_status` | Get plugin status (enabled/disabled) |
 
 ## Memory System Architecture
 

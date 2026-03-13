@@ -3,7 +3,7 @@ import logging
 import os
 from typing import Optional
 
-from .config import CONFIG
+from .config import get_config
 
 logger = logging.getLogger(__name__)
 
@@ -15,10 +15,11 @@ except Exception:
 
 class LLMClient:
     def __init__(self):
-        self.provider = CONFIG.get("llm_provider")
-        self.model = CONFIG.get("llm_model")
-        self.api_key = CONFIG.get("llm_api_key") or os.environ.get("OPENAI_API_KEY")
-        self.base_url = CONFIG.get("llm_base_url") or os.environ.get("OPENAI_BASE_URL")
+        config = get_config()
+        self.provider = config.get("llm_provider")
+        self.model = config.get("llm_model")
+        self.api_key = config.get("llm_api_key") or os.environ.get("OPENAI_API_KEY")
+        self.base_url = config.get("llm_base_url") or os.environ.get("OPENAI_BASE_URL")
         self._client: Optional["OpenAI"] = None
         
         if not self.provider or not self.model:

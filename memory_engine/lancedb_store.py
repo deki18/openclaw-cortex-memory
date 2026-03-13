@@ -12,32 +12,60 @@ DEFAULT_VECTOR_DIM = 3072
 VECTOR_DIM = None
 
 VALID_MEMORY_TYPES = {"core_rule", "daily_log", "event", "episodic", "procedural"}
-ID_PATTERN = re.compile(r'^[a-zA-Z0-9_-]+$')
+ID_PATTERN = re.compile(r'^[a-zA-Z0-9_-]{1,128}$')
 DATE_PATTERN = re.compile(r'^\d{4}-\d{2}-\d{2}$')
+MEMORY_TYPE_PATTERN = re.compile(r'^[a-z_]{1,32}$')
+MAX_TEXT_LENGTH = 100000
+MAX_ID_LENGTH = 128
 
 
 def _escape_sql_string(value: str) -> str:
-    return value.replace("'", "''")
+    if not isinstance(value, str):
+        return ""
+    value = value.replace("'", "''")
+    value = value.replace("\\", "\\\\")
+    value = value.replace("\x00", "")
+    return value
 
 
 def _validate_id(memory_id: str) -> bool:
+    if not memory_id or not isinstance(memory_id, str):
+        return False
+    if len(memory_id) > MAX_ID_LENGTH:
+        return False
     return bool(ID_PATTERN.match(memory_id))
 
 
 def _validate_date(date_str: str) -> bool:
+    if not date_str or not isinstance(date_str, str):
+        return False
     return bool(DATE_PATTERN.match(date_str))
 
 
 def _validate_memory_type(memory_type: str) -> bool:
+    if not memory_type or not isinstance(memory_type, str):
+        return False
+    if len(memory_type) > 32:
+        return False
     return memory_type in VALID_MEMORY_TYPES
+
+
+def _validate_text(text: str) -> bool:
+    if not text or not isinstance(text, str):
+        return False
+    if len(text) > MAX_TEXT_LENGTH:
+        logger.warning(f"Text exceeds maximum length: {len(text)} > {MAX_TEXT_LENGTH}")
+        return False
+    return True
 
 
 def get_vector_dim() -> int:
     global VECTOR_DIM
     if VECTOR_DIM is not None:
         return VECTOR_DIM
-    from .config import CONFIG
-    VECTOR_DIM = CONFIG.get("embedding_dimensions", DEFAULT_VECTOR_DIM)
+    from .config import get_config
+    config = get_config()
+    VECTOR_DIM = config.get("embedding_dimensions") or DEFAULT_VECTOR_DIM
     return VECTOR_DIM
 
 
@@ -70,9 +98,10 @@ def get_memory_model():
 
 
 def get_db_path() -> str:
-    from .config import CONFIG, get_openclaw_base_path
-    if CONFIG.get("lancedb_path"):
-        return os.path.expanduser(CONFIG.get("lancedb_path"))
+    from .config import get_config, get_openclaw_base_path
+    config = get_config()
+    if config.get("lancedb_path"):
+        return os.path.expanduser(config.get("lancedb_path"))
     base_path = get_openclaw_base_path()
     return os.path.join(base_path, "agents", "main", "lancedb_store")
 

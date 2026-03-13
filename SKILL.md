@@ -169,6 +169,54 @@ Returns:
 - `checks`: List of diagnostic checks with pass/fail status
 - `recommendations`: List of fixes for any issues found
 
+### cortex_memory_status
+Get the current status of the Cortex Memory plugin.
+
+Returns:
+- `enabled`: Whether the plugin is enabled
+- `service_running`: Whether the Python backend is running
+- `fallback_enabled`: Whether fallback to builtin memory is enabled
+- `builtin_memory_available`: Whether OpenClaw builtin memory is available
+
+## Hot-plug Support
+
+Enable/disable the plugin without restarting OpenClaw.
+
+### CLI Commands
+
+```bash
+cortex-memory enable    # Enable plugin
+cortex-memory disable   # Disable plugin (fallback to builtin)
+cortex-memory status    # Check status
+```
+
+### Configuration
+
+```json
+{
+  "plugins": {
+    "cortex-memory": {
+      "enabled": true,
+      "fallbackToBuiltin": true
+    }
+  }
+}
+```
+
+When disabled with `fallbackToBuiltin: true`, memory operations fall back to OpenClaw's builtin system.
+
+### Uninstall
+
+```bash
+cortex-memory uninstall           # Full uninstall
+cortex-memory uninstall --keep-data  # Keep memory data
+```
+
+| Option | Description |
+|--------|-------------|
+| `--keep-data` | Keep memory data files |
+| `--keep-config` | Keep plugin entry in openclaw.json |
+
 ## Memory Types
 
 1. **Semantic**: Vector embeddings for similarity search

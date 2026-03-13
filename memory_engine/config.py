@@ -1,7 +1,7 @@
 import logging
 import os
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 try:
     import yaml
@@ -16,24 +16,51 @@ logger = logging.getLogger(__name__)
 DEFAULTS = {
     "embedding_provider": None,
     "embedding_model": None,
+    "embedding_api_key": None,
+    "embedding_base_url": None,
+    "embedding_dimensions": None,
     "llm_provider": None,
     "llm_model": None,
+    "llm_api_key": None,
+    "llm_base_url": None,
     "reranker_provider": None,
+    "reranker_api_key": None,
     "reranker_api": {
         "url": None,
         "model": None
     },
     "openclaw_base_path": None,
     "lancedb_path": None,
-    "chunk": {"size": 600, "overlap": 100},
+    "chunk": {
+        "size": 600,
+        "overlap": 100,
+        "min_chunk_size": 100,
+        "max_chunk_size": 600,
+        "target_chunk_size": 300,
+        "overlap_size": 100,
+        "respect_sentence_boundary": True,
+        "respect_paragraph_boundary": True
+    },
     "time_decay_halflife": 30,
     "promotion_hit_threshold": 3,
     "log_level": "INFO"
 }
 
+_CONFIG: Optional[Dict[str, Any]] = None
+
+
+def get_config() -> Dict[str, Any]:
+    global _CONFIG
+    if _CONFIG is None:
+        _CONFIG = load_config()
+    return _CONFIG
+
+
+CONFIG = property(lambda self: get_config())
+
 
 def get_openclaw_base_path() -> str:
-    config = load_config()
+    config = get_config()
     base_path = config.get("openclaw_base_path")
     if base_path:
         return os.path.expanduser(base_path)
@@ -45,7 +72,7 @@ def get_openclaw_base_path() -> str:
 
 
 def setup_logging(level: str = None):
-    config = load_config()
+    config = get_config()
     log_level_str = level or config.get("log_level", "INFO")
     log_level = getattr(logging, log_level_str.upper(), logging.INFO)
     logging.basicConfig(
@@ -59,10 +86,8 @@ def setup_logging(level: str = None):
 
 
 def load_config(config_path: str = "config.yaml") -> Dict[str, Any]:
-    """Load configuration from environment variables (priority) and config file."""
     config = dict(DEFAULTS)
     
-    # First, try to load from config file (for backward compatibility)
     if yaml is not None:
         if not os.path.exists(config_path):
             config_path = os.path.join(os.path.dirname(__file__), "..", "config.yaml")
@@ -77,8 +102,6 @@ def load_config(config_path: str = "config.yaml") -> Dict[str, Any]:
     else:
         logger.warning("PyYAML not installed, skipping config file loading")
     
-    # Override with environment variables (highest priority)
-    # These are set by the TypeScript plugin from openclaw.json
     if os.environ.get("CORTEX_MEMORY_EMBEDDING_PROVIDER"):
         config["embedding_provider"] = os.environ["CORTEX_MEMORY_EMBEDDING_PROVIDER"]
     if os.environ.get("CORTEX_MEMORY_EMBEDDING_MODEL"):
@@ -112,7 +135,6 @@ def load_config(config_path: str = "config.yaml") -> Dict[str, Any]:
     if os.environ.get("CORTEX_MEMORY_RERANKER_ENDPOINT"):
         config["reranker_api"]["url"] = os.environ["CORTEX_MEMORY_RERANKER_ENDPOINT"]
     
-    # Expand user paths
     if "lancedb_path" in config:
         config["lancedb_path"] = os.path.expanduser(config["lancedb_path"])
     if "openclaw_base_path" in config:

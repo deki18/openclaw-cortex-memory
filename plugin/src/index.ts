@@ -26,12 +26,14 @@ interface RerankerConfig {
 }
 
 interface CortexMemoryConfig {
+  enabled?: boolean;
   embedding: EmbeddingConfig;
   llm: LLMConfig;
   reranker: RerankerConfig;
   dbPath?: string;
   autoSync?: boolean;
   autoReflect?: boolean;
+  fallbackToBuiltin?: boolean;
 }
 
 interface ToolContext {
@@ -44,6 +46,13 @@ interface ToolResult {
   success: boolean;
   data?: unknown;
   error?: string;
+  errorCode?: string;
+}
+
+interface BuiltinMemory {
+  search: (query: string, limit?: number) => Promise<unknown[]>;
+  store: (content: string, metadata?: Record<string, unknown>) => Promise<string>;
+  delete: (id: string) => Promise<boolean>;
 }
 
 interface OpenClawPluginApi {
@@ -53,31 +62,130 @@ interface OpenClawPluginApi {
     parameters: Record<string, unknown>;
     execute: (params: { args: Record<string, unknown>; context: ToolContext }) => Promise<ToolResult>;
   }): void;
+  unregisterTool?(name: string): void;
   registerHook(hook: {
     event: string;
     handler: (payload: unknown, context: ToolContext) => Promise<void>;
   }): void;
-  registerGatewayMethod?(method: string, handler: Function): void;
-  registerHttpRoute?(path: string, handler: Function): void;
-  registerCli?(registerFn: Function, metadata: Record<string, unknown>): void;
-  registerService?(service: { id: string; start: Function; stop: Function }): void;
+  unregisterHook?(event: string): void;
   getLogger(): {
     info: (message: string, ...args: unknown[]) => void;
     warn: (message: string, ...args: unknown[]) => void;
     error: (message: string, ...args: unknown[]) => void;
   };
+  getBuiltinMemory?(): BuiltinMemory;
 }
+
+interface UserFriendlyError {
+  code: string;
+  message: string;
+  suggestion: string;
+}
+
+const ERROR_CODES: Record<string, UserFriendlyError> = {
+  CONNECTION_REFUSED: {
+    code: "E001",
+    message: "Cannot connect to the memory service",
+    suggestion: "The Python backend may not be running. Try restarting the OpenClaw gateway."
+  },
+  TIMEOUT: {
+    code: "E002",
+    message: "The memory service is not responding",
+    suggestion: "The service may be overloaded. Wait a moment and try again."
+  },
+  NOT_FOUND: {
+    code: "E003",
+    message: "Memory not found",
+    suggestion: "The requested memory may have been deleted or never existed."
+  },
+  INVALID_INPUT: {
+    code: "E004",
+    message: "Invalid input provided",
+    suggestion: "Please check your input parameters and try again."
+  },
+  SERVICE_ERROR: {
+    code: "E005",
+    message: "The memory service encountered an error",
+    suggestion: "Check the service logs for details or try restarting the gateway."
+  },
+  PLUGIN_DISABLED: {
+    code: "E006",
+    message: "Cortex Memory plugin is disabled",
+    suggestion: "Enable the plugin using 'openclaw plugins enable cortex-memory' or check openclaw.json"
+  }
+};
+
+const SENSITIVE_KEYS = ["API_KEY", "SECRET", "TOKEN", "PASSWORD", "APIKEY"];
+
+const MIN_OPENCLAW_VERSION = "2026.3.8";
+const MAX_OPENCLAW_VERSION = "2027.0.0";
 
 const defaultConfig: Partial<CortexMemoryConfig> = {
   autoSync: true,
   autoReflect: false,
+  enabled: true,
+  fallbackToBuiltin: true,
 };
 
 let config: CortexMemoryConfig | null = null;
 let logger: ReturnType<OpenClawPluginApi["getLogger"]>;
 let pythonProcess: ChildProcess | null = null;
+let isShuttingDown = false;
+let isEnabled = true;
+let api: OpenClawPluginApi | null = null;
+let builtinMemory: BuiltinMemory | null = null;
+let registeredTools: string[] = [];
+let registeredHooks: string[] = [];
+let configWatchInterval: NodeJS.Timeout | null = null;
+let configPath: string | null = null;
 
-// Find plugin root directory (go up from plugin/dist to project root)
+function sanitizeForLogging(obj: Record<string, unknown>): Record<string, unknown> {
+  const sanitized: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(obj)) {
+    const isSensitive = SENSITIVE_KEYS.some(k => key.toUpperCase().includes(k));
+    if (isSensitive) {
+      sanitized[key] = "***REDACTED***";
+    } else if (typeof value === "object" && value !== null) {
+      sanitized[key] = sanitizeForLogging(value as Record<string, unknown>);
+    } else {
+      sanitized[key] = value;
+    }
+  }
+  return sanitized;
+}
+
+function compareVersions(a: string, b: string): number {
+  const partsA = a.split(".").map(Number);
+  const partsB = b.split(".").map(Number);
+  for (let i = 0; i < Math.max(partsA.length, partsB.length); i++) {
+    const valA = partsA[i] || 0;
+    const valB = partsB[i] || 0;
+    if (valA < valB) return -1;
+    if (valA > valB) return 1;
+  }
+  return 0;
+}
+
+async function checkOpenClawVersion(): Promise<void> {
+  try {
+    const version = process.env.OPENCLAW_VERSION;
+    if (version) {
+      if (compareVersions(version, MIN_OPENCLAW_VERSION) < 0) {
+        throw new Error(`Incompatible OpenClaw version: ${version}. Minimum required: ${MIN_OPENCLAW_VERSION}`);
+      }
+      if (compareVersions(version, MAX_OPENCLAW_VERSION) >= 0) {
+        throw new Error(`Incompatible OpenClaw version: ${version}. Maximum supported: <${MAX_OPENCLAW_VERSION}`);
+      }
+      logger.info(`OpenClaw version check passed: ${version}`);
+    } else {
+      logger.warn("Could not determine OpenClaw version, proceeding with caution");
+    }
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
+    logger.warn(`Version check warning: ${message}`);
+  }
+}
+
 function findProjectRoot(): string {
   let current = __dirname;
   while (current !== path.dirname(current)) {
@@ -89,7 +197,66 @@ function findProjectRoot(): string {
   throw new Error("Cannot find project root directory");
 }
 
-// Validate required configuration
+function findOpenClawConfig(): string | null {
+  const possiblePaths = [
+    path.join(process.cwd(), "openclaw.json"),
+    path.join(process.env.USERPROFILE || process.env.HOME || "", ".openclaw", "openclaw.json"),
+    path.join(process.env.OPENCLAW_BASE_PATH || "", "openclaw.json"),
+  ];
+  
+  for (const p of possiblePaths) {
+    if (fs.existsSync(p)) {
+      return p;
+    }
+  }
+  return null;
+}
+
+function loadPluginEnabledState(): boolean {
+  if (!configPath || !fs.existsSync(configPath)) {
+    return true;
+  }
+  
+  try {
+    const content = fs.readFileSync(configPath, "utf-8");
+    const openclawConfig = JSON.parse(content);
+    const pluginConfig = openclawConfig?.plugins?.["cortex-memory"];
+    return pluginConfig?.enabled !== false;
+  } catch (e) {
+    logger.warn(`Failed to load config state: ${e}`);
+    return true;
+  }
+}
+
+function startConfigWatcher(): void {
+  if (configWatchInterval) {
+    clearInterval(configWatchInterval);
+  }
+  
+  let lastEnabledState = isEnabled;
+  
+  configWatchInterval = setInterval(() => {
+    const newState = loadPluginEnabledState();
+    if (newState !== lastEnabledState) {
+      lastEnabledState = newState;
+      if (newState && !isEnabled) {
+        logger.info("Detected config change: enabling Cortex Memory plugin");
+        enable();
+      } else if (!newState && isEnabled) {
+        logger.info("Detected config change: disabling Cortex Memory plugin");
+        disable();
+      }
+    }
+  }, 5000);
+}
+
+function stopConfigWatcher(): void {
+  if (configWatchInterval) {
+    clearInterval(configWatchInterval);
+    configWatchInterval = null;
+  }
+}
+
 function validateConfig(cfg: CortexMemoryConfig): string[] {
   const errors: string[] = [];
   
@@ -106,7 +273,6 @@ function validateConfig(cfg: CortexMemoryConfig): string[] {
   return errors;
 }
 
-// Start Python backend service
 async function startPythonService(): Promise<void> {
   if (!config) {
     throw new Error("Configuration not loaded");
@@ -144,7 +310,6 @@ async function startPythonService(): Promise<void> {
     ),
   };
 
-  // Pass optional API keys and endpoints if specified
   if (config.embedding.apiKey) {
     env.CORTEX_MEMORY_EMBEDDING_API_KEY = config.embedding.apiKey;
   }
@@ -176,10 +341,13 @@ async function startPythonService(): Promise<void> {
     });
 
     let started = false;
+    let stderrBuffer = "";
 
     pythonProcess.stdout?.on("data", (data: Buffer) => {
       const output = data.toString();
-      logger.info(`[Python] ${output.trim()}`);
+      if (!output.toLowerCase().includes("key") && !output.toLowerCase().includes("token")) {
+        logger.info(`[Python] ${output.trim()}`);
+      }
       if (output.includes("Cortex Memory API started") || output.includes("Application startup complete")) {
         started = true;
         resolve();
@@ -188,7 +356,10 @@ async function startPythonService(): Promise<void> {
 
     pythonProcess.stderr?.on("data", (data: Buffer) => {
       const output = data.toString();
-      logger.warn(`[Python] ${output.trim()}`);
+      stderrBuffer += output;
+      if (!output.toLowerCase().includes("key") && !output.toLowerCase().includes("token")) {
+        logger.warn(`[Python] ${output.trim()}`);
+      }
       if (output.includes("Cortex Memory API started") && !started) {
         started = true;
         resolve();
@@ -201,25 +372,41 @@ async function startPythonService(): Promise<void> {
     });
 
     pythonProcess.on("exit", (code: number | null) => {
-      if (!started && code !== 0) {
-        reject(new Error(`Python service exited with code ${code}`));
+      if (!started && code !== 0 && !isShuttingDown) {
+        reject(new Error(`Python service exited with code ${code}. Stderr: ${stderrBuffer.slice(-500)}`));
       }
     });
 
     setTimeout(() => {
       if (!started) {
-        pythonProcess?.kill();
+        killPythonProcess();
         reject(new Error("Timeout waiting for Python service to start (300s)"));
       }
     }, 300000);
   });
 }
 
+function killPythonProcess(): void {
+  if (!pythonProcess) return;
+  
+  try {
+    if (process.platform === "win32" && pythonProcess.pid) {
+      spawn("taskkill", ["/pid", String(pythonProcess.pid), "/f", "/t"]);
+    } else {
+      pythonProcess.kill("SIGTERM");
+    }
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
+    logger.warn(`Failed to kill Python process: ${message}`);
+  } finally {
+    pythonProcess = null;
+  }
+}
+
 function stopPythonService(): void {
   if (pythonProcess) {
     logger.info("Stopping Cortex Memory Python service...");
-    pythonProcess.kill();
-    pythonProcess = null;
+    killPythonProcess();
   }
 }
 
@@ -238,14 +425,58 @@ async function waitForService(maxAttempts = 30): Promise<void> {
 function formatApiError(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
   const lower = message.toLowerCase();
-  if (lower.includes("econnrefused") || lower.includes("enotfound") || 
-      lower.includes("abort") || lower.includes("timed out") || lower.includes("fetch failed")) {
-    return `Cortex Memory API not reachable. The Python service may not be running. Details: ${message}`;
+  
+  if (lower.includes("econnrefused") || lower.includes("enotfound") || lower.includes("fetch failed")) {
+    const err = ERROR_CODES.CONNECTION_REFUSED;
+    return `${err.message} (${err.code}). ${err.suggestion}`;
   }
-  return message;
+  if (lower.includes("abort") || lower.includes("timed out")) {
+    const err = ERROR_CODES.TIMEOUT;
+    return `${err.message} (${err.code}). ${err.suggestion}`;
+  }
+  if (lower.includes("404") || lower.includes("not found")) {
+    const err = ERROR_CODES.NOT_FOUND;
+    return `${err.message} (${err.code}). ${err.suggestion}`;
+  }
+  if (lower.includes("400") || lower.includes("invalid")) {
+    const err = ERROR_CODES.INVALID_INPUT;
+    return `${err.message} (${err.code}). ${err.suggestion}`;
+  }
+  
+  const err = ERROR_CODES.SERVICE_ERROR;
+  return `${err.message} (${err.code}). Details: ${message}`;
 }
 
-async function apiCall<T>(endpoint: string, method: "GET" | "POST" = "GET", body?: unknown): Promise<T> {
+async function apiCallWithRetry<T>(
+  endpoint: string,
+  method: "GET" | "POST" | "DELETE" | "PATCH" = "GET",
+  body?: unknown,
+  maxRetries: number = 3,
+  baseDelay: number = 1000
+): Promise<T> {
+  let lastError: Error | null = null;
+  
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    try {
+      return await apiCall<T>(endpoint, method, body);
+    } catch (error) {
+      lastError = error instanceof Error ? error : new Error(String(error));
+      const isRetryable = lastError.message.includes("E001") || 
+                          lastError.message.includes("E002") ||
+                          lastError.message.includes("timeout");
+      
+      if (attempt < maxRetries - 1 && isRetryable) {
+        const delay = baseDelay * Math.pow(2, attempt);
+        logger.warn(`API call failed (attempt ${attempt + 1}/${maxRetries}), retrying in ${delay}ms: ${lastError.message.split(".")[0]}`);
+        await new Promise(resolve => setTimeout(resolve, delay));
+      }
+    }
+  }
+  
+  throw lastError;
+}
+
+async function apiCall<T>(endpoint: string, method: "GET" | "POST" | "DELETE" | "PATCH" = "GET", body?: unknown): Promise<T> {
   const url = `http://127.0.0.1:8765${endpoint}`;
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 8000);
@@ -259,7 +490,14 @@ async function apiCall<T>(endpoint: string, method: "GET" | "POST" = "GET", body
   try {
     const response = await fetch(url, options);
     const text = await response.text();
-    if (!response.ok) throw new Error(`HTTP ${response.status}: ${text || response.statusText}`);
+    if (!response.ok) {
+      try {
+        const errorData = JSON.parse(text);
+        throw new Error(errorData.error || errorData.detail || `HTTP ${response.status}`);
+      } catch {
+        throw new Error(`HTTP ${response.status}: ${text || response.statusText}`);
+      }
+    }
     if (!text) return {} as T;
     try { return JSON.parse(text) as T; } 
     catch { throw new Error("Invalid JSON response"); }
@@ -270,9 +508,23 @@ async function apiCall<T>(endpoint: string, method: "GET" | "POST" = "GET", body
   }
 }
 
-async function searchMemory(args: { query: string; top_k?: number }, _context: ToolContext): Promise<ToolResult> {
+async function searchMemoryWithFallback(args: { query: string; top_k?: number }, context: ToolContext): Promise<ToolResult> {
+  if (!isEnabled) {
+    if (config?.fallbackToBuiltin && builtinMemory) {
+      logger.info("Using builtin memory (plugin disabled)");
+      try {
+        const results = await builtinMemory.search(args.query, args.top_k || 3);
+        return { success: true, data: results };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        return { success: false, error: `Builtin memory error: ${message}` };
+      }
+    }
+    return { success: false, error: ERROR_CODES.PLUGIN_DISABLED.message, errorCode: ERROR_CODES.PLUGIN_DISABLED.code };
+  }
+  
   try {
-    const result = await apiCall<{ results: unknown[] }>("/search", "POST", {
+    const result = await apiCallWithRetry<{ results: unknown[] }>("/search", "POST", {
       query: args.query,
       top_k: args.top_k || 3,
     });
@@ -284,23 +536,41 @@ async function searchMemory(args: { query: string; top_k?: number }, _context: T
   }
 }
 
-async function storeEvent(
+async function storeEventWithFallback(
   args: {
     summary: string;
     entities?: Array<{ id?: string; name?: string; type?: string }>;
     outcome?: string;
     relations?: Array<{ source: string; target: string; type: string }>;
   },
-  _context: ToolContext
+  context: ToolContext
 ): Promise<ToolResult> {
+  if (!isEnabled) {
+    if (config?.fallbackToBuiltin && builtinMemory) {
+      logger.info("Using builtin memory (plugin disabled)");
+      try {
+        const id = await builtinMemory.store(args.summary, { 
+          entities: args.entities, 
+          outcome: args.outcome,
+          relations: args.relations 
+        });
+        return { success: true, data: { event_id: id } };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        return { success: false, error: `Builtin memory error: ${message}` };
+      }
+    }
+    return { success: false, error: ERROR_CODES.PLUGIN_DISABLED.message, errorCode: ERROR_CODES.PLUGIN_DISABLED.code };
+  }
+  
   try {
-    const result = await apiCall<{ event_id: string }>("/event", "POST", {
+    const result = await apiCallWithRetry<{ event_id: string }>("/event", "POST", {
       summary: args.summary,
       entities: args.entities,
-      outcome: args.outcome || "",
+      outcome: args.outcome,
       relations: args.relations,
     });
-    return { success: true, data: { eventId: result.event_id } };
+    return { success: true, data: result };
   } catch (error) {
     const message = formatApiError(error);
     logger.error(`store_event failed: ${message}`);
@@ -309,8 +579,12 @@ async function storeEvent(
 }
 
 async function queryGraph(args: { entity: string }, _context: ToolContext): Promise<ToolResult> {
+  if (!isEnabled) {
+    return { success: false, error: ERROR_CODES.PLUGIN_DISABLED.message, errorCode: ERROR_CODES.PLUGIN_DISABLED.code };
+  }
+  
   try {
-    const result = await apiCall<{ graph: unknown }>("/graph/query", "POST", { entity: args.entity });
+    const result = await apiCallWithRetry<{ graph: unknown }>("/graph/query", "POST", { entity: args.entity });
     return { success: true, data: result.graph };
   } catch (error) {
     const message = formatApiError(error);
@@ -320,8 +594,12 @@ async function queryGraph(args: { entity: string }, _context: ToolContext): Prom
 }
 
 async function getHotContext(args: { limit?: number }, _context: ToolContext): Promise<ToolResult> {
+  if (!isEnabled) {
+    return { success: false, error: ERROR_CODES.PLUGIN_DISABLED.message, errorCode: ERROR_CODES.PLUGIN_DISABLED.code };
+  }
+  
   try {
-    const result = await apiCall<{ context: string }>(`/hot-context?limit=${args.limit || 20}`);
+    const result = await apiCallWithRetry<{ context: unknown[] }>("/hot-context", "GET");
     return { success: true, data: result.context };
   } catch (error) {
     const message = formatApiError(error);
@@ -331,9 +609,13 @@ async function getHotContext(args: { limit?: number }, _context: ToolContext): P
 }
 
 async function reflectMemory(_args: Record<string, unknown>, _context: ToolContext): Promise<ToolResult> {
+  if (!isEnabled) {
+    return { success: false, error: ERROR_CODES.PLUGIN_DISABLED.message, errorCode: ERROR_CODES.PLUGIN_DISABLED.code };
+  }
+  
   try {
-    await apiCall("/reflect", "POST");
-    return { success: true, data: { message: "Reflection complete" } };
+    await apiCallWithRetry("/reflect", "POST");
+    return { success: true };
   } catch (error) {
     const message = formatApiError(error);
     logger.error(`reflect_memory failed: ${message}`);
@@ -342,9 +624,13 @@ async function reflectMemory(_args: Record<string, unknown>, _context: ToolConte
 }
 
 async function syncMemory(_args: Record<string, unknown>, _context: ToolContext): Promise<ToolResult> {
+  if (!isEnabled) {
+    return { success: false, error: ERROR_CODES.PLUGIN_DISABLED.message, errorCode: ERROR_CODES.PLUGIN_DISABLED.code };
+  }
+  
   try {
-    await apiCall("/sync", "POST");
-    return { success: true, data: { message: "Sync complete" } };
+    await apiCallWithRetry("/sync", "POST");
+    return { success: true };
   } catch (error) {
     const message = formatApiError(error);
     logger.error(`sync_memory failed: ${message}`);
@@ -353,9 +639,13 @@ async function syncMemory(_args: Record<string, unknown>, _context: ToolContext)
 }
 
 async function promoteMemory(_args: Record<string, unknown>, _context: ToolContext): Promise<ToolResult> {
+  if (!isEnabled) {
+    return { success: false, error: ERROR_CODES.PLUGIN_DISABLED.message, errorCode: ERROR_CODES.PLUGIN_DISABLED.code };
+  }
+  
   try {
-    await apiCall("/promote", "POST");
-    return { success: true, data: { message: "Promotion complete" } };
+    await apiCallWithRetry("/promote", "POST");
+    return { success: true };
   } catch (error) {
     const message = formatApiError(error);
     logger.error(`promote_memory failed: ${message}`);
@@ -364,9 +654,22 @@ async function promoteMemory(_args: Record<string, unknown>, _context: ToolConte
 }
 
 async function deleteMemory(args: { memory_id: string }, _context: ToolContext): Promise<ToolResult> {
+  if (!isEnabled) {
+    if (config?.fallbackToBuiltin && builtinMemory) {
+      try {
+        const success = await builtinMemory.delete(args.memory_id);
+        return { success };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        return { success: false, error: `Builtin memory error: ${message}` };
+      }
+    }
+    return { success: false, error: ERROR_CODES.PLUGIN_DISABLED.message, errorCode: ERROR_CODES.PLUGIN_DISABLED.code };
+  }
+  
   try {
-    const result = await apiCall<{ deleted_id: string }>(`/memory/${args.memory_id}`, "DELETE");
-    return { success: true, data: { deletedId: result.deleted_id } };
+    await apiCallWithRetry(`/memory/${args.memory_id}`, "DELETE");
+    return { success: true };
   } catch (error) {
     const message = formatApiError(error);
     logger.error(`delete_memory failed: ${message}`);
@@ -374,17 +677,18 @@ async function deleteMemory(args: { memory_id: string }, _context: ToolContext):
   }
 }
 
-async function updateMemory(
-  args: { memory_id: string; text?: string; type?: string; weight?: number },
-  _context: ToolContext
-): Promise<ToolResult> {
+async function updateMemory(args: { memory_id: string; text?: string; type?: string; weight?: number }, _context: ToolContext): Promise<ToolResult> {
+  if (!isEnabled) {
+    return { success: false, error: ERROR_CODES.PLUGIN_DISABLED.message, errorCode: ERROR_CODES.PLUGIN_DISABLED.code };
+  }
+  
   try {
-    const result = await apiCall<{ memory_id: string }>(`/memory/${args.memory_id}`, "PATCH", {
+    await apiCallWithRetry(`/memory/${args.memory_id}`, "PATCH", {
       text: args.text,
       type: args.type,
       weight: args.weight,
     });
-    return { success: true, data: { memoryId: result.memory_id } };
+    return { success: true };
   } catch (error) {
     const message = formatApiError(error);
     logger.error(`update_memory failed: ${message}`);
@@ -393,8 +697,12 @@ async function updateMemory(
 }
 
 async function cleanupMemories(args: { days_old?: number; memory_type?: string }, _context: ToolContext): Promise<ToolResult> {
+  if (!isEnabled) {
+    return { success: false, error: ERROR_CODES.PLUGIN_DISABLED.message, errorCode: ERROR_CODES.PLUGIN_DISABLED.code };
+  }
+  
   try {
-    const result = await apiCall<{ deleted_count: number }>("/cleanup", "POST", {
+    const result = await apiCallWithRetry<{ deleted_count: number }>("/cleanup", "POST", {
       days_old: args.days_old || 90,
       memory_type: args.memory_type,
     });
@@ -407,8 +715,19 @@ async function cleanupMemories(args: { days_old?: number; memory_type?: string }
 }
 
 async function runDiagnostics(_args: Record<string, unknown>, _context: ToolContext): Promise<ToolResult> {
+  if (!isEnabled) {
+    return { 
+      success: true, 
+      data: { 
+        status: "disabled", 
+        message: "Cortex Memory plugin is disabled",
+        suggestion: "Enable the plugin using 'openclaw plugins enable cortex-memory'"
+      } 
+    };
+  }
+  
   try {
-    const result = await apiCall<{
+    const result = await apiCallWithRetry<{
       status: string;
       checks: Array<{ name: string; passed: boolean; message: string }>;
       recommendations: string[];
@@ -421,7 +740,21 @@ async function runDiagnostics(_args: Record<string, unknown>, _context: ToolCont
   }
 }
 
+async function getPluginStatus(_args: Record<string, unknown>, _context: ToolContext): Promise<ToolResult> {
+  return {
+    success: true,
+    data: {
+      enabled: isEnabled,
+      service_running: pythonProcess !== null,
+      fallback_enabled: config?.fallbackToBuiltin ?? true,
+      builtin_memory_available: builtinMemory !== null
+    }
+  };
+}
+
 async function onMessageHandler(payload: unknown, context: ToolContext): Promise<void> {
+  if (!isEnabled) return;
+  
   const data = payload as { content?: string; text?: string; source?: string };
   const text = data.content || data.text;
   if (!text) return;
@@ -434,7 +767,7 @@ async function onMessageHandler(payload: unknown, context: ToolContext): Promise
 }
 
 async function onSessionEndHandler(payload: unknown, context: ToolContext): Promise<void> {
-  if (!config?.autoSync) return;
+  if (!isEnabled || !config?.autoSync) return;
   try {
     await apiCall("/sync", "POST");
     logger.info(`Synced memory for session ${context.sessionId}`);
@@ -444,6 +777,8 @@ async function onSessionEndHandler(payload: unknown, context: ToolContext): Prom
 }
 
 async function onTimerHandler(payload: unknown, _context: ToolContext): Promise<void> {
+  if (!isEnabled) return;
+  
   const data = payload as { action?: string };
   const action = data.action;
   try {
@@ -462,39 +797,258 @@ async function onTimerHandler(payload: unknown, _context: ToolContext): Promise<
   }
 }
 
-export async function register(api: OpenClawPluginApi, userConfig?: Partial<CortexMemoryConfig>): Promise<void> {
-  config = { 
-    embedding: userConfig?.embedding || { provider: "openai", model: "" },
-    llm: userConfig?.llm || { model: "" },
-    reranker: userConfig?.reranker || { model: "" },
-    dbPath: userConfig?.dbPath,
-    autoSync: userConfig?.autoSync ?? defaultConfig.autoSync,
-    autoReflect: userConfig?.autoReflect ?? defaultConfig.autoReflect,
-  } as CortexMemoryConfig;
+function registerTools(): void {
+  if (!api) return;
   
-  logger = api.getLogger();
-  logger.info("Registering Cortex Memory plugin...");
-  logger.info(`Embedding: ${config.embedding.model} (${config.embedding.provider})`);
-  logger.info(`LLM: ${config.llm.model}`);
-  logger.info(`Reranker: ${config.reranker.model}`);
+  const tools = [
+    {
+      name: "search_memory",
+      description: "Search the long-term semantic memory for relevant information",
+      parameters: {
+        type: "object",
+        properties: {
+          query: { type: "string", description: "Search query" },
+          top_k: { type: "number", description: "Number of results", default: 3 },
+        },
+        required: ["query"],
+      },
+      execute: async ({ args, context }: { args: Record<string, unknown>; context: ToolContext }) => 
+        searchMemoryWithFallback(args as { query: string; top_k?: number }, context),
+    },
+    {
+      name: "store_event",
+      description: "Store a new episodic event in the memory system",
+      parameters: {
+        type: "object",
+        properties: {
+          summary: { type: "string", description: "Event summary" },
+          entities: { type: "array", description: "Involved entities" },
+          outcome: { type: "string", description: "Event outcome" },
+          relations: { type: "array", description: "Entity relationships" },
+        },
+        required: ["summary"],
+      },
+      execute: async ({ args, context }: { args: Record<string, unknown>; context: ToolContext }) => 
+        storeEventWithFallback(args as Parameters<typeof storeEventWithFallback>[0], context),
+    },
+    {
+      name: "query_graph",
+      description: "Query the memory graph for entity relationships",
+      parameters: {
+        type: "object",
+        properties: { entity: { type: "string", description: "Entity name" } },
+        required: ["entity"],
+      },
+      execute: async ({ args, context }: { args: Record<string, unknown>; context: ToolContext }) => 
+        queryGraph(args as { entity: string }, context),
+    },
+    {
+      name: "get_hot_context",
+      description: "Get current hot context including SOUL.md and recent data",
+      parameters: {
+        type: "object",
+        properties: { limit: { type: "number", description: "Max items", default: 20 } },
+      },
+      execute: async ({ args, context }: { args: Record<string, unknown>; context: ToolContext }) => 
+        getHotContext(args as { limit?: number }, context),
+    },
+    {
+      name: "reflect_memory",
+      description: "Trigger reflection to convert episodic events into semantic knowledge",
+      parameters: { type: "object", properties: {} },
+      execute: async ({ args, context }: { args: Record<string, unknown>; context: ToolContext }) => 
+        reflectMemory(args, context),
+    },
+    {
+      name: "sync_memory",
+      description: "Sync session data from OpenClaw to memory system",
+      parameters: { type: "object", properties: {} },
+      execute: async ({ args, context }: { args: Record<string, unknown>; context: ToolContext }) => 
+        syncMemory(args, context),
+    },
+    {
+      name: "promote_memory",
+      description: "Promote frequently accessed memories to core rules",
+      parameters: { type: "object", properties: {} },
+      execute: async ({ args, context }: { args: Record<string, unknown>; context: ToolContext }) => 
+        promoteMemory(args, context),
+    },
+    {
+      name: "delete_memory",
+      description: "Delete a specific memory by ID",
+      parameters: {
+        type: "object",
+        properties: { memory_id: { type: "string", description: "Memory ID to delete" } },
+        required: ["memory_id"],
+      },
+      execute: async ({ args, context }: { args: Record<string, unknown>; context: ToolContext }) => 
+        deleteMemory(args as { memory_id: string }, context),
+    },
+    {
+      name: "update_memory",
+      description: "Update a specific memory's content, type, or weight",
+      parameters: {
+        type: "object",
+        properties: {
+          memory_id: { type: "string", description: "Memory ID to update" },
+          text: { type: "string", description: "New text content" },
+          type: { type: "string", description: "New memory type" },
+          weight: { type: "number", description: "New weight value" },
+        },
+        required: ["memory_id"],
+      },
+      execute: async ({ args, context }: { args: Record<string, unknown>; context: ToolContext }) => 
+        updateMemory(args as { memory_id: string; text?: string; type?: string; weight?: number }, context),
+    },
+    {
+      name: "cleanup_memories",
+      description: "Clean up old memories beyond specified days",
+      parameters: {
+        type: "object",
+        properties: {
+          days_old: { type: "number", description: "Delete memories older than this many days (default: 90)" },
+          memory_type: { type: "string", description: "Only clean up memories of this type" },
+        },
+      },
+      execute: async ({ args, context }: { args: Record<string, unknown>; context: ToolContext }) => 
+        cleanupMemories(args as { days_old?: number; memory_type?: string }, context),
+    },
+    {
+      name: "diagnostics",
+      description: "Run system diagnostics to check configuration and connectivity",
+      parameters: { type: "object", properties: {} },
+      execute: async ({ args, context }: { args: Record<string, unknown>; context: ToolContext }) => 
+        runDiagnostics(args, context),
+    },
+    {
+      name: "cortex_memory_status",
+      description: "Get the current status of the Cortex Memory plugin",
+      parameters: { type: "object", properties: {} },
+      execute: async ({ args, context }: { args: Record<string, unknown>; context: ToolContext }) => 
+        getPluginStatus(args, context),
+    },
+  ];
+  
+  for (const tool of tools) {
+    api.registerTool(tool);
+    registeredTools.push(tool.name);
+  }
+}
 
+function unregisterTools(): void {
+  if (!api || !api.unregisterTool) return;
+  
+  for (const name of registeredTools) {
+    try {
+      api.unregisterTool(name);
+    } catch (e) {
+      logger.warn(`Failed to unregister tool ${name}: ${e}`);
+    }
+  }
+  registeredTools = [];
+}
+
+function registerHooks(): void {
+  if (!api) return;
+  
+  const hooks = [
+    { event: "message", handler: onMessageHandler },
+    { event: "sessionEnd", handler: onSessionEndHandler },
+    { event: "timer", handler: onTimerHandler },
+  ];
+  
+  for (const hook of hooks) {
+    api.registerHook(hook);
+    registeredHooks.push(hook.event);
+  }
+}
+
+function unregisterHooks(): void {
+  if (!api || !api.unregisterHook) return;
+  
+  for (const event of registeredHooks) {
+    try {
+      api.unregisterHook(event);
+    } catch (e) {
+      logger.warn(`Failed to unregister hook ${event}: ${e}`);
+    }
+  }
+  registeredHooks = [];
+}
+
+function setupProcessHandlers(): void {
+  const gracefulShutdown = (signal: string) => {
+    if (isShuttingDown) return;
+    isShuttingDown = true;
+    logger.info(`Received ${signal}, shutting down...`);
+    stopConfigWatcher();
+    stopPythonService();
+    process.exit(0);
+  };
+
+  process.on("exit", () => {
+    stopPythonService();
+    stopConfigWatcher();
+  });
+  process.on("SIGINT", () => gracefulShutdown("SIGINT"));
+  process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));
+  process.on("uncaughtException", (err) => {
+    logger.error("Uncaught exception:", err.message);
+    stopPythonService();
+    stopConfigWatcher();
+    process.exit(1);
+  });
+}
+
+export async function enable(): Promise<void> {
+  if (isEnabled) {
+    logger.info("Cortex Memory plugin is already enabled");
+    return;
+  }
+  
+  logger.info("Enabling Cortex Memory plugin...");
+  
   try {
     await startPythonService();
     await waitForService();
-    logger.info("Cortex Memory Python service started successfully");
+    isEnabled = true;
+    registerTools();
+    registerHooks();
+    logger.info("Cortex Memory plugin enabled successfully");
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    logger.error("Failed to start Cortex Memory service:", message);
-    throw new Error(`Cortex Memory plugin initialization failed: ${message}`);
+    logger.error(`Failed to enable Cortex Memory plugin: ${message}`);
+    throw error;
   }
+}
 
-  process.on("exit", stopPythonService);
-  process.on("SIGINT", () => { stopPythonService(); process.exit(0); });
-  process.on("SIGTERM", () => { stopPythonService(); process.exit(0); });
+export async function disable(): Promise<void> {
+  if (!isEnabled) {
+    logger.info("Cortex Memory plugin is already disabled");
+    return;
+  }
+  
+  logger.info("Disabling Cortex Memory plugin...");
+  
+  unregisterHooks();
+  unregisterTools();
+  stopPythonService();
+  isEnabled = false;
+  
+  if (config?.fallbackToBuiltin && builtinMemory) {
+    logger.info("Falling back to OpenClaw builtin memory system");
+    registerFallbackTools();
+  }
+  
+  logger.info("Cortex Memory plugin disabled successfully");
+}
 
+function registerFallbackTools(): void {
+  if (!api || !builtinMemory) return;
+  
   api.registerTool({
     name: "search_memory",
-    description: "Search the long-term semantic memory for relevant information",
+    description: "Search memory (using builtin system - Cortex Memory disabled)",
     parameters: {
       type: "object",
       properties: {
@@ -503,117 +1057,130 @@ export async function register(api: OpenClawPluginApi, userConfig?: Partial<Cort
       },
       required: ["query"],
     },
-    execute: async ({ args, context }) => searchMemory(args as { query: string; top_k?: number }, context),
+    execute: async ({ args, context }: { args: Record<string, unknown>; context: ToolContext }) => 
+      searchMemoryWithFallback(args as { query: string; top_k?: number }, context),
   });
-
+  
   api.registerTool({
     name: "store_event",
-    description: "Store a new episodic event in the memory system",
+    description: "Store event (using builtin system - Cortex Memory disabled)",
     parameters: {
       type: "object",
       properties: {
         summary: { type: "string", description: "Event summary" },
-        entities: { type: "array", description: "Involved entities" },
-        outcome: { type: "string", description: "Event outcome" },
-        relations: { type: "array", description: "Entity relationships" },
       },
       required: ["summary"],
     },
-    execute: async ({ args, context }) => storeEvent(args as any, context),
+    execute: async ({ args, context }: { args: Record<string, unknown>; context: ToolContext }) => 
+      storeEventWithFallback(args as { summary: string }, context),
   });
-
+  
   api.registerTool({
-    name: "query_graph",
-    description: "Query the memory graph for entity relationships",
-    parameters: {
-      type: "object",
-      properties: { entity: { type: "string", description: "Entity name" } },
-      required: ["entity"],
-    },
-    execute: async ({ args, context }) => queryGraph(args as { entity: string }, context),
-  });
-
-  api.registerTool({
-    name: "get_hot_context",
-    description: "Get current hot context including SOUL.md and recent data",
-    parameters: {
-      type: "object",
-      properties: { limit: { type: "number", description: "Max items", default: 20 } },
-    },
-    execute: async ({ args, context }) => getHotContext(args as { limit?: number }, context),
-  });
-
-  api.registerTool({
-    name: "reflect_memory",
-    description: "Trigger reflection to convert episodic events into semantic knowledge",
+    name: "cortex_memory_status",
+    description: "Get the current status of the Cortex Memory plugin",
     parameters: { type: "object", properties: {} },
-    execute: async ({ args, context }) => reflectMemory(args, context),
+    execute: async ({ args, context }: { args: Record<string, unknown>; context: ToolContext }) => 
+      getPluginStatus(args, context),
   });
+}
 
-  api.registerTool({
-    name: "sync_memory",
-    description: "Sync session data from OpenClaw to memory system",
-    parameters: { type: "object", properties: {} },
-    execute: async ({ args, context }) => syncMemory(args, context),
+export function getStatus(): { enabled: boolean; serviceRunning: boolean } {
+  return {
+    enabled: isEnabled,
+    serviceRunning: pythonProcess !== null
+  };
+}
+
+export async function unregister(): Promise<void> {
+  logger.info("Unregistering Cortex Memory plugin...");
+  
+  stopConfigWatcher();
+  
+  unregisterHooks();
+  unregisterTools();
+  
+  stopPythonService();
+  
+  isEnabled = false;
+  api = null;
+  config = null;
+  builtinMemory = null;
+  registeredTools = [];
+  registeredHooks = [];
+  configPath = null;
+  
+  logger.info("Cortex Memory plugin unregistered successfully");
+}
+
+export async function register(pluginApi: OpenClawPluginApi, userConfig?: Partial<CortexMemoryConfig>): Promise<void> {
+  api = pluginApi;
+  config = { 
+    embedding: userConfig?.embedding || { provider: "openai", model: "" },
+    llm: userConfig?.llm || { model: "" },
+    reranker: userConfig?.reranker || { model: "" },
+    dbPath: userConfig?.dbPath,
+    autoSync: userConfig?.autoSync ?? defaultConfig.autoSync,
+    autoReflect: userConfig?.autoReflect ?? defaultConfig.autoReflect,
+    enabled: userConfig?.enabled ?? defaultConfig.enabled,
+    fallbackToBuiltin: userConfig?.fallbackToBuiltin ?? defaultConfig.fallbackToBuiltin,
+  } as CortexMemoryConfig;
+  
+  logger = api.getLogger();
+  logger.info("Registering Cortex Memory plugin...");
+  
+  if (api.getBuiltinMemory) {
+    builtinMemory = api.getBuiltinMemory();
+    logger.info("OpenClaw builtin memory system available for fallback");
+  }
+  
+  const safeConfig = sanitizeForLogging({
+    embedding: { provider: config.embedding.provider, model: config.embedding.model },
+    llm: { provider: config.llm.provider, model: config.llm.model },
+    reranker: { model: config.reranker.model },
+    enabled: config.enabled,
+    fallbackToBuiltin: config.fallbackToBuiltin,
   });
+  logger.info(`Configuration: ${JSON.stringify(safeConfig)}`);
 
-  api.registerTool({
-    name: "promote_memory",
-    description: "Promote frequently accessed memories to core rules",
-    parameters: { type: "object", properties: {} },
-    execute: async ({ args, context }) => promoteMemory(args, context),
-  });
+  await checkOpenClawVersion();
+  
+  configPath = findOpenClawConfig();
+  if (configPath) {
+    logger.info(`Found OpenClaw config at: ${configPath}`);
+  }
 
-  api.registerTool({
-    name: "delete_memory",
-    description: "Delete a specific memory by ID",
-    parameters: {
-      type: "object",
-      properties: { memory_id: { type: "string", description: "Memory ID to delete" } },
-      required: ["memory_id"],
-    },
-    execute: async ({ args, context }) => deleteMemory(args as { memory_id: string }, context),
-  });
+  setupProcessHandlers();
+  startConfigWatcher();
 
-  api.registerTool({
-    name: "update_memory",
-    description: "Update a specific memory's content, type, or weight",
-    parameters: {
-      type: "object",
-      properties: {
-        memory_id: { type: "string", description: "Memory ID to update" },
-        text: { type: "string", description: "New text content" },
-        type: { type: "string", description: "New memory type" },
-        weight: { type: "number", description: "New weight value" },
-      },
-      required: ["memory_id"],
-    },
-    execute: async ({ args, context }) => updateMemory(args as { memory_id: string; text?: string; type?: string; weight?: number }, context),
-  });
+  const initialEnabled = loadPluginEnabledState();
+  isEnabled = config.enabled !== false && initialEnabled;
 
-  api.registerTool({
-    name: "cleanup_memories",
-    description: "Clean up old memories beyond specified days",
-    parameters: {
-      type: "object",
-      properties: {
-        days_old: { type: "number", description: "Delete memories older than this many days (default: 90)" },
-        memory_type: { type: "string", description: "Only clean up memories of this type" },
-      },
-    },
-    execute: async ({ args, context }) => cleanupMemories(args as { days_old?: number; memory_type?: string }, context),
-  });
+  if (isEnabled) {
+    try {
+      await startPythonService();
+      await waitForService();
+      logger.info("Cortex Memory Python service started successfully");
+      registerTools();
+      registerHooks();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      logger.error(`Failed to start Cortex Memory service: ${message}`);
+      
+      if (config.fallbackToBuiltin && builtinMemory) {
+        logger.info("Falling back to builtin memory system");
+        isEnabled = false;
+        registerFallbackTools();
+      } else {
+        throw new Error(`Cortex Memory plugin initialization failed: ${message}`);
+      }
+    }
+  } else {
+    logger.info("Cortex Memory plugin is disabled in configuration");
+    if (config.fallbackToBuiltin && builtinMemory) {
+      logger.info("Using builtin memory system");
+      registerFallbackTools();
+    }
+  }
 
-  api.registerTool({
-    name: "diagnostics",
-    description: "Run system diagnostics to check configuration and connectivity",
-    parameters: { type: "object", properties: {} },
-    execute: async ({ args, context }) => runDiagnostics(args, context),
-  });
-
-  api.registerHook({ event: "message", handler: onMessageHandler });
-  api.registerHook({ event: "session_end", handler: onSessionEndHandler });
-  api.registerHook({ event: "timer", handler: onTimerHandler });
-
-  logger.info("Cortex Memory plugin registered successfully");
+  logger.info("Cortex Memory plugin registration complete");
 }
