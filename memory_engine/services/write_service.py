@@ -11,16 +11,16 @@ class MemoryWriteService:
     def __init__(self, semantic_memory: SemanticMemory = None):
         self.semantic = semantic_memory or SemanticMemory()
 
-    def write_memory(self, text: str, source: str = "manual", memory_type: str = "event") -> str:
+    def write_memory(self, text: str, source: str = "manual", category: str = "event") -> str:
         if not text or not text.strip():
             logger.warning("Empty text provided, skipping memory write")
             return None
         
         meta = MemoryMetadata(
-            type=memory_type,
+            category=category,
             date=datetime.now(timezone.utc).strftime("%Y-%m-%d"),
             agent="openclaw",
-            source_file=source
+            source=source
         )
         try:
             return self.semantic.add_memory(text.strip(), meta)

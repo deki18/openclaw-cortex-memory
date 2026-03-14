@@ -102,5 +102,5 @@ class MemoryController:
     def inject_core_rule(self):
         self._sync_service.inject_core_rule()
 
-    def cleanup_old_memories(self, days_old: int = 90, memory_type: str = None):
-        return self._maintenance_service.cleanup_old_memories(days_old, memory_type)
+    def cleanup_old_memories(self, days_old: int = 90, category: str = None):
+        return self._maintenance_service.cleanup_old_memories(days_old, category)

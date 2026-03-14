@@ -191,7 +191,6 @@ class SystemMetadata:
     """
     source: str = "manual"
     agent: str = "openclaw"
-    memory_type: str = "general"
     batch_id: str = ""
     created_at: float = field(default_factory=lambda: datetime.now(timezone.utc).timestamp())
     updated_at: float = field(default_factory=lambda: datetime.now(timezone.utc).timestamp())
@@ -207,14 +206,12 @@ class SystemMetadata:
         cls,
         source: str = "manual",
         agent: str = "openclaw",
-        memory_type: str = "general",
         batch_id: str = "",
         quality_level: str = "medium"
     ) -> "SystemMetadata":
         return cls(
             source=source,
             agent=agent,
-            memory_type=memory_type,
             batch_id=batch_id,
             quality_level=quality_level
         )
@@ -223,7 +220,6 @@ class SystemMetadata:
         return {
             "source": self.source,
             "agent": self.agent,
-            "memory_type": self.memory_type,
             "batch_id": self.batch_id,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
@@ -241,7 +237,6 @@ class SystemMetadata:
         return cls(
             source=data.get("source", "manual"),
             agent=data.get("agent", "openclaw"),
-            memory_type=data.get("memory_type", "general"),
             batch_id=data.get("batch_id", ""),
             created_at=data.get("created_at", now),
             updated_at=data.get("updated_at", now),

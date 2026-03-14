@@ -751,7 +751,7 @@ class MemoryQualityEvaluator:
             similar_memories = self.store.search_similar(
                 query_vector=current_embedding,
                 top_k=5,
-                memory_type=None
+                category=None
             )
             
             if not similar_memories:

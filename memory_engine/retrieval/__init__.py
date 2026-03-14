@@ -37,9 +37,17 @@ from .unified_search import (
     VectorSearcher,
     KeywordSearcher,
     GraphSearcher,
+    EpisodicSearcherWrapper,
     ResultFusion,
     TimeDecayScorer,
     ContextAwareScorer
+)
+from .episodic_searcher import (
+    EpisodicSearcher,
+    EpisodicSearchResult
+)
+from .result_enhancer import (
+    ResultEnhancer
 )
 
 __all__ = [
@@ -75,6 +83,10 @@ __all__ = [
     "VectorSearcher",
     "KeywordSearcher",
     "GraphSearcher",
+    "EpisodicSearcherWrapper",
+    "EpisodicSearcher",
+    "EpisodicSearchResult",
+    "ResultEnhancer",
     "ResultFusion",
     "TimeDecayScorer",
     "ContextAwareScorer"

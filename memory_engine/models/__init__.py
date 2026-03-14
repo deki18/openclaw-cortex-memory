@@ -12,6 +12,15 @@ from .memory_unit import (
     L2MemoryUnit,
 )
 
+from .episodic_event import (
+    EpisodicEvent,
+    SessionContext,
+    TaskType,
+    TaskOutcome,
+    TASK_TYPE_LABELS,
+    TASK_OUTCOME_LABELS,
+)
+
 __all__ = [
     "MemoryUnit",
     "Chunk",
@@ -24,4 +33,10 @@ __all__ = [
     "L0MemoryUnit",
     "L1MemoryUnit",
     "L2MemoryUnit",
+    "EpisodicEvent",
+    "SessionContext",
+    "TaskType",
+    "TaskOutcome",
+    "TASK_TYPE_LABELS",
+    "TASK_OUTCOME_LABELS",
 ]

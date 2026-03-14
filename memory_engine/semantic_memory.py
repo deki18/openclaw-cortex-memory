@@ -45,7 +45,7 @@ class SemanticMemory:
         query: str,
         top_k: int = 10,
         query_type: str = "hybrid",
-        memory_type: Optional[str] = None
+        category: Optional[str] = None
     ) -> List:
         embedding = self.embedding_module.embed_text([query])[0]
         return self.store.search(
@@ -53,7 +53,7 @@ class SemanticMemory:
             query_text=query,
             limit=top_k,
             query_type=query_type,
-            memory_type=memory_type
+            category=category
         )
 
     def get_by_id(self, memory_id: str) -> Optional:
@@ -71,8 +71,8 @@ class SemanticMemory:
     def count(self) -> int:
         return self.store.count()
 
-    def count_by_type(self, memory_type: str) -> int:
-        return self.store.count_by_type(memory_type)
+    def count_by_category(self, category: str) -> int:
+        return self.store.count_by_category(category)
 
     def list_all(self, limit: int = 100, offset: int = 0) -> List:
         return self.store.list_all(limit, offset)

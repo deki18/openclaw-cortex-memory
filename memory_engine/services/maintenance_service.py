@@ -25,7 +25,7 @@ class MemoryMaintenanceService:
         self.promotion = PromotionEngine()
         self.reflection = ReflectionEngine()
 
-    def cleanup_old_memories(self, days_old: int = 90, memory_type: str = None) -> int:
+    def cleanup_old_memories(self, days_old: int = 90, category: str = None) -> int:
         cutoff_date = (datetime.now(timezone.utc) - timedelta(days=days_old)).strftime("%Y-%m-%d")
         deleted_count = 0
         
@@ -33,9 +33,9 @@ class MemoryMaintenanceService:
             all_memories = self.semantic.list_all(limit=10000)
             for memory in all_memories:
                 if memory.date < cutoff_date:
-                    if memory_type and memory.type != memory_type:
+                    if category and memory.category != category:
                         continue
-                    if memory.type == "core_rule":
+                    if memory.category == "core_rule":
                         continue
                     self.semantic.delete_by_id(memory.id)
                     deleted_count += 1

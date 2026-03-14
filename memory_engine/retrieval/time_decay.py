@@ -55,14 +55,14 @@ class TimeDecayCalculator:
     def calculate(
         self,
         days_old: float,
-        memory_type: str = "other",
+        category: str = "other",
         hit_count: int = 0,
         importance_score: float = 0.5,
         weight: int = 1
     ) -> float:
         base_decay = self._calculate_base_decay(days_old)
         
-        type_multiplier = self.config.type_weights.get(memory_type, 1.0)
+        type_multiplier = self.config.type_weights.get(category, 1.0)
         
         hit_bonus = min(0.5, hit_count * self.config.hit_count_weight)
         
@@ -129,7 +129,7 @@ class TimeDecayCalculator:
             
             score = self.calculate(
                 days_old=days_old,
-                memory_type=item.get(type_field, "other"),
+                category=item.get(type_field, "other"),
                 hit_count=item.get(hit_count_field, 0),
                 importance_score=item.get(importance_field, 0.5),
                 weight=item.get(weight_field, 1)
@@ -163,32 +163,32 @@ class AdaptiveDecayCalculator(TimeDecayCalculator):
         self._access_history: Dict[str, List[float]] = {}
         self._type_access_stats: Dict[str, Dict] = {}
 
-    def record_access(self, memory_id: str, memory_type: str):
+    def record_access(self, memory_id: str, category: str):
         now = datetime.now(timezone.utc).timestamp()
         
         if memory_id not in self._access_history:
             self._access_history[memory_id] = []
         self._access_history[memory_id].append(now)
         
-        if memory_type not in self._type_access_stats:
-            self._type_access_stats[memory_type] = {"count": 0, "last_access": now}
-        self._type_access_stats[memory_type]["count"] += 1
-        self._type_access_stats[memory_type]["last_access"] = now
+        if category not in self._type_access_stats:
+            self._type_access_stats[category] = {"count": 0, "last_access": now}
+        self._type_access_stats[category]["count"] += 1
+        self._type_access_stats[category]["last_access"] = now
 
     def calculate_with_history(
         self,
         memory_id: str,
         days_old: float,
-        memory_type: str = "other",
+        category: str = "other",
         hit_count: int = 0,
         importance_score: float = 0.5,
         weight: int = 1
     ) -> float:
-        base_score = self.calculate(days_old, memory_type, hit_count, importance_score, weight)
+        base_score = self.calculate(days_old, category, hit_count, importance_score, weight)
         
         access_bonus = self._calculate_access_frequency_bonus(memory_id)
         
-        type_bonus = self._calculate_type_relevance_bonus(memory_type)
+        type_bonus = self._calculate_type_relevance_bonus(category)
         
         final_score = base_score * (1.0 + access_bonus) * (1.0 + type_bonus)
         
@@ -205,11 +205,11 @@ class AdaptiveDecayCalculator(TimeDecayCalculator):
         
         return min(0.3, recent_accesses * 0.05)
 
-    def _calculate_type_relevance_bonus(self, memory_type: str) -> float:
-        if memory_type not in self._type_access_stats:
+    def _calculate_type_relevance_bonus(self, category: str) -> float:
+        if category not in self._type_access_stats:
             return 0.0
         
-        stats = self._type_access_stats[memory_type]
+        stats = self._type_access_stats[category]
         now = datetime.now(timezone.utc).timestamp()
         
         hours_since_last = (now - stats["last_access"]) / 3600

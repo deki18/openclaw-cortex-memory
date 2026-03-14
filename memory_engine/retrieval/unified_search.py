@@ -19,6 +19,7 @@ class SearchSource(Enum):
     VECTOR = "vector"
     KEYWORD = "keyword"
     GRAPH = "graph"
+    EPISODIC = "episodic"
     FUSION = "fusion"
 
 
@@ -67,11 +68,13 @@ class SearchConfig:
     vector_k: int = 50
     keyword_k: int = 30
     graph_k: int = 20
+    episodic_k: int = 20
     
     enable_hot_cache: bool = True
     enable_vector: bool = True
     enable_keyword: bool = True
     enable_graph: bool = True
+    enable_episodic: bool = True
     
     enable_time_decay: bool = True
     enable_rerank: bool = True
@@ -89,6 +92,26 @@ class SearchConfig:
     })
 
 
+def has_valid_filters(filters: Dict[str, Any]) -> bool:
+    if not filters:
+        return False
+    
+    date_filter = filters.get("date")
+    if date_filter:
+        if date_filter.get("type") == "exact" and date_filter.get("value"):
+            return True
+        if date_filter.get("type") == "range" and date_filter.get("start") and date_filter.get("end"):
+            return True
+    
+    if filters.get("agent"):
+        return True
+    
+    if filters.get("source"):
+        return True
+    
+    return False
+
+
 class HotCacheSearcher:
     def __init__(self, tiered_manager):
         self.tiered_manager = tiered_manager
@@ -99,12 +122,22 @@ class HotCacheSearcher:
         top_k: int = 50,
         filters: Dict[str, Any] = None
     ) -> List[UnifiedSearchItem]:
-        hot_items = self.tiered_manager.search_hot(query_vector, top_k)
+        hot_items = self.tiered_manager.hot_cache.get_all()
+        
+        if has_valid_filters(filters):
+            hot_items = [item for item in hot_items if self._match_filters(item.metadata, filters)]
+        
+        scored = []
+        for item in hot_items:
+            if item.vector:
+                similarity = self._cosine_similarity(query_vector, item.vector)
+                scored.append((similarity, item))
+        
+        scored.sort(key=lambda x: x[0], reverse=True)
+        top_items = [item for _, item in scored[:top_k]]
         
         results = []
-        for item in hot_items:
-            if filters and not self._match_filters(item.metadata, filters):
-                continue
+        for item in top_items:
             results.append(UnifiedSearchItem(
                 id=item.id,
                 text=item.text,
@@ -116,6 +149,19 @@ class HotCacheSearcher:
             ))
         
         return results
+    
+    def _cosine_similarity(self, vec1: List[float], vec2: List[float]) -> float:
+        if not vec1 or not vec2 or len(vec1) != len(vec2):
+            return 0.0
+        
+        dot = sum(a * b for a, b in zip(vec1, vec2))
+        norm1 = math.sqrt(sum(a * a for a in vec1))
+        norm2 = math.sqrt(sum(b * b for b in vec2))
+        
+        if norm1 == 0 or norm2 == 0:
+            return 0.0
+        
+        return dot / (norm1 * norm2)
     
     def _match_filters(self, metadata: Dict, filters: Dict) -> bool:
         date_filter = filters.get("date")
@@ -201,14 +247,17 @@ class KeywordSearcher:
         keywords: List[str] = None,
         filters: Dict[str, Any] = None
     ) -> List[UnifiedSearchItem]:
-        if keywords:
-            expanded_query = f"{query} {' '.join(keywords)}"
-        else:
-            expanded_query = query
+        if not keywords:
+            return []
+        
+        search_query = ' '.join(keywords)
+        
+        if not search_query.strip():
+            return []
         
         results = self.store.search(
             query_vector=None,
-            query_text=expanded_query,
+            query_text=search_query,
             limit=top_k,
             query_type="fts",
             filters=filters
@@ -252,13 +301,12 @@ class GraphSearcher:
             graph_items = self.graph_retriever.retrieve_with_graph(
                 query=query,
                 entities=entities,
-                top_k=top_k
+                top_k=top_k,
+                filters=filters
             )
             
             for item in graph_items:
                 if isinstance(item, dict):
-                    if filters and not self._match_filters(item, filters):
-                        continue
                     items.append(UnifiedSearchItem(
                         id=item.get("id", ""),
                         text=item.get("text", ""),
@@ -270,38 +318,138 @@ class GraphSearcher:
             logger.warning(f"Graph search failed: {e}")
         
         return items
+
+
+class EpisodicSearcherWrapper:
+    def __init__(self, episodic_memory):
+        self.episodic = episodic_memory
     
-    def _match_filters(self, metadata: Dict, filters: Dict) -> bool:
+    def search(
+        self,
+        query: str,
+        query_vector: List[float] = None,
+        top_k: int = 20,
+        filters: Dict[str, Any] = None
+    ) -> List[UnifiedSearchItem]:
+        from ..episodic_memory import EpisodicMemory
+        from ..models.episodic_event import EpisodicEvent
+        
+        if not self.episodic:
+            return []
+        
+        events = self.episodic.load_episodic_events(limit=500)
+        
+        if has_valid_filters(filters):
+            events = self._apply_filters(events, filters)
+        
+        query_lower = query.lower()
+        query_words = set(query_lower.split())
+        
+        scored_events = []
+        
+        for event in events:
+            score = 0
+            
+            summary_lower = event.summary.lower()
+            if query_lower in summary_lower:
+                score += 10
+            else:
+                summary_words = set(summary_lower.split())
+                overlap = len(query_words & summary_words)
+                score += overlap * 2
+            
+            if event.cause:
+                cause_lower = event.cause.lower()
+                if query_lower in cause_lower:
+                    score += 5
+            
+            if event.solution:
+                solution_lower = event.solution.lower()
+                if query_lower in solution_lower:
+                    score += 5
+            
+            for entity in event.entities:
+                if entity.lower() in query_lower:
+                    score += 3
+            
+            recency_bonus = self._calculate_recency_bonus(event.date)
+            score += recency_bonus
+            
+            importance_bonus = event.importance * 0.5
+            score += importance_bonus
+            
+            if score > 0:
+                scored_events.append((event, score))
+        
+        scored_events.sort(key=lambda x: x[1], reverse=True)
+        
+        results = []
+        for event, score in scored_events[:top_k]:
+            results.append(UnifiedSearchItem(
+                id=event.id,
+                text=event.get_search_text(),
+                score=min(score / 15, 1.0),
+                source=SearchSource.EPISODIC,
+                metadata={
+                    "summary": event.summary,
+                    "cause": event.cause,
+                    "solution": event.solution,
+                    "outcome": event.outcome,
+                    "date": event.date,
+                    "task_type": event.task_type,
+                    "entities": event.entities,
+                    "memory_ids": event.memory_ids,
+                    "importance": event.importance,
+                    "is_episodic_event": True,
+                }
+            ))
+        
+        return results
+    
+    def _apply_filters(self, events: List, filters: Dict[str, Any]) -> List:
+        result = events
+        
         date_filter = filters.get("date")
         if date_filter:
-            item_date = metadata.get("date", "")
-            if not self._match_date_filter(item_date, date_filter):
-                return False
+            if date_filter.get("type") == "exact":
+                exact_date = date_filter.get("value")
+                result = [e for e in result if e.date == exact_date]
+            elif date_filter.get("type") == "range":
+                start = date_filter.get("start", "")
+                end = date_filter.get("end", "")
+                result = [e for e in result if start <= e.date <= end]
         
-        agent_filter = filters.get("agent")
-        if agent_filter:
-            item_agent = metadata.get("agent", "")
-            if item_agent != agent_filter:
-                return False
+        task_type = filters.get("task_type")
+        if task_type:
+            result = [e for e in result if e.task_type == task_type]
         
-        source_filter = filters.get("source")
-        if source_filter:
-            item_source = metadata.get("source", "")
-            if item_source != source_filter:
-                return False
+        outcome = filters.get("outcome")
+        if outcome:
+            result = [e for e in result if e.outcome == outcome]
         
-        return True
+        return result
     
-    def _match_date_filter(self, item_date: str, date_filter: Dict) -> bool:
-        if not item_date:
-            return True
-        if date_filter.get("type") == "exact":
-            return item_date == date_filter.get("value")
-        elif date_filter.get("type") == "range":
-            start = date_filter.get("start", "")
-            end = date_filter.get("end", "")
-            return start <= item_date <= end
-        return True
+    def _calculate_recency_bonus(self, date_str: str) -> float:
+        if not date_str:
+            return 0
+        
+        try:
+            event_date = datetime.strptime(date_str, "%Y-%m-%d")
+            now = datetime.now()
+            days_diff = (now - event_date).days
+            
+            if days_diff <= 1:
+                return 3.0
+            elif days_diff <= 7:
+                return 2.0
+            elif days_diff <= 30:
+                return 1.0
+            elif days_diff <= 90:
+                return 0.5
+            else:
+                return 0
+        except Exception:
+            return 0
 
 
 class ResultFusion:
@@ -451,6 +599,7 @@ class UnifiedSearchPipeline:
         graph_retriever=None,
         memory_graph=None,
         reranker=None,
+        episodic_memory=None,
         config: SearchConfig = None
     ):
         self.config = config or SearchConfig()
@@ -461,13 +610,14 @@ class UnifiedSearchPipeline:
         self.graph_retriever = graph_retriever
         self.memory_graph = memory_graph
         self.reranker = reranker
+        self.episodic_memory = episodic_memory
         
         self._init_searchers()
         
         self.time_decay_scorer = TimeDecayScorer(self.config.time_decay_halflife)
         self.context_scorer = ContextAwareScorer()
         
-        self._executor = ThreadPoolExecutor(max_workers=4)
+        self._executor = ThreadPoolExecutor(max_workers=5)
         self._lock = threading.RLock()
     
     def _init_searchers(self):
@@ -483,6 +633,12 @@ class UnifiedSearchPipeline:
             self.graph_searcher = GraphSearcher(self.graph_retriever, self.memory_graph)
         else:
             self.graph_searcher = None
+        
+        if self.episodic_memory:
+            self.episodic_searcher = EpisodicSearcherWrapper(self.episodic_memory)
+        else:
+            from ..episodic_memory import EpisodicMemory
+            self.episodic_searcher = EpisodicSearcherWrapper(EpisodicMemory())
     
     def search(
         self,
@@ -518,8 +674,8 @@ class UnifiedSearchPipeline:
         if enable_rerank and self.reranker and self.reranker.is_available():
             ranked_items = self._rerank(query, ranked_items)
         
-        if search_strategy and search_strategy.priority_types:
-            ranked_items = self._apply_type_priority(ranked_items, search_strategy)
+        if search_strategy and search_strategy.priority_categories:
+            ranked_items = self._apply_category_priority(ranked_items, search_strategy)
         
         final_items = ranked_items[:final_k]
         
@@ -555,12 +711,15 @@ class UnifiedSearchPipeline:
         vector_k = self.config.vector_k
         keyword_k = self.config.keyword_k
         graph_k = self.config.graph_k
+        episodic_k = self.config.episodic_k
         
         if search_strategy:
             hot_cache_k = int(self.config.hot_cache_k * search_strategy.hot_cache_k_multiplier)
             vector_k = int(self.config.vector_k * search_strategy.vector_k_multiplier)
             keyword_k = int(self.config.keyword_k * search_strategy.keyword_k_multiplier)
             graph_k = int(self.config.graph_k * search_strategy.graph_k_multiplier)
+            if hasattr(search_strategy, 'episodic_k_multiplier'):
+                episodic_k = int(self.config.episodic_k * search_strategy.episodic_k_multiplier)
         
         filters = None
         keywords = None
@@ -610,6 +769,17 @@ class UnifiedSearchPipeline:
                     max(5, graph_k),
                     filters
                 ), "graph")
+            )
+        
+        if self.config.enable_episodic and self.episodic_searcher and episodic_k > 0:
+            futures.append(
+                (self._executor.submit(
+                    self.episodic_searcher.search,
+                    query,
+                    query_vector,
+                    max(5, episodic_k),
+                    filters
+                ), "episodic")
             )
         
         all_items = []
@@ -700,20 +870,20 @@ class UnifiedSearchPipeline:
         
         return items
     
-    def _apply_type_priority(
+    def _apply_category_priority(
         self,
         items: List[UnifiedSearchItem],
         search_strategy: "SearchStrategy"
     ) -> List[UnifiedSearchItem]:
-        if not search_strategy.priority_types:
+        if not search_strategy.priority_categories:
             return items
         
-        type_weights = search_strategy.type_weights
+        category_weights = search_strategy.category_weights
         
         for item in items:
-            item_type = item.metadata.get("type", "")
-            if item_type in type_weights:
-                item.score = item.score * (1.0 + type_weights[item_type])
+            item_category = item.metadata.get("category", "")
+            if item_category in category_weights:
+                item.score = item.score * (1.0 + category_weights[item_category])
         
         items.sort(key=lambda x: x.score, reverse=True)
         

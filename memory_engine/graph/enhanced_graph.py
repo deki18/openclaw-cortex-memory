@@ -501,10 +501,12 @@ class GraphEnhancedRetriever:
         self,
         query: str,
         entities: List[str],
-        top_k: int = 10
+        top_k: int = 10,
+        filters: Dict[str, Any] = None
     ) -> List[Dict[str, Any]]:
         results = []
         seen_memory_ids = set()
+        has_filters = self._has_valid_filters(filters)
         
         for entity_name in entities[:5]:
             nodes = self.graph.find_nodes_by_name(entity_name)
@@ -519,6 +521,10 @@ class GraphEnhancedRetriever:
                     memory = self.store.get_by_id(memory_id)
                     if memory:
                         m_dict = memory.model_dump() if hasattr(memory, 'model_dump') else memory
+                        
+                        if has_filters and not self._match_filters(m_dict, filters):
+                            continue
+                        
                         m_dict["graph_context"] = {
                             "entity": node.name,
                             "entity_type": node.node_type
@@ -543,6 +549,10 @@ class GraphEnhancedRetriever:
                             memory = self.store.get_by_id(memory_id)
                             if memory:
                                 m_dict = memory.model_dump() if hasattr(memory, 'model_dump') else memory
+                                
+                                if has_filters and not self._match_filters(m_dict, filters):
+                                    continue
+                                
                                 m_dict["graph_context"] = {
                                     "entity": neighbor.name,
                                     "entity_type": neighbor.node_type,
@@ -553,6 +563,57 @@ class GraphEnhancedRetriever:
                                 seen_memory_ids.add(memory_id)
         
         return results[:top_k]
+    
+    def _has_valid_filters(self, filters: Dict[str, Any]) -> bool:
+        if not filters:
+            return False
+        
+        date_filter = filters.get("date")
+        if date_filter:
+            if date_filter.get("type") == "exact" and date_filter.get("value"):
+                return True
+            if date_filter.get("type") == "range" and date_filter.get("start") and date_filter.get("end"):
+                return True
+        
+        if filters.get("agent"):
+            return True
+        
+        if filters.get("source"):
+            return True
+        
+        return False
+    
+    def _match_filters(self, item: Dict[str, Any], filters: Dict[str, Any]) -> bool:
+        date_filter = filters.get("date")
+        if date_filter:
+            item_date = item.get("date", "")
+            if not self._match_date_filter(item_date, date_filter):
+                return False
+        
+        agent_filter = filters.get("agent")
+        if agent_filter:
+            item_agent = item.get("agent", "")
+            if item_agent != agent_filter:
+                return False
+        
+        source_filter = filters.get("source")
+        if source_filter:
+            item_source = item.get("source", "")
+            if item_source != source_filter:
+                return False
+        
+        return True
+    
+    def _match_date_filter(self, item_date: str, date_filter: Dict) -> bool:
+        if not item_date:
+            return True
+        if date_filter.get("type") == "exact":
+            return item_date == date_filter.get("value")
+        elif date_filter.get("type") == "range":
+            start = date_filter.get("start", "")
+            end = date_filter.get("end", "")
+            return start <= item_date <= end
+        return True
 
     def expand_query_entities(
         self,

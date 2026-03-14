@@ -13,7 +13,7 @@ class MemorySearchService:
         self.semantic = semantic_memory or SemanticMemory()
 
     def search(self, query: str, top_k: int = 10, final_k: int = 3, 
-               query_type: str = "hybrid", memory_type: Optional[str] = None) -> List[Dict[str, Any]]:
+               query_type: str = "hybrid", category: Optional[str] = None) -> List[Dict[str, Any]]:
         if not query or not query.strip():
             logger.warning("Empty query provided, returning empty results")
             return []
@@ -24,7 +24,7 @@ class MemorySearchService:
                 top_k=top_k,
                 final_k=final_k,
                 query_type=query_type,
-                memory_type=memory_type
+                category=category
             )
         except Exception as e:
             logger.error(f"Failed to search memory: {e}")

@@ -24,7 +24,7 @@ class RetrievalPipeline:
         top_k: int = 10,
         final_k: int = 3,
         query_type: str = "hybrid",
-        memory_type: Optional[str] = None,
+        category: Optional[str] = None,
         apply_time_decay: bool = True,
         apply_rerank: bool = True
     ) -> List[Dict[str, Any]]:
@@ -32,7 +32,7 @@ class RetrievalPipeline:
             query=query,
             top_k=top_k,
             query_type=query_type,
-            memory_type=memory_type
+            category=category
         )
         
         if not results:
@@ -107,17 +107,17 @@ class RetrievalPipeline:
         
         return results
 
-    def search_by_type(
+    def search_by_category(
         self,
         query: str,
-        memory_type: str,
+        category: str,
         top_k: int = 5
     ) -> List[Dict[str, Any]]:
         return self.search(
             query=query,
             top_k=top_k,
             final_k=top_k,
-            memory_type=memory_type
+            category=category
         )
 
     def get_core_rules(self, limit: int = 10) -> List[Dict[str, Any]]:

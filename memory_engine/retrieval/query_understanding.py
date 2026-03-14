@@ -21,13 +21,14 @@ class QueryIntent(Enum):
 
 @dataclass
 class SearchStrategy:
-    type_weights: Dict[str, float] = field(default_factory=dict)
-    priority_types: List[str] = field(default_factory=list)
+    category_weights: Dict[str, float] = field(default_factory=dict)
+    priority_categories: List[str] = field(default_factory=list)
     
     hot_cache_k_multiplier: float = 1.0
     vector_k_multiplier: float = 1.0
     keyword_k_multiplier: float = 1.0
     graph_k_multiplier: float = 1.0
+    episodic_k_multiplier: float = 1.0
     top_k_multiplier: float = 1.0
     
     enable_time_filter: Optional[bool] = None
@@ -41,23 +42,24 @@ class SearchStrategy:
 
 INTENT_STRATEGIES = {
     QueryIntent.HOW_TO: SearchStrategy(
-        type_weights={"instruction": 0.3, "knowledge": 0.2},
-        priority_types=["instruction", "knowledge"],
+        category_weights={"instruction": 0.3, "knowledge": 0.2},
+        priority_categories=["instruction", "knowledge"],
         vector_k_multiplier=0.875,
         keyword_k_multiplier=1.17,
     ),
     QueryIntent.FACT_LOOKUP: SearchStrategy(
-        type_weights={"fact": 0.3, "knowledge": 0.25},
-        priority_types=["fact", "knowledge"],
+        category_weights={"fact": 0.3, "knowledge": 0.25},
+        priority_categories=["fact", "knowledge"],
     ),
     QueryIntent.RECALL_EVENT: SearchStrategy(
-        type_weights={"event": 0.35, "episodic": 0.25, "daily_log": 0.15},
-        priority_types=["event", "episodic", "daily_log"],
+        category_weights={"event": 0.35, "conversation": 0.25, "progress": 0.15},
+        priority_categories=["event", "conversation", "progress"],
         enable_time_filter=True,
         time_decay_weight_adjustment=0.1,
         vector_k_multiplier=0.75,
         keyword_k_multiplier=0.83,
         graph_k_multiplier=1.5,
+        episodic_k_multiplier=2.0,
     ),
     QueryIntent.FIND_SIMILAR: SearchStrategy(
         vector_k_multiplier=1.25,
@@ -65,11 +67,12 @@ INTENT_STRATEGIES = {
         enable_rerank=True,
     ),
     QueryIntent.CHECK_STATUS: SearchStrategy(
-        type_weights={"daily_log": 0.3, "event": 0.2},
+        category_weights={"progress": 0.3, "event": 0.2},
         enable_time_filter=True,
         time_decay_weight_adjustment=0.2,
         vector_k_multiplier=0.75,
         keyword_k_multiplier=1.0,
+        episodic_k_multiplier=1.5,
     ),
     QueryIntent.COMPARE: SearchStrategy(
         graph_k_multiplier=2.5,

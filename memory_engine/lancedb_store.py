@@ -11,7 +11,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_VECTOR_DIM = 3072
 VECTOR_DIM = None
 
-VALID_MEMORY_TYPES = {"core_rule", "daily_log", "event", "episodic", "procedural", "general", "knowledge", "instruction", "fact"}
+VALID_CATEGORIES = {"fact", "instruction", "event", "conversation", "knowledge", "decision", "problem", "solution", "preference", "reminder", "requirement", "goal", "progress", "resource", "tool", "performance", "security", "design", "testing", "communication", "data", "team", "other", "chunk"}
 VALID_SOURCES = {"manual", "file_import", "api", "conversation", "web", "clipboard"}
 VALID_AGENTS = {"openclaw", "user", "assistant", "system"}
 ID_PATTERN = re.compile(r'^[a-zA-Z0-9_-]{1,128}$')
@@ -44,12 +44,12 @@ def _validate_date(date_str: str) -> bool:
     return bool(DATE_PATTERN.match(date_str))
 
 
-def _validate_memory_type(memory_type: str) -> bool:
-    if not memory_type or not isinstance(memory_type, str):
+def _validate_category(category: str) -> bool:
+    if not category or not isinstance(category, str):
         return False
-    if len(memory_type) > 32:
+    if len(category) > 32:
         return False
-    return memory_type in VALID_MEMORY_TYPES
+    return category in VALID_CATEGORIES
 
 
 def _validate_source(source: str) -> bool:
@@ -88,7 +88,7 @@ def create_memory_model(vector_dim: int):
         id: str
         vector: Vector(vector_dim)
         text: str
-        type: str
+        category: str
         date: str
         agent: str
         source: str
@@ -196,7 +196,7 @@ class LanceDBStore:
         query_text: str,
         limit: int = 10,
         query_type: str = "hybrid",
-        memory_type: Optional[str] = None,
+        category: Optional[str] = None,
         filters: Optional[Dict[str, Any]] = None,
     ) -> List:
         MemoryModel = get_memory_model()
@@ -216,11 +216,11 @@ class LanceDBStore:
             
             where_conditions = []
             
-            if memory_type:
-                if not _validate_memory_type(memory_type):
-                    logger.warning(f"Invalid memory_type: {memory_type}")
+            if category:
+                if not _validate_category(category):
+                    logger.warning(f"Invalid category: {category}")
                 else:
-                    where_conditions.append(f"type = '{_escape_sql_string(memory_type)}'")
+                    where_conditions.append(f"category = '{_escape_sql_string(category)}'")
             
             if filters:
                 date_filter = filters.get("date")
@@ -354,15 +354,15 @@ class LanceDBStore:
         table = self._get_table()
         return table.count_rows()
 
-    def count_by_type(self, memory_type: str) -> int:
-        if not _validate_memory_type(memory_type):
-            logger.warning(f"Invalid memory_type: {memory_type}")
+    def count_by_category(self, category: str) -> int:
+        if not _validate_category(category):
+            logger.warning(f"Invalid category: {category}")
             return 0
         table = self._get_table()
         try:
-            return table.count_rows(where=f"type = '{_escape_sql_string(memory_type)}'")
+            return table.count_rows(where=f"category = '{_escape_sql_string(category)}'")
         except Exception as e:
-            logger.error(f"Failed to count by type: {e}")
+            logger.error(f"Failed to count by category: {e}")
             return 0
 
     def list_all(self, limit: int = 100, offset: int = 0) -> List:
