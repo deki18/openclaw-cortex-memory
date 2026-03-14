@@ -128,6 +128,15 @@ const defaultConfig: Partial<CortexMemoryConfig> = {
   fallbackToBuiltin: true,
 };
 
+interface CachedSearchResult {
+  query: string;
+  results: unknown[];
+  timestamp: number;
+}
+
+let autoSearchCache: CachedSearchResult | null = null;
+const AUTO_SEARCH_CACHE_TTL = 60000;
+
 let config: CortexMemoryConfig | null = null;
 let logger: ReturnType<OpenClawPluginApi["getLogger"]>;
 let pythonProcess: ChildProcess | null = null;
@@ -614,6 +623,51 @@ async function getHotContext(args: { limit?: number }, _context: ToolContext): P
   }
 }
 
+async function getAutoContext(args: { include_hot?: boolean }, _context: ToolContext): Promise<ToolResult> {
+  if (!isEnabled) {
+    return { success: false, error: ERROR_CODES.PLUGIN_DISABLED.message, errorCode: ERROR_CODES.PLUGIN_DISABLED.code };
+  }
+  
+  const now = Date.now();
+  const result: {
+    auto_search?: {
+      query: string;
+      results: unknown[];
+      age_seconds: number;
+    };
+    hot_context?: unknown[];
+  } = {};
+  
+  if (autoSearchCache && (now - autoSearchCache.timestamp) < AUTO_SEARCH_CACHE_TTL) {
+    result.auto_search = {
+      query: autoSearchCache.query,
+      results: autoSearchCache.results,
+      age_seconds: Math.floor((now - autoSearchCache.timestamp) / 1000),
+    };
+  }
+  
+  if (args.include_hot !== false) {
+    try {
+      const hotResult = await apiCallWithRetry<{ context: unknown[] }>("/hot-context", "GET");
+      result.hot_context = hotResult.context;
+    } catch (error) {
+      logger.debug(`Failed to get hot context: ${formatApiError(error)}`);
+    }
+  }
+  
+  if (!result.auto_search && !result.hot_context) {
+    return { 
+      success: true, 
+      data: { 
+        message: "No auto-search results cached and hot context unavailable",
+        suggestion: "User messages will trigger auto-search. Try get_hot_context separately."
+      } 
+    };
+  }
+  
+  return { success: true, data: result };
+}
+
 async function reflectMemory(_args: Record<string, unknown>, _context: ToolContext): Promise<ToolResult> {
   if (!isEnabled) {
     return { success: false, error: ERROR_CODES.PLUGIN_DISABLED.message, errorCode: ERROR_CODES.PLUGIN_DISABLED.code };
@@ -761,24 +815,69 @@ async function getPluginStatus(_args: Record<string, unknown>, _context: ToolCon
 async function onMessageHandler(payload: unknown, context: ToolContext): Promise<void> {
   if (!isEnabled) return;
   
-  const data = payload as { content?: string; text?: string; source?: string };
+  const data = payload as { 
+    content?: string; 
+    text?: string; 
+    source?: string;
+    role?: string;
+  };
   const text = data.content || data.text;
   if (!text) return;
+  
+  const role = data.role || "user";
+  
   try {
-    await apiCall("/write", "POST", { text, source: data.source || "message" });
-    logger.info(`Stored message for session ${context.sessionId}`);
+    await apiCall("/write", "POST", { 
+      text, 
+      source: data.source || "message",
+      role
+    });
+    logger.info(`Stored ${role} message for session ${context.sessionId}`);
   } catch (error) {
     logger.warn(`Failed to store message: ${formatApiError(error)}`);
+  }
+  
+  if (role === "user" && text.length > 5) {
+    try {
+      const searchResult = await apiCall<{ results: unknown[] }>("/search", "POST", {
+        query: text,
+        top_k: 3,
+      });
+      
+      if (searchResult.results && searchResult.results.length > 0) {
+        autoSearchCache = {
+          query: text,
+          results: searchResult.results,
+          timestamp: Date.now(),
+        };
+        logger.info(`Auto-search cached ${searchResult.results.length} results for context`);
+      }
+    } catch (error) {
+      logger.debug(`Auto-search skipped: ${formatApiError(error)}`);
+    }
   }
 }
 
 async function onSessionEndHandler(payload: unknown, context: ToolContext): Promise<void> {
-  if (!isEnabled || !config?.autoSync) return;
+  if (!isEnabled) return;
+  
   try {
-    await apiCall("/sync", "POST");
-    logger.info(`Synced memory for session ${context.sessionId}`);
+    const endResult = await apiCall<{ events_generated: number }>(
+      "/session/end", 
+      "POST"
+    );
+    logger.info(`Session ${context.sessionId} ended, generated ${endResult.events_generated} events`);
   } catch (error) {
-    logger.warn(`Failed to sync on session end: ${formatApiError(error)}`);
+    logger.warn(`Failed to end session: ${formatApiError(error)}`);
+  }
+  
+  if (config?.autoSync) {
+    try {
+      await apiCall("/sync", "POST");
+      logger.info(`Synced memory for session ${context.sessionId}`);
+    } catch (error) {
+      logger.warn(`Failed to sync on session end: ${formatApiError(error)}`);
+    }
   }
 }
 
@@ -857,6 +956,18 @@ function registerTools(): void {
       },
       execute: async ({ args, context }: { args: Record<string, unknown>; context: ToolContext }) => 
         getHotContext(args as { limit?: number }, context),
+    },
+    {
+      name: "get_auto_context",
+      description: "Get automatically retrieved relevant memories based on recent user messages, plus hot context. Use this for proactive memory retrieval without explicit search.",
+      parameters: {
+        type: "object",
+        properties: { 
+          include_hot: { type: "boolean", description: "Include hot context (default: true)", default: true }
+        },
+      },
+      execute: async ({ args, context }: { args: Record<string, unknown>; context: ToolContext }) => 
+        getAutoContext(args as { include_hot?: boolean }, context),
     },
     {
       name: "reflect_memory",

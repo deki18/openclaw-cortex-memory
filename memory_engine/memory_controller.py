@@ -1,4 +1,5 @@
 import logging
+from typing import List, Optional
 
 from .config import get_config
 from .episodic_memory import EpisodicMemory
@@ -17,12 +18,25 @@ from .services import (
     MemoryMaintenanceService,
     MemoryEventService
 )
+from .episodic.session_manager import SessionManager
+from .models.episodic_event import EpisodicEvent
 
 logger = logging.getLogger(__name__)
 
 
 class MemoryController:
+    _instance = None
+    _session_manager: Optional[SessionManager] = None
+    
+    def __new__(cls):
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+        return cls._instance
+
     def __init__(self):
+        if hasattr(self, '_initialized') and self._initialized:
+            return
+        
         self.semantic = SemanticMemory()
         self.episodic = EpisodicMemory()
         self.procedural = ProceduralMemory()
@@ -38,6 +52,14 @@ class MemoryController:
         self._sync_service = MemorySyncService(self.write_pipeline, self.semantic)
         self._maintenance_service = MemoryMaintenanceService(self.semantic, self.episodic, self.graph)
         self._event_service = MemoryEventService(self.episodic, self.graph)
+        
+        self._session_manager = SessionManager(self.episodic)
+        
+        self._initialized = True
+
+    @property
+    def session_manager(self) -> SessionManager:
+        return self._session_manager
 
     @property
     def write_service(self) -> MemoryWriteService:
@@ -59,8 +81,31 @@ class MemoryController:
     def event_service(self) -> MemoryEventService:
         return self._event_service
 
-    def write_memory(self, text: str, source: str = "manual"):
-        return self._write_service.write_memory(text, source)
+    def write_memory(self, text: str, source: str = "manual", role: str = "user"):
+        memory_id = self._write_service.write_memory(text, source)
+        
+        if self._session_manager:
+            self._session_manager.add_message(role, text, memory_id)
+        
+        return memory_id
+
+    def write_assistant_message(self, text: str, source: str = "assistant"):
+        memory_id = self._write_service.write_memory(text, source)
+        
+        if self._session_manager:
+            self._session_manager.add_message("assistant", text, memory_id)
+        
+        return memory_id
+
+    def end_session(self) -> List[EpisodicEvent]:
+        if self._session_manager:
+            return self._session_manager.end_session()
+        return []
+
+    def start_session(self, session_id: str = None):
+        if self._session_manager:
+            return self._session_manager.start_session(session_id)
+        return None
 
     def search_memory(self, query: str):
         return self._search_service.search(query)

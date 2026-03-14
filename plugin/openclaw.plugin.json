@@ -112,6 +112,20 @@
       }
     },
     {
+      "name": "get_auto_context",
+      "description": "Get automatically retrieved relevant memories based on recent user messages, plus hot context. Use this for proactive memory retrieval without explicit search.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "include_hot": {
+            "type": "boolean",
+            "description": "Include hot context (default: true)",
+            "default": true
+          }
+        }
+      }
+    },
+    {
       "name": "reflect_memory",
       "description": "Trigger the reflection engine to process recent events into long-term semantic knowledge",
       "parameters": {

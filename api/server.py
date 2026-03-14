@@ -174,10 +174,15 @@ class StoreEventRequest(BaseModel):
 class WriteMemoryRequest(BaseModel):
     text: str
     source: str = "api"
+    role: str = "user"
 
 
 class QueryGraphRequest(BaseModel):
     entity: str
+
+
+class SessionEndRequest(BaseModel):
+    pass
 
 
 class ImportRequest(BaseModel):
@@ -361,10 +366,30 @@ async def write_memory(request: WriteMemoryRequest):
     if not controller:
         raise HTTPException(status_code=503, detail="Service not initialized")
     try:
-        memory_id = controller.write_memory(request.text, source=request.source)
+        memory_id = controller.write_memory(
+            request.text, 
+            source=request.source,
+            role=request.role
+        )
         return {"status": "ok", "memory_id": memory_id}
     except Exception as e:
         logger.error(f"Write error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/session/end")
+async def end_session():
+    if not controller:
+        raise HTTPException(status_code=503, detail="Service not initialized")
+    try:
+        events = controller.end_session()
+        return {
+            "status": "ok",
+            "events_generated": len(events),
+            "event_ids": [e.id for e in events] if events else []
+        }
+    except Exception as e:
+        logger.error(f"End session error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
