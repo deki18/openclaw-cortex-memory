@@ -308,10 +308,10 @@ class EnhancedMemoryController:
                 id=memory_id,
                 vector=vector,
                 text=text,
-                type=structured_summary.category,
+                type=system_metadata.memory_type,
                 date=datetime.now(timezone.utc).strftime("%Y-%m-%d"),
                 agent=system_metadata.agent,
-                source_file=system_metadata.source,
+                source=system_metadata.source,
                 hit_count=0,
                 weight=int(structured_summary.importance_score * 10)
             )
@@ -327,7 +327,7 @@ class EnhancedMemoryController:
                         type="chunk",
                         date=datetime.now(timezone.utc).strftime("%Y-%m-%d"),
                         agent="openclaw",
-                        source_file=memory_id,
+                        source=memory_id,
                         hit_count=0,
                         weight=0
                     )
@@ -347,10 +347,11 @@ class EnhancedMemoryController:
             
             entities = structured_summary.entities
             for entity in entities[:5]:
+                entity_text = entity.text if hasattr(entity, 'text') else str(entity)
                 self.memory_graph.add_node(
-                    node_id=f"entity:{entity}",
+                    node_id=f"entity:{entity_text}",
                     node_type="entity",
-                    name=entity,
+                    name=entity_text,
                     memory_id=memory_id
                 )
             
@@ -458,18 +459,18 @@ class EnhancedMemoryController:
         understanding = self.query_understanding.understand(query)
         
         entities = None
+        entity_types = None
         if use_graph and understanding.entities:
-            entities = [e.text for e in understanding.entities]
+            entities = understanding.get_entity_texts()
+            entity_types = understanding.get_entity_types()
         
         search_result = self.unified_search.search(
             query=query,
             top_k=top_k,
-            query_understanding={
-                "intent": understanding.intent.value,
-                "entities": entities or [],
-                "keywords": understanding.keywords
-            },
-            entities=entities
+            query_understanding=understanding.to_dict(),
+            entities=entities,
+            entity_types=entity_types,
+            search_strategy=understanding.search_strategy
         )
         
         final_items = []
@@ -509,11 +510,9 @@ class EnhancedMemoryController:
         understanding = self.query_understanding.understand(query)
         
         if understanding.entities:
-            expanded_queries = [query] + understanding.expanded_queries
-            
             search_result = self.unified_search.search_with_context(
                 query=query,
-                context_queries=expanded_queries[:3],
+                context_queries=[query],
                 top_k=top_k
             )
             

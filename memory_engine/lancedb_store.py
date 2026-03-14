@@ -1,7 +1,7 @@
 import logging
 import os
 import re
-from typing import Optional, List
+from typing import Any, Dict, List, Optional
 
 import lancedb
 from lancedb.pydantic import LanceModel, Vector
@@ -11,7 +11,9 @@ logger = logging.getLogger(__name__)
 DEFAULT_VECTOR_DIM = 3072
 VECTOR_DIM = None
 
-VALID_MEMORY_TYPES = {"core_rule", "daily_log", "event", "episodic", "procedural"}
+VALID_MEMORY_TYPES = {"core_rule", "daily_log", "event", "episodic", "procedural", "general", "knowledge", "instruction", "fact"}
+VALID_SOURCES = {"manual", "file_import", "api", "conversation", "web", "clipboard"}
+VALID_AGENTS = {"openclaw", "user", "assistant", "system"}
 ID_PATTERN = re.compile(r'^[a-zA-Z0-9_-]{1,128}$')
 DATE_PATTERN = re.compile(r'^\d{4}-\d{2}-\d{2}$')
 MEMORY_TYPE_PATTERN = re.compile(r'^[a-z_]{1,32}$')
@@ -50,6 +52,18 @@ def _validate_memory_type(memory_type: str) -> bool:
     return memory_type in VALID_MEMORY_TYPES
 
 
+def _validate_source(source: str) -> bool:
+    if not source or not isinstance(source, str):
+        return False
+    return source in VALID_SOURCES
+
+
+def _validate_agent(agent: str) -> bool:
+    if not agent or not isinstance(agent, str):
+        return False
+    return agent in VALID_AGENTS
+
+
 def _validate_text(text: str) -> bool:
     if not text or not isinstance(text, str):
         return False
@@ -77,7 +91,7 @@ def create_memory_model(vector_dim: int):
         type: str
         date: str
         agent: str
-        source_file: Optional[str] = None
+        source: str
         hit_count: int = 0
         weight: int = 1
 
@@ -183,6 +197,7 @@ class LanceDBStore:
         limit: int = 10,
         query_type: str = "hybrid",
         memory_type: Optional[str] = None,
+        filters: Optional[Dict[str, Any]] = None,
     ) -> List:
         MemoryModel = get_memory_model()
         table = self._get_table()
@@ -199,11 +214,44 @@ class LanceDBStore:
             else:
                 query_builder = table.search(query_text, query_type="fts").limit(limit)
             
+            where_conditions = []
+            
             if memory_type:
                 if not _validate_memory_type(memory_type):
                     logger.warning(f"Invalid memory_type: {memory_type}")
-                    return []
-                query_builder = query_builder.where(f"type = '{_escape_sql_string(memory_type)}'")
+                else:
+                    where_conditions.append(f"type = '{_escape_sql_string(memory_type)}'")
+            
+            if filters:
+                date_filter = filters.get("date")
+                if date_filter:
+                    if date_filter.get("type") == "exact":
+                        exact_date = date_filter.get("value")
+                        if exact_date:
+                            where_conditions.append(f"date = '{_escape_sql_string(exact_date)}'")
+                    elif date_filter.get("type") == "range":
+                        start_date = date_filter.get("start")
+                        end_date = date_filter.get("end")
+                        if start_date and end_date:
+                            where_conditions.append(f"date >= '{_escape_sql_string(start_date)}' AND date <= '{_escape_sql_string(end_date)}'")
+                
+                agent_filter = filters.get("agent")
+                if agent_filter:
+                    if _validate_agent(agent_filter):
+                        where_conditions.append(f"agent = '{_escape_sql_string(agent_filter)}'")
+                    else:
+                        logger.warning(f"Invalid agent filter: {agent_filter}")
+                
+                source_filter = filters.get("source")
+                if source_filter:
+                    if _validate_source(source_filter):
+                        where_conditions.append(f"source = '{_escape_sql_string(source_filter)}'")
+                    else:
+                        logger.warning(f"Invalid source filter: {source_filter}")
+            
+            if where_conditions:
+                where_clause = " AND ".join(where_conditions)
+                query_builder = query_builder.where(where_clause)
             
             return query_builder.to_pydantic(MemoryModel)
         except Exception as e:

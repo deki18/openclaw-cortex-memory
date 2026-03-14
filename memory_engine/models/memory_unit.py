@@ -11,6 +11,89 @@ class MemoryStatus(Enum):
     DELETED = "deleted"
 
 
+class EntityType(Enum):
+    PERSON = "person"
+    ORGANIZATION = "organization"
+    LOCATION = "location"
+    DATE = "date"
+    TIME = "time"
+    DATETIME = "datetime"
+    DURATION = "duration"
+    MONEY = "money"
+    PERCENTAGE = "percentage"
+    NUMBER = "number"
+    URL = "url"
+    EMAIL = "email"
+    PHONE = "phone"
+    TECHNICAL_TERM = "technical_term"
+    ACRONYM = "acronym"
+    PRODUCT = "product"
+    EVENT = "event"
+    CONCEPT = "concept"
+    PROJECT = "project"
+    FILE_PATH = "file_path"
+    CODE = "code"
+    OTHER = "other"
+
+
+ENTITY_TYPE_LABELS = {
+    EntityType.PERSON: "人名",
+    EntityType.ORGANIZATION: "组织",
+    EntityType.LOCATION: "地点",
+    EntityType.DATE: "日期",
+    EntityType.TIME: "时间",
+    EntityType.DATETIME: "日期时间",
+    EntityType.DURATION: "时长",
+    EntityType.MONEY: "金额",
+    EntityType.PERCENTAGE: "百分比",
+    EntityType.NUMBER: "数值",
+    EntityType.URL: "网址",
+    EntityType.EMAIL: "邮箱",
+    EntityType.PHONE: "电话",
+    EntityType.TECHNICAL_TERM: "技术术语",
+    EntityType.ACRONYM: "缩写",
+    EntityType.PRODUCT: "产品",
+    EntityType.EVENT: "事件",
+    EntityType.CONCEPT: "概念",
+    EntityType.PROJECT: "项目",
+    EntityType.FILE_PATH: "文件路径",
+    EntityType.CODE: "代码",
+    EntityType.OTHER: "其他",
+}
+
+
+@dataclass
+class Entity:
+    text: str
+    entity_type: str = "other"
+    start: int = 0
+    end: int = 0
+    confidence: float = 1.0
+    
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "text": self.text,
+            "entity_type": self.entity_type,
+            "start": self.start,
+            "end": self.end,
+            "confidence": self.confidence,
+        }
+    
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "Entity":
+        return cls(
+            text=data.get("text", ""),
+            entity_type=data.get("entity_type", "other"),
+            start=data.get("start", 0),
+            end=data.get("end", 0),
+            confidence=data.get("confidence", 1.0),
+        )
+    
+    @classmethod
+    def create_simple(cls, text: str, entity_type: str = "other") -> "Entity":
+        return cls(text=text, entity_type=entity_type)
+
+
 @dataclass
 class StructuredSummary:
     """结构化摘要 - 内容维度
@@ -21,7 +104,7 @@ class StructuredSummary:
     summary_text: str
     main_topic: str = ""
     keywords: List[str] = field(default_factory=list)
-    entities: List[str] = field(default_factory=list)
+    entities: List[Entity] = field(default_factory=list)
     sentiment: str = "neutral"
     category: str = "general"
     importance_score: float = 0.5
@@ -35,7 +118,7 @@ class StructuredSummary:
         summary_text: str,
         main_topic: str = "",
         keywords: List[str] = None,
-        entities: List[str] = None,
+        entities: List[Entity] = None,
         sentiment: str = "neutral",
         category: str = "general",
         importance_score: float = 0.5,
@@ -61,7 +144,7 @@ class StructuredSummary:
             "summary_text": self.summary_text,
             "main_topic": self.main_topic,
             "keywords": self.keywords,
-            "entities": self.entities,
+            "entities": [e.to_dict() if isinstance(e, Entity) else e for e in self.entities],
             "sentiment": self.sentiment,
             "category": self.category,
             "importance_score": self.importance_score,
@@ -72,11 +155,21 @@ class StructuredSummary:
     
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "StructuredSummary":
+        entities_data = data.get("entities", [])
+        entities = []
+        for e in entities_data:
+            if isinstance(e, dict):
+                entities.append(Entity.from_dict(e))
+            elif isinstance(e, Entity):
+                entities.append(e)
+            elif isinstance(e, str):
+                entities.append(Entity.create_simple(e))
+        
         return cls(
             summary_text=data.get("summary_text", ""),
             main_topic=data.get("main_topic", ""),
             keywords=data.get("keywords", []),
-            entities=data.get("entities", []),
+            entities=entities,
             sentiment=data.get("sentiment", "neutral"),
             category=data.get("category", "general"),
             importance_score=data.get("importance_score", 0.5),
@@ -84,6 +177,9 @@ class StructuredSummary:
             action_items=data.get("action_items", []),
             related_concepts=data.get("related_concepts", [])
         )
+    
+    def get_entity_texts(self) -> List[str]:
+        return [e.text for e in self.entities]
 
 
 @dataclass
@@ -95,6 +191,7 @@ class SystemMetadata:
     """
     source: str = "manual"
     agent: str = "openclaw"
+    memory_type: str = "general"
     batch_id: str = ""
     created_at: float = field(default_factory=lambda: datetime.now(timezone.utc).timestamp())
     updated_at: float = field(default_factory=lambda: datetime.now(timezone.utc).timestamp())
@@ -110,12 +207,14 @@ class SystemMetadata:
         cls,
         source: str = "manual",
         agent: str = "openclaw",
+        memory_type: str = "general",
         batch_id: str = "",
         quality_level: str = "medium"
     ) -> "SystemMetadata":
         return cls(
             source=source,
             agent=agent,
+            memory_type=memory_type,
             batch_id=batch_id,
             quality_level=quality_level
         )
@@ -124,6 +223,7 @@ class SystemMetadata:
         return {
             "source": self.source,
             "agent": self.agent,
+            "memory_type": self.memory_type,
             "batch_id": self.batch_id,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
@@ -141,6 +241,7 @@ class SystemMetadata:
         return cls(
             source=data.get("source", "manual"),
             agent=data.get("agent", "openclaw"),
+            memory_type=data.get("memory_type", "general"),
             batch_id=data.get("batch_id", ""),
             created_at=data.get("created_at", now),
             updated_at=data.get("updated_at", now),

@@ -9,10 +9,14 @@ from .query_understanding import (
     QueryUnderstandingPipeline,
     QueryUnderstanding,
     QueryIntent,
+    SearchStrategy,
     ExtractedEntity,
+    ENTITY_TYPES,
     IntentRecognizer,
     EntityExtractor,
-    QueryExpander
+    KeywordExtractor,
+    FilterExtractor,
+    ConfidenceCalculator
 )
 from .multi_stage import (
     MultiStageRetrievalPipeline,
@@ -47,10 +51,14 @@ __all__ = [
     "QueryUnderstandingPipeline",
     "QueryUnderstanding",
     "QueryIntent",
+    "SearchStrategy",
     "ExtractedEntity",
+    "ENTITY_TYPES",
     "IntentRecognizer",
     "EntityExtractor",
-    "QueryExpander",
+    "KeywordExtractor",
+    "FilterExtractor",
+    "ConfidenceCalculator",
     "MultiStageRetrievalPipeline",
     "RetrievalResult",
     "RetrievedItem",
