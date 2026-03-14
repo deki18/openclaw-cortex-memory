@@ -15,6 +15,40 @@ except Exception:
     OpenAI = None
 
 
+VALID_CATEGORIES = [
+    "fact", "instruction", "event", "conversation", "knowledge",
+    "decision", "problem", "solution", "preference", "reminder",
+    "requirement", "goal", "progress", "resource", "tool",
+    "performance", "security", "design", "testing", "communication",
+    "data", "team", "other"
+]
+
+CATEGORY_DESCRIPTIONS = {
+    "fact": "Factual statements, definitions, principles (事实定义类)",
+    "instruction": "How-to guides, tutorials, procedures (操作指南类)",
+    "event": "Events, meetings, activities, experiences (事件记录类)",
+    "conversation": "Dialogues, chats, discussions (对话记录类)",
+    "knowledge": "Learned insights, discoveries, summaries (知识发现类)",
+    "decision": "Decisions made, choices selected (决策类)",
+    "problem": "Errors, issues, bugs, failures (问题类)",
+    "solution": "Solutions, fixes, workarounds (解决方案类)",
+    "preference": "Preferences, likes, recommendations (偏好类)",
+    "reminder": "Reminders, warnings, notes to remember (提醒类)",
+    "requirement": "Requirements, needs, must-haves (需求类)",
+    "goal": "Goals, targets, objectives, plans (目标类)",
+    "progress": "Progress updates, status reports (进度类)",
+    "resource": "Resources, links, references, documents (资源类)",
+    "tool": "Tools, software, frameworks, plugins (工具类)",
+    "performance": "Performance, speed, optimization (性能类)",
+    "security": "Security, authentication, permissions (安全类)",
+    "design": "Design, architecture, patterns (设计类)",
+    "testing": "Testing, verification, validation (测试类)",
+    "communication": "Communication, feedback, reports (沟通类)",
+    "data": "Data, statistics, analysis, reports (数据类)",
+    "team": "Team, members, collaboration (团队类)",
+    "other": "Other categories not fitting above (其他)"
+}
+
 STRUCTURED_SUMMARY_PROMPT = """Analyze the following text and extract comprehensive structured information.
 
 Text:
@@ -26,7 +60,7 @@ Please provide:
 3. Relevant keywords (3-7 keywords)
 4. Named entities mentioned (people, places, organizations, technical terms, etc.)
 5. Sentiment (positive, negative, or neutral)
-6. Category (one of: fact, instruction, event, conversation, knowledge, technical, daily_log, other)
+6. Category (one of: fact, instruction, event, conversation, knowledge, decision, problem, solution, preference, reminder, requirement, goal, progress, resource, tool, performance, security, design, testing, communication, data, team, other)
 7. Importance score (0.0-1.0, where 1.0 is highly important)
 8. Key facts or insights (bullet points, max 5)
 9. Action items or tasks mentioned (if any)
@@ -286,23 +320,127 @@ class LLMExtractor:
         else:
             return "neutral"
 
+    CATEGORY_KEYWORDS = {
+        "instruction": [
+            "how to", "step", "guide", "tutorial", "walkthrough", "procedure",
+            "方法", "步骤", "教程", "操作", "流程", "配置", "安装", "部署",
+            "设置", "指南", "说明", "怎么做", "如何"
+        ],
+        "event": [
+            "meeting", "event", "schedule", "appointment", "conference",
+            "会议", "事件", "活动", "日程", "约会", "经历", "访问", "出行",
+            "发生", "举行", "参加", "出席"
+        ],
+        "conversation": [
+            "chat", "talk", "conversation", "dialogue", "discussion",
+            "对话", "聊天", "交流", "讨论", "沟通", "协商", "对话记录"
+        ],
+        "knowledge": [
+            "learned", "discovered", "found", "insight", "understanding",
+            "学到", "发现", "了解到", "认识到", "总结", "归纳", "心得",
+            "知识", "学习", "理解", "掌握", "原理", "概念"
+        ],
+        "decision": [
+            "decided", "chose", "selected", "determined", "concluded",
+            "决定", "选择", "确定", "采用", "选定", "方案", "计划",
+            "拍板", "定下", "决议", "决策"
+        ],
+        "problem": [
+            "error", "issue", "problem", "bug", "failed", "crash", "exception",
+            "错误", "问题", "失败", "异常", "故障", "崩溃", "报错",
+            "无法", "不能", "不工作", "卡住", "死机", "闪退", "报异常"
+        ],
+        "solution": [
+            "solved", "fixed", "resolved", "workaround", "patch",
+            "解决", "修复", "方案", "对策", "处理", "绕过", "补丁",
+            "修复了", "解决了", "处理了"
+        ],
+        "preference": [
+            "prefer", "like", "want", "favorite", "recommend",
+            "喜欢", "偏好", "想要", "倾向", "习惯", "推荐", "建议",
+            "更愿意", "倾向于", "首选"
+        ],
+        "reminder": [
+            "remember", "don't forget", "note", "alert", "caution",
+            "记住", "别忘了", "注意", "提醒", "警告", "小心", "留意",
+            "切记", "谨记", "重视"
+        ],
+        "requirement": [
+            "need", "require", "must", "should", "necessary",
+            "需求", "需要", "要求", "应该", "必须", "期望", "必要",
+            "不可或缺", "必备条件"
+        ],
+        "goal": [
+            "goal", "target", "objective", "aim", "milestone",
+            "目标", "目的", "计划", "规划", "愿景", "里程碑",
+            "指标", "方向", "期望达成"
+        ],
+        "progress": [
+            "progress", "status", "update", "ongoing", "pending",
+            "进展", "进度", "状态", "更新", "完成", "进行中",
+            "已完成", "待处理", "推进"
+        ],
+        "resource": [
+            "resource", "link", "reference", "material", "document",
+            "资源", "链接", "参考", "资料", "文档", "文献",
+            "教程链接", "参考资料", "相关文档"
+        ],
+        "tool": [
+            "tool", "software", "app", "plugin", "framework", "library",
+            "工具", "软件", "应用", "插件", "库", "框架",
+            "组件", "模块", "扩展"
+        ],
+        "performance": [
+            "performance", "speed", "optimization", "latency", "throughput",
+            "性能", "速度", "优化", "效率", "延迟", "吞吐量",
+            "响应时间", "加载", "运行速度"
+        ],
+        "security": [
+            "security", "safe", "protect", "auth", "permission",
+            "安全", "保护", "认证", "加密", "权限", "漏洞",
+            "防护", "隐私", "风险"
+        ],
+        "design": [
+            "design", "architecture", "pattern", "structure",
+            "设计", "架构", "模式", "结构", "规范", "标准",
+            "蓝图", "方案设计", "系统设计"
+        ],
+        "testing": [
+            "test", "testing", "verify", "validate", "qa",
+            "测试", "验证", "检查", "确认", "单元测试", "集成测试",
+            "回归测试", "测试用例"
+        ],
+        "communication": [
+            "discuss", "talk", "chat", "feedback", "report",
+            "沟通", "讨论", "交流", "对话", "协商", "反馈", "汇报",
+            "回复", "回复", "通知"
+        ],
+        "data": [
+            "data", "dataset", "statistics", "analysis", "report",
+            "数据", "数据集", "统计", "分析", "指标", "图表", "报告",
+            "数据源", "数据统计"
+        ],
+        "team": [
+            "team", "member", "collaborate", "partner",
+            "团队", "成员", "协作", "合作", "分工", "角色", "职责",
+            "同事", "伙伴", "项目组"
+        ],
+        "fact": [
+            "is", "are", "was", "were", "means", "defined as",
+            "定义", "是指", "意思是", "本质", "原理", "特性",
+            "事实", "实际上", "客观"
+        ]
+    }
+
     def _categorize(self, text: str) -> str:
         text_lower = text.lower()
         
-        if any(word in text_lower for word in ["how to", "step", "tutorial", "guide", "如何", "步骤", "教程"]):
-            return "instruction"
-        elif any(word in text_lower for word in ["meeting", "event", "schedule", "会议", "事件", "日程"]):
-            return "event"
-        elif any(word in text_lower for word in ["chat", "talk", "conversation", "对话", "聊天"]):
-            return "conversation"
-        elif any(word in text_lower for word in ["python", "code", "programming", "api", "function", "代码", "编程"]):
-            return "technical"
-        elif any(word in text_lower for word in ["today", "yesterday", "diary", "log", "今天", "昨天", "日记", "日志"]):
-            return "daily_log"
-        elif any(word in text_lower for word in ["fact", "knowledge", "learn", "study", "事实", "知识", "学习"]):
-            return "knowledge"
-        else:
-            return "fact"
+        for category, keywords in self.CATEGORY_KEYWORDS.items():
+            for keyword in keywords:
+                if keyword in text_lower:
+                    return category
+        
+        return "other"
 
 
 class MetadataEnricher:

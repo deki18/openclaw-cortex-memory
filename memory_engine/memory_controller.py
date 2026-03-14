@@ -3,7 +3,7 @@ import logging
 from .config import get_config
 from .episodic_memory import EpisodicMemory
 from .hot_memory import HotMemory
-from .memory_graph import MemoryGraph
+from .graph.enhanced_graph import EnhancedMemoryGraph
 from .procedural_memory import ProceduralMemory
 from .promotion_engine import PromotionEngine
 from .reflection_engine import ReflectionEngine
@@ -26,7 +26,7 @@ class MemoryController:
         self.semantic = SemanticMemory()
         self.episodic = EpisodicMemory()
         self.procedural = ProceduralMemory()
-        self.graph = MemoryGraph()
+        self.graph = EnhancedMemoryGraph()
         self.retrieval = RetrievalPipeline()
         self.write_pipeline = WritePipeline()
         self.promotion = PromotionEngine()
@@ -36,7 +36,7 @@ class MemoryController:
         self._write_service = MemoryWriteService(self.semantic)
         self._search_service = MemorySearchService(self.retrieval, self.semantic)
         self._sync_service = MemorySyncService(self.write_pipeline, self.semantic)
-        self._maintenance_service = MemoryMaintenanceService(self.semantic, self.episodic)
+        self._maintenance_service = MemoryMaintenanceService(self.semantic, self.episodic, self.graph)
         self._event_service = MemoryEventService(self.episodic, self.graph)
 
     @property
@@ -65,8 +65,21 @@ class MemoryController:
     def search_memory(self, query: str):
         return self._search_service.search(query)
 
-    def store_event(self, summary: str, entities: list = None, outcome: str = "", relations: list = None):
-        return self._event_service.store_event(summary, entities, outcome, relations)
+    def store_event(
+        self, 
+        summary: str, 
+        memory_id: str = None,
+        entities: list = None, 
+        relations: list = None,
+        outcome: str = ""
+    ):
+        return self._event_service.store_event(
+            summary=summary,
+            memory_id=memory_id,
+            entities=entities,
+            relations=relations,
+            outcome=outcome
+        )
 
     def reflect_memory(self):
         self._maintenance_service.reflect()

@@ -2,20 +2,26 @@ import logging
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 
-from .config import get_config
-from .episodic_memory import EpisodicMemory
-from .memory_graph import MemoryGraph
-from .promotion_engine import PromotionEngine
-from .reflection_engine import ReflectionEngine
-from .semantic_memory import SemanticMemory
+from ..config import get_config
+from ..episodic_memory import EpisodicMemory
+from ..graph.enhanced_graph import EnhancedMemoryGraph
+from ..promotion_engine import PromotionEngine
+from ..reflection_engine import ReflectionEngine
+from ..semantic_memory import SemanticMemory
 
 logger = logging.getLogger(__name__)
 
 
 class MemoryMaintenanceService:
-    def __init__(self, semantic_memory: SemanticMemory = None, episodic_memory: EpisodicMemory = None):
+    def __init__(
+        self, 
+        semantic_memory: SemanticMemory = None, 
+        episodic_memory: EpisodicMemory = None,
+        graph: EnhancedMemoryGraph = None
+    ):
         self.semantic = semantic_memory or SemanticMemory()
         self.episodic = episodic_memory or EpisodicMemory()
+        self.graph = graph or EnhancedMemoryGraph()
         self.promotion = PromotionEngine()
         self.reflection = ReflectionEngine()
 
