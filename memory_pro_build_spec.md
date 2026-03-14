@@ -104,7 +104,7 @@ Add LRU cache to reduce repeated embedding calls.
 
 File: vector_store.py
 
-Use ChromaDB.
+Use LanceDB.
 
 Functions: add_documents() query() delete() rebuild()
 

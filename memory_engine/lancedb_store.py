@@ -312,7 +312,7 @@ class LanceDBStore:
             return 0
         table = self._get_table()
         try:
-            return len(table.search().where(f"type = '{_escape_sql_string(memory_type)}'").limit(10000).to_pandas())
+            return table.count_rows(where=f"type = '{_escape_sql_string(memory_type)}'")
         except Exception as e:
             logger.error(f"Failed to count by type: {e}")
             return 0

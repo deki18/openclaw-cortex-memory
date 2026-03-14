@@ -56,9 +56,6 @@ def get_config() -> Dict[str, Any]:
     return _CONFIG
 
 
-CONFIG = property(lambda self: get_config())
-
-
 def get_openclaw_base_path() -> str:
     config = get_config()
     base_path = config.get("openclaw_base_path")

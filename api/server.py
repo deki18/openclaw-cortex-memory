@@ -190,10 +190,6 @@ class DateRangeRequest(BaseModel):
     limit: int = 50
 
 
-class MigrateRequest(BaseModel):
-    chromadb_path: str
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global controller
@@ -236,8 +232,8 @@ async def readiness_check():
 
 
 @app.get("/config")
-async def get_config():
-    return CONFIG
+async def get_config_route():
+    return get_config()
 
 
 @app.get("/status")
@@ -245,13 +241,14 @@ async def get_status():
     if not controller:
         raise HTTPException(status_code=503, detail="Service not initialized")
     
+    cfg = get_config()
     total_count = controller.semantic.count()
     core_rules_count = controller.semantic.count_by_type("core_rule")
     daily_logs_count = controller.semantic.count_by_type("daily_log")
     
     return {
         "status": "online",
-        "config_warnings": validate_config(CONFIG),
+        "config_warnings": validate_config(cfg),
         "stats": {
             "total_memories": total_count,
             "core_rules": core_rules_count,
@@ -283,7 +280,8 @@ async def run_diagnostics():
         "Configuration loaded successfully"
     )
     
-    embedding_model = CONFIG.get("embedding_model")
+    cfg = get_config()
+    embedding_model = cfg.get("embedding_model")
     add_check(
         "Embedding Model",
         bool(embedding_model),
@@ -291,7 +289,7 @@ async def run_diagnostics():
         "Add 'embedding.model' to openclaw.json (e.g., 'text-embedding-3-large')"
     )
     
-    llm_model = CONFIG.get("llm_model")
+    llm_model = cfg.get("llm_model")
     add_check(
         "LLM Model",
         bool(llm_model),
@@ -520,19 +518,6 @@ async def search_by_date_range(request: DateRangeRequest):
         return {"results": results}
     except Exception as e:
         logger.error(f"Date range search error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.post("/migrate")
-async def migrate_from_chromadb(request: MigrateRequest):
-    if not controller:
-        raise HTTPException(status_code=503, detail="Service not initialized")
-    try:
-        from memory_engine.migration import migrate_from_chromadb
-        migrated = migrate_from_chromadb(request.chromadb_path, controller.semantic.store)
-        return {"status": "ok", "migrated_count": migrated}
-    except Exception as e:
-        logger.error(f"Migration error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

@@ -1,8 +1,6 @@
 import argparse
 import sys
 from memory_engine.memory_controller import MemoryController
-from memory_engine.lancedb_store import LanceDBStore
-from memory_engine.migration import migrate_from_chromadb
 
 def main():
     parser = argparse.ArgumentParser(description="OpenClaw Cortex Memory CLI")
@@ -46,10 +44,6 @@ def main():
     # Count
     count_parser = subparsers.add_parser("count", help="Count total memories")
 
-    # Migrate
-    migrate_parser = subparsers.add_parser("migrate", help="Migrate from legacy ChromaDB")
-    migrate_parser.add_argument("--chromadb-path", type=str, required=True, help="Path to ChromaDB database")
-
     args = parser.parse_args()
     controller = MemoryController()
 
@@ -90,10 +84,6 @@ def main():
     elif args.command == "count":
         count = controller.semantic.count()
         print(f"Total memories: {count}")
-    elif args.command == "migrate":
-        store = LanceDBStore()
-        migrated = migrate_from_chromadb(args.chromadb_path, store)
-        print(f"Migrated {migrated} records from ChromaDB to LanceDB")
     else:
         parser.print_help()
 

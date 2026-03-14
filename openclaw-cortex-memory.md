@@ -80,7 +80,7 @@ Cursor + Claude 是目前最适合 AI IDE 的组合
 
 存储结构：
 
-ChromaDB + BM25 + Reranker
+LanceDB（向量 + FTS） + BM25 + Reranker
 
 ------------------------------------------------------------------------
 
@@ -125,13 +125,14 @@ Debug流程：\
 
 ## 向量数据库
 
-ChromaDB
+LanceDB
 
 原因：
 
 -   轻量
 -   本地
--   Metadata过滤
+-   内置全文搜索（FTS）
+-   高性能向量检索
 
 ------------------------------------------------------------------------
 
@@ -285,7 +286,7 @@ Embedding\
 ↓\
 Metadata\
 ↓\
-ChromaDB + BM25\
+LanceDB + BM25\
 ↓\
 Archive
 
@@ -339,7 +340,7 @@ Graph Node：
 关系示例：
 
 Joe → developing → OpenClaw\
-OpenClaw → uses → ChromaDB
+OpenClaw → uses → LanceDB
 
 作用：
 

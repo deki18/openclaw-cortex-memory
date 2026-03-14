@@ -34,6 +34,7 @@ interface CortexMemoryConfig {
   autoSync?: boolean;
   autoReflect?: boolean;
   fallbackToBuiltin?: boolean;
+  apiUrl?: string;
 }
 
 interface ToolContext {
@@ -379,8 +380,9 @@ async function startPythonService(): Promise<void> {
 
     setTimeout(() => {
       if (!started) {
+        const tail = stderrBuffer ? `\nLast stderr: ${stderrBuffer.slice(-500)}` : "";
         killPythonProcess();
-        reject(new Error("Timeout waiting for Python service to start (300s)"));
+        reject(new Error(`Timeout waiting for Python service to start (300s)${tail}`));
       }
     }, 300000);
   });
@@ -410,8 +412,12 @@ function stopPythonService(): void {
   }
 }
 
+function getBaseUrl(): string {
+  return config?.apiUrl ?? "http://127.0.0.1:8765";
+}
+
 async function waitForService(maxAttempts = 30): Promise<void> {
-  const apiUrl = "http://127.0.0.1:8765";
+  const apiUrl = getBaseUrl();
   for (let i = 0; i < maxAttempts; i++) {
     try {
       const response = await fetch(`${apiUrl}/health`, { signal: AbortSignal.timeout(1000) });
@@ -477,7 +483,7 @@ async function apiCallWithRetry<T>(
 }
 
 async function apiCall<T>(endpoint: string, method: "GET" | "POST" | "DELETE" | "PATCH" = "GET", body?: unknown): Promise<T> {
-  const url = `http://127.0.0.1:8765${endpoint}`;
+  const url = `${getBaseUrl()}${endpoint}`;
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 8000);
   const options: RequestInit = {
@@ -1116,13 +1122,14 @@ export async function register(pluginApi: OpenClawPluginApi, userConfig?: Partia
   api = pluginApi;
   config = { 
     embedding: userConfig?.embedding || { provider: "openai", model: "" },
-    llm: userConfig?.llm || { model: "" },
+    llm: userConfig?.llm || { provider: "openai", model: "" },
     reranker: userConfig?.reranker || { model: "" },
     dbPath: userConfig?.dbPath,
     autoSync: userConfig?.autoSync ?? defaultConfig.autoSync,
     autoReflect: userConfig?.autoReflect ?? defaultConfig.autoReflect,
     enabled: userConfig?.enabled ?? defaultConfig.enabled,
     fallbackToBuiltin: userConfig?.fallbackToBuiltin ?? defaultConfig.fallbackToBuiltin,
+    apiUrl: userConfig?.apiUrl ?? "http://127.0.0.1:8765",
   } as CortexMemoryConfig;
   
   logger = api.getLogger();
