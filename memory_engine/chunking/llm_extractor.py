@@ -106,6 +106,34 @@ Respond as a JSON array:
 ]"""
 
 
+SESSION_SPLIT_PROMPT = """Analyze the following conversation or session record and split it into distinct topics/events.
+
+Text:
+{text}
+
+Please identify different topics, events, or themes in this text and split it accordingly.
+Each segment should focus on a single coherent topic or event.
+
+Guidelines:
+1. A segment can be a question-answer pair, a task discussion, a problem-solution, or any coherent topic
+2. Segments should be self-contained and meaningful on their own
+3. Avoid creating very short segments (less than 50 characters) unless they contain important information
+4. Merge related short exchanges into one segment
+
+Respond in JSON format:
+{{
+    "segments": [
+        {{
+            "content": "the text content of this segment",
+            "topic": "brief topic description",
+            "type": "question|discussion|problem|solution|information|other"
+        }},
+        ...
+    ],
+    "total_segments": <number>
+}}"""
+
+
 class LLMExtractor:
     def __init__(self, config: dict = None):
         config = config or get_config()
@@ -130,6 +158,103 @@ class LLMExtractor:
 
     def is_available(self) -> bool:
         return self.client is not None
+
+    def split_session(self, text: str) -> List[Dict[str, str]]:
+        if not text or not text.strip():
+            return []
+        
+        if len(text) < 200:
+            return [{"content": text, "topic": "single segment", "type": "other"}]
+        
+        if not self.is_available():
+            return self._fallback_split(text)
+        
+        try:
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": "You are a text segmentation assistant. Split conversations into coherent segments. Always respond with valid JSON."},
+                    {"role": "user", "content": SESSION_SPLIT_PROMPT.format(text=text[:6000])}
+                ],
+                temperature=0.1,
+                max_tokens=2000
+            )
+            
+            content = response.choices[0].message.content.strip()
+            return self._parse_split_response(content)
+        except Exception as e:
+            logger.error(f"LLM split error: {e}")
+            return self._fallback_split(text)
+
+    def _parse_split_response(self, content: str) -> List[Dict[str, str]]:
+        segments = []
+        try:
+            json_match = re.search(r'\{[\s\S]*\}', content)
+            if json_match:
+                data = json.loads(json_match.group())
+                for seg in data.get("segments", []):
+                    seg_content = seg.get("content", "").strip()
+                    if seg_content and len(seg_content) >= 30:
+                        segments.append({
+                            "content": seg_content,
+                            "topic": seg.get("topic", "")[:100],
+                            "type": seg.get("type", "other")
+                        })
+        except Exception as e:
+            logger.warning(f"Failed to parse split response: {e}")
+        
+        return segments if segments else [{"content": content[:500], "topic": "fallback", "type": "other"}]
+
+    def _fallback_split(self, text: str) -> List[Dict[str, str]]:
+        segments = []
+        
+        paragraphs = re.split(r'\n\s*\n', text)
+        
+        for para in paragraphs:
+            para = para.strip()
+            if not para:
+                continue
+            
+            if len(para) > 800:
+                sentences = re.split(r'(?<=[。！？.!?])\s*', para)
+                current_chunk = ""
+                
+                for sentence in sentences:
+                    if len(current_chunk) + len(sentence) < 600:
+                        current_chunk += sentence
+                    else:
+                        if current_chunk and len(current_chunk) >= 50:
+                            segments.append({
+                                "content": current_chunk.strip(),
+                                "topic": self._extract_topic(current_chunk),
+                                "type": "other"
+                            })
+                        current_chunk = sentence
+                
+                if current_chunk and len(current_chunk) >= 50:
+                    segments.append({
+                        "content": current_chunk.strip(),
+                        "topic": self._extract_topic(current_chunk),
+                        "type": "other"
+                    })
+            elif len(para) >= 50:
+                segments.append({
+                    "content": para,
+                    "topic": self._extract_topic(para),
+                    "type": "other"
+                })
+        
+        return segments if segments else [{"content": text, "topic": "single", "type": "other"}]
+
+    def _extract_topic(self, text: str) -> str:
+        words = re.findall(r'\b[a-zA-Z]{3,}\b', text.lower())
+        if words:
+            word_freq = {}
+            for word in words:
+                word_freq[word] = word_freq.get(word, 0) + 1
+            top_words = sorted(word_freq.keys(), key=lambda w: word_freq[w], reverse=True)[:3]
+            return " ".join(top_words)
+        return "topic"
 
     def extract(self, text: str) -> StructuredSummary:
         if not text or not text.strip():

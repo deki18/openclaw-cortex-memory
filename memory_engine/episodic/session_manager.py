@@ -2,7 +2,7 @@ import logging
 import threading
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from ..episodic_memory import EpisodicMemory
 from ..models.episodic_event import SessionContext, EpisodicEvent
@@ -16,7 +16,8 @@ class SessionManager:
     def __init__(
         self,
         episodic_memory: EpisodicMemory = None,
-        llm_client = None
+        llm_client = None,
+        on_session_end: Callable[[str], None] = None
     ):
         self.episodic = episodic_memory or EpisodicMemory()
         self.event_generator = EventGenerator(llm_client)
@@ -25,11 +26,11 @@ class SessionManager:
         self._current_session: Optional[SessionContext] = None
         self._lock = threading.RLock()
         
-        self._session_timeout_seconds = 1800
-        self._last_activity_time = None
         self._last_processed_index = -1
         self._session_failures: List[EpisodicEvent] = []
         self._auto_reflect_enabled = True
+        
+        self.on_session_end = on_session_end
     
     def start_session(self, session_id: str = None) -> SessionContext:
         with self._lock:
@@ -43,7 +44,6 @@ class SessionManager:
                 start_time=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
             )
             
-            self._last_activity_time = datetime.now(timezone.utc)
             self._last_processed_index = -1
             self._session_failures = []
             
@@ -61,12 +61,14 @@ class SessionManager:
                 self.start_session()
             
             self._current_session.add_message(role, content, memory_id)
-            self._last_activity_time = datetime.now(timezone.utc)
             
             if self._should_trigger_event_generation(content, role):
                 events = self._generate_event_for_current_task()
                 if events:
                     self._store_events(events)
+            
+            if self._should_trigger_reflect(content, role):
+                self._trigger_auto_reflect("User explicit feedback for reflection")
             
             return memory_id
     
@@ -113,24 +115,70 @@ class SessionManager:
         processed_at_end = len(messages) - processed_during_session
         
         self._current_session = None
-        self._last_activity_time = None
         self._last_processed_index = -1
         
         logger.info(f"Ended session {session_id}: {total_messages} messages, {processed_during_session} processed during session, {processed_at_end} processed at end, {len(events)} events generated")
+        
+        if self.on_session_end:
+            try:
+                self.on_session_end(session_id)
+            except Exception as e:
+                logger.error(f"Error in on_session_end callback: {e}")
+        
         return events
     
     def _should_trigger_event_generation(self, content: str, role: str) -> bool:
         if role != "user":
             return False
         
-        completion_signals = [
-            "成功了", "完成了", "好了", "搞定",
-            "失败了", "不行", "还是报错",
-            "谢谢", "感谢",
+        SUCCESS_SIGNALS = [
+            "成功了", "完成了", "好了", "搞定", "解决了",
+            "没问题了", "可以了", "正常了", "修好了", "弄好了",
+            "works", "worked", "solved", "fixed", "done", "success",
+            "perfect", "great", "excellent", "awesome",
+            "问题解决了", "问题修复了", "已经解决", "已经修复",
+            "跑通了", "通过了", "成功了", "就这样吧",
+        ]
+        
+        FAILURE_SIGNALS = [
+            "失败了", "不行", "还是报错", "出错了", "有问题",
+            "failed", "error", "bug", "crash", "broken", "issue",
+            "还是不行", "又报错了", "又失败了", "没解决",
+            "搞不定", "解决不了", "无法解决",
+        ]
+        
+        GRATITUDE_SIGNALS = [
+            "谢谢", "感谢", "多谢", "辛苦了", "麻烦你了",
+            "thanks", "thank you", "thx", "appreciate",
+        ]
+        
+        USER_EXPLICIT_SAVE_SIGNALS = [
+            "记一下", "保存", "记录", "记住了", "记住这个",
+            "帮我记", "帮我保存", "记下来", "写下来",
+            "save this", "remember this", "note this", "keep this",
+            "这个很重要", "重要信息", "关键信息",
         ]
         
         content_lower = content.lower()
-        return any(signal in content_lower for signal in completion_signals)
+        
+        all_signals = SUCCESS_SIGNALS + FAILURE_SIGNALS + GRATITUDE_SIGNALS + USER_EXPLICIT_SAVE_SIGNALS
+        return any(signal in content_lower for signal in all_signals)
+    
+    def _should_trigger_reflect(self, content: str, role: str) -> bool:
+        if role != "user":
+            return False
+        
+        REFLECT_SIGNALS = [
+            "反思一下", "总结一下", "回顾一下", "整理一下",
+            "帮我总结", "帮我反思", "帮我回顾",
+            "reflect", "summarize", "review",
+            "学到了什么", "有什么收获", "总结经验",
+            "记住这个教训", "吸取教训", "下次注意",
+            "这个很重要", "重要发现", "关键发现",
+        ]
+        
+        content_lower = content.lower()
+        return any(signal in content_lower for signal in REFLECT_SIGNALS)
     
     def _generate_event_for_current_task(self) -> List[EpisodicEvent]:
         if not self._current_session or not self._current_session.messages:
@@ -225,6 +273,11 @@ class SessionManager:
                     should_reflect = True
                     reflect_reason = f"Success after failure: '{related_failure.summary[:30]}...' -> '{event.summary[:30]}...'"
                     break
+            
+            if event.importance >= 4:
+                should_reflect = True
+                reflect_reason = f"High importance event: '{event.summary[:50]}...'"
+                break
         
         if should_reflect:
             self._trigger_auto_reflect(reflect_reason)
@@ -272,18 +325,6 @@ class SessionManager:
             "message_count": len(self._current_session.messages),
             "memory_count": len(self._current_session.memory_ids),
         }
-    
-    def check_session_timeout(self) -> bool:
-        if not self._last_activity_time or not self._current_session:
-            return False
-        
-        elapsed = (datetime.now(timezone.utc) - self._last_activity_time).total_seconds()
-        
-        if elapsed > self._session_timeout_seconds:
-            self.end_session()
-            return True
-        
-        return False
     
     def process_messages_batch(
         self, 

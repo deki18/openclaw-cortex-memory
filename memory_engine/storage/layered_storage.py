@@ -386,30 +386,18 @@ class LayeredMemoryStorage:
                 self._hierarchy[parent_id]["chunk_ids"].append(chunk.id)
 
     def get_metadata(self, item_id: str) -> Optional[SystemMetadata]:
-        """获取元数据（只在最高层级查找）"""
+        """获取元数据（统一从hierarchy索引获取，避免多层查找）"""
         with self._lock:
             if item_id not in self._hierarchy:
                 return None
             
             info = self._hierarchy[item_id]
-            level = info["level"]
+            metadata_dict = info.get("metadata")
             
-            if level == StorageLevel.L0_SENTENCE:
-                unit = self.l0_index.get(item_id)
-                return unit.metadata if unit else None
+            if metadata_dict:
+                return SystemMetadata.from_dict(metadata_dict)
             
-            elif level == StorageLevel.L1_SUMMARY:
-                unit = self.l1_layer.get(item_id)
-                if unit and unit.metadata:
-                    return unit.metadata
-                elif unit and unit.parent_id:
-                    parent_unit = self.l2_layer.get(unit.parent_id)
-                    return parent_unit.metadata if parent_unit else None
-                return None
-            
-            else:
-                unit = self.l2_layer.get(item_id)
-                return unit.metadata if unit else None
+            return None
 
     def get_structured_summary(self, item_id: str) -> Optional[StructuredSummary]:
         """获取结构化摘要（只在L1层查找）"""

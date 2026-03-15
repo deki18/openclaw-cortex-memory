@@ -349,11 +349,14 @@ async def search_memory(request: SearchRequest):
     if not controller:
         raise HTTPException(status_code=503, detail="Service not initialized")
     try:
+        if not controller.should_search(request.query):
+            return {"query": request.query, "results": [], "total": 0, "skipped": True, "reason": "Simple greeting or response"}
+        
         result = controller.search(
             query=request.query,
             top_k=request.top_k
         )
-        return {"query": request.query, "results": result.items, "total": result.total}
+        return {"query": request.query, "results": result.items, "total": result.total, "skipped": False}
     except Exception as e:
         logger.error(f"Search error: {e}")
         raise HTTPException(status_code=500, detail=str(e))

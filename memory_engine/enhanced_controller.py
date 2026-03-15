@@ -1,3 +1,4 @@
+import json
 import logging
 import os
 import threading
@@ -34,6 +35,7 @@ from .preprocess import TextPreprocessor, PreprocessConfig
 from .episodic_memory import EpisodicMemory
 from .episodic.session_manager import SessionManager
 from .models.episodic_event import EpisodicEvent
+from .write_pipeline import WritePipeline
 
 logger = logging.getLogger(__name__)
 
@@ -175,7 +177,13 @@ class EnhancedMemoryController:
         self.enable_chunking = config.get("enable_chunking", False)
         
         self.episodic = EpisodicMemory()
-        self._session_manager = SessionManager(self.episodic, self.llm_client)
+        self._session_manager = SessionManager(
+            self.episodic, 
+            self.llm_client,
+            on_session_end=self._on_session_end
+        )
+        
+        self.write_pipeline = WritePipeline()
         
         cortex_rules_path = os.path.join(data_dir, "CORTEX_RULES.md")
         local_cortex_rules_path = os.path.join(os.path.dirname(__file__), "..", "data", "memory", "CORTEX_RULES.md")
@@ -222,68 +230,15 @@ class EnhancedMemoryController:
                 error="Empty text provided"
             )
         
-        text = self.preprocessor.preprocess(text)
-        if not text:
-            return WriteResult(
-                success=False,
-                error="Text preprocessing failed or text is empty after preprocessing"
-            )
+        self._session_manager.add_message(role, text, None)
         
-        system_metadata = SystemMetadata.create(
-            source=source,
-            quality_level="medium"
+        logger.debug(f"Message queued for session: {text[:100]}...")
+        
+        return WriteResult(
+            success=True,
+            memory_id=None,
+            quality=None
         )
-        
-        structured_summary = self.llm_extractor.extract(text)
-        
-        quality = self.quality_evaluator.evaluate(text, {
-            "structured_summary": structured_summary.to_dict()
-        })
-        
-        if not quality.should_store:
-            return WriteResult(
-                success=False,
-                quality=quality,
-                error=f"Quality below threshold: {quality.score.overall:.2f}"
-            )
-        
-        system_metadata.quality_level = quality.score.level.value
-        
-        vector = self.embedding_module.embed_text([text])[0]
-        
-        dedup_result = self.deduplicator.check_duplicate(text, vector)
-        if dedup_result.is_duplicate:
-            logger.info(f"Duplicate memory detected, similar to: {dedup_result.similar_memory_id}")
-            return WriteResult(
-                success=False,
-                is_duplicate=True,
-                quality=quality,
-                error=f"Duplicate of existing memory: {dedup_result.similar_memory_id}"
-            )
-        
-        chunks = None
-        if self.enable_chunking and len(text) > 500:
-            chunks = self._create_chunks(text)
-        
-        if async_write:
-            task_id = self.write_queue.submit(
-                text, structured_summary, system_metadata, vector, chunks, quality
-            )
-            self._session_manager.add_message(role, text, task_id)
-            return WriteResult(
-                success=True,
-                memory_id=task_id,
-                quality=quality
-            )
-        
-        result = self._write_sync(
-            text, structured_summary, system_metadata, vector, chunks, quality
-        )
-        
-        if result.success and result.memory_id:
-            self._session_manager.add_message(role, text, result.memory_id)
-        
-        return result
 
     def _create_chunks(self, text: str) -> List[Chunk]:
         semantic_chunks = self.chunker.chunk(text)
@@ -357,7 +312,7 @@ class EnhancedMemoryController:
                     )
                     self.store.add_memories([chunk_memory])
             
-            self.deduplicator.add(memory_id, text, vector)
+            self.deduplicator.add(memory_id, structured_summary.summary or text[:500], vector)
             
             tiered_item = TieredMemoryItem(
                 id=memory_id,
@@ -441,18 +396,38 @@ class EnhancedMemoryController:
             })
             qualities.append(quality)
         
-        vectors = self.batch_embedding_processor.process_batch(preprocessed_texts)
-        
-        for i, (text, quality, summary, vector) in enumerate(
-            zip(preprocessed_texts, qualities, structured_summaries, vectors)
-        ):
-            if not quality.should_store:
+        texts_to_embed = []
+        indices_to_embed = []
+        for i, (text, quality, summary) in enumerate(zip(preprocessed_texts, qualities, structured_summaries)):
+            if quality.should_store:
+                summary_text = summary.summary or text[:500]
+                dedup_result = self.deduplicator.check_duplicate(summary_text, None)
+                if not dedup_result.is_duplicate:
+                    texts_to_embed.append(text)
+                    indices_to_embed.append(i)
+                else:
+                    results.append(WriteResult(
+                        success=False,
+                        is_duplicate=True,
+                        quality=quality,
+                        error=f"Duplicate of existing memory: {dedup_result.similar_memory_id}"
+                    ))
+            else:
                 results.append(WriteResult(
                     success=False,
                     quality=quality,
                     error=f"Quality below threshold: {quality.score.overall:.2f}"
                 ))
-                continue
+        
+        if not texts_to_embed:
+            return results
+        
+        vectors = self.batch_embedding_processor.process_batch(texts_to_embed)
+        
+        for j, (text_idx, vector) in enumerate(zip(indices_to_embed, vectors)):
+            text = preprocessed_texts[text_idx]
+            quality = qualities[text_idx]
+            summary = structured_summaries[text_idx]
             
             system_metadata = SystemMetadata.create(
                 source=source,
@@ -469,6 +444,48 @@ class EnhancedMemoryController:
             results.append(result)
         
         return results
+
+    def should_search(self, query: str) -> bool:
+        if not query or not query.strip():
+            return False
+        
+        query_stripped = query.strip()
+        
+        GREETINGS = {
+            "hi", "hello", "hey", "hiya", "yo", "howdy",
+            "你好", "您好", "嗨", "哈喽", "喂",
+            "早上好", "下午好", "晚上好", "早安", "晚安",
+            "good morning", "good afternoon", "good evening",
+        }
+        
+        if query_stripped.lower() in GREETINGS:
+            return False
+        
+        SIMPLE_RESPONSES = {
+            "ok", "okay", "yes", "no", "sure", "thanks", "thx",
+            "好的", "好", "嗯", "行", "可以", "谢谢", "感谢",
+            "明白", "知道了", "了解", "收到",
+            "继续", "好的继续", "请继续",
+        }
+        
+        if query_stripped.lower() in SIMPLE_RESPONSES:
+            return False
+        
+        if len(query_stripped) < 3:
+            return False
+        
+        NO_SEARCH_PATTERNS = [
+            r'^[.。,，!！?？;；:：]+$',  # 纯标点
+            r'^[\d\s]+$',  # 纯数字
+            r'^[a-zA-Z]$',  # 单个字母
+        ]
+        
+        import re
+        for pattern in NO_SEARCH_PATTERNS:
+            if re.match(pattern, query_stripped):
+                return False
+        
+        return True
 
     def search(
         self,
@@ -833,3 +850,202 @@ class EnhancedMemoryController:
         except Exception as e:
             logger.error(f"Promotion failed: {e}")
             return {"status": "error", "message": str(e)}
+    
+    def _on_session_end(self, session_id: str):
+        logger.info(f"Session {session_id} ended, triggering batch memory write")
+        return self.process_session_records()
+    
+    def process_session_records(self) -> Dict[str, Any]:
+        try:
+            from .config import get_openclaw_base_path
+            
+            openclaw_base = get_openclaw_base_path()
+            state_path = os.path.join(openclaw_base, ".cortex_sync_state.json")
+            
+            total_processed = 0
+            total_sessions = 0
+            results = {
+                "sessions_processed": 0,
+                "memory_md_segments": 0,
+                "total_memories": 0
+            }
+            
+            sessions_dir = os.path.join(openclaw_base, "agents", "main", "sessions")
+            if os.path.isdir(sessions_dir):
+                session_result = self._process_openclaw_sessions(sessions_dir, state_path)
+                results["sessions_processed"] = session_result.get("sessions", 0)
+                total_processed += session_result.get("processed", 0)
+                total_sessions = session_result.get("sessions", 0)
+            
+            memory_md_path = os.path.join(openclaw_base, "workspace", "MEMORY.md")
+            if os.path.exists(memory_md_path):
+                memory_md_result = self._process_memory_md(memory_md_path, state_path)
+                if memory_md_result.get("processed"):
+                    segments_count = memory_md_result.get("segments", 0)
+                    results["memory_md_segments"] = segments_count
+                    total_processed += segments_count
+            
+            results["total_memories"] = total_processed
+            
+            logger.info(f"Processed {total_processed} memories from {total_sessions} sessions")
+            return {"status": "ok", **results}
+            
+        except Exception as e:
+            logger.error(f"Failed to process session records: {e}")
+            return {"status": "error", "message": str(e)}
+    
+    def _process_openclaw_sessions(self, sessions_dir: str, state_path: str) -> Dict[str, Any]:
+        import glob
+        
+        state = self._load_sync_state(state_path)
+        total_processed = 0
+        total_sessions = 0
+        
+        for sessions_file in glob.glob(os.path.join(sessions_dir, "*.jsonl")):
+            file_key = os.path.abspath(sessions_file)
+            last_index = state.get(file_key, -1)
+            
+            new_records = []
+            last_seen_idx = last_index
+            
+            try:
+                with open(sessions_file, "r", encoding="utf-8") as f:
+                    for idx, line in enumerate(f):
+                        if idx <= last_index:
+                            continue
+                        if not line.strip():
+                            continue
+                        try:
+                            record = json.loads(line.strip())
+                            new_records.append(record)
+                            last_seen_idx = idx
+                        except json.JSONDecodeError as e:
+                            logger.warning(f"Error parsing {sessions_file} line {idx}: {e}")
+            except Exception as e:
+                logger.error(f"Error reading {sessions_file}: {e}")
+                continue
+            
+            if not new_records:
+                continue
+            
+            for record in new_records:
+                content = record.get("content") or record.get("summary") or record.get("text")
+                if not content or not content.strip():
+                    continue
+                
+                segments = self.llm_extractor.split_session(content)
+                
+                for seg in segments:
+                    seg_content = seg.get("content", "")
+                    seg_topic = seg.get("topic", "")
+                    
+                    if seg_content and len(seg_content.strip()) >= 30:
+                        result = self._write_memory_internal(
+                            text=seg_content.strip(),
+                            source=f"openclaw_session:{record.get('id', os.path.basename(sessions_file))}:{seg_topic}"
+                        )
+                        if result.success:
+                            total_processed += 1
+            
+            state[file_key] = last_seen_idx
+            total_sessions += len(new_records)
+        
+        self._save_sync_state(state_path, state)
+        
+        return {"processed": total_processed, "sessions": total_sessions}
+    
+    def _process_memory_md(self, memory_md_path: str, state_path: str) -> Dict[str, Any]:
+        state = self._load_sync_state(state_path)
+        file_key = f"memory_md:{os.path.abspath(memory_md_path)}"
+        
+        try:
+            current_mtime = os.path.getmtime(memory_md_path)
+            last_mtime = state.get(file_key, 0)
+            
+            if current_mtime <= last_mtime:
+                return {"processed": False, "reason": "Not modified"}
+            
+            with open(memory_md_path, "r", encoding="utf-8") as f:
+                content = f.read()
+            
+            if not content or not content.strip():
+                return {"processed": False, "reason": "Empty content"}
+            
+            segments = self.llm_extractor.split_session(content)
+            processed_count = 0
+            
+            for seg in segments:
+                seg_content = seg.get("content", "")
+                seg_topic = seg.get("topic", "")
+                
+                if seg_content and len(seg_content.strip()) >= 30:
+                    result = self._write_memory_internal(
+                        text=seg_content.strip(),
+                        source=f"openclaw_memory_md:{seg_topic}"
+                    )
+                    if result.success:
+                        processed_count += 1
+            
+            state[file_key] = current_mtime
+            self._save_sync_state(state_path, state)
+            
+            return {"processed": True, "segments": processed_count}
+            
+        except Exception as e:
+            logger.error(f"Error processing MEMORY.md: {e}")
+            return {"processed": False, "error": str(e)}
+    
+    def _load_sync_state(self, state_path: str) -> Dict[str, Any]:
+        if os.path.exists(state_path):
+            try:
+                with open(state_path, "r", encoding="utf-8") as f:
+                    return json.load(f)
+            except Exception as e:
+                logger.warning(f"Failed to load sync state: {e}")
+        return {}
+    
+    def _save_sync_state(self, state_path: str, state: Dict[str, Any]):
+        try:
+            os.makedirs(os.path.dirname(state_path), exist_ok=True)
+            with open(state_path, "w", encoding="utf-8") as f:
+                json.dump(state, f)
+        except Exception as e:
+            logger.error(f"Failed to save sync state: {e}")
+    
+    def _write_memory_internal(
+        self,
+        text: str,
+        source: str = "session"
+    ) -> WriteResult:
+        if not text or not text.strip():
+            return WriteResult(success=False, error="Empty text")
+        
+        text = self.preprocessor.preprocess(text)
+        if not text:
+            return WriteResult(success=False, error="Preprocessing failed")
+        
+        system_metadata = SystemMetadata.create(source=source, quality_level="medium")
+        
+        structured_summary = self.llm_extractor.extract(text)
+        
+        quality = self.quality_evaluator.evaluate(text, {
+            "structured_summary": structured_summary.to_dict()
+        })
+        
+        if not quality.should_store:
+            return WriteResult(success=False, quality=quality, error="Quality below threshold")
+        
+        system_metadata.quality_level = quality.score.level.value
+        
+        summary_text = structured_summary.summary or text[:500]
+        dedup_result = self.deduplicator.check_duplicate(summary_text, None)
+        if dedup_result.is_duplicate:
+            return WriteResult(success=False, is_duplicate=True, error="Duplicate")
+        
+        vector = self.embedding_module.embed_text([text])[0]
+        
+        chunks = None
+        if self.enable_chunking and len(text) > 500:
+            chunks = self._create_chunks(text)
+        
+        return self._write_sync(text, structured_summary, system_metadata, vector, chunks, quality)

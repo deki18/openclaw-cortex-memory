@@ -42,36 +42,68 @@ class MemoryQuality:
 
 
 class ImportanceScorer:
-    KEYWORDS_HIGH = {
+    DEFAULT_KEYWORDS_HIGH = {
         "critical", "essential", "important", "key", "crucial", "vital",
         "must", "required", "mandatory", "urgent", "priority",
-        "重要", "关键", "必须", "紧急", "核心", "必要"
+        "重要", "关键", "必须", "紧急", "核心", "必要",
+        "核心功能", "关键步骤", "重要配置", "必须注意",
     }
     
-    KEYWORDS_MEDIUM = {
+    DEFAULT_KEYWORDS_MEDIUM = {
         "useful", "helpful", "relevant", "notable", "significant",
         "remember", "note", "consider", "worth",
-        "有用", "相关", "值得", "注意", "记住"
+        "有用", "相关", "值得", "注意", "记住",
+        "参考", "建议", "推荐", "提示",
     }
     
-    KEYWORDS_LOW = {
+    DEFAULT_KEYWORDS_LOW = {
         "maybe", "possibly", "might", "perhaps", "optional",
-        "可能", "也许", "可选"
+        "可能", "也许", "可选", "大概", "似乎",
     }
     
-    KEYWORDS_IRRELEVANT = {
+    DEFAULT_KEYWORDS_IRRELEVANT = {
         "test", "debug", "temp", "temporary", "draft", "example",
-        "测试", "临时", "草稿", "示例"
+        "测试", "临时", "草稿", "示例", "测试数据",
     }
 
     def __init__(self, config: dict = None):
         config = config or {}
+        
         self.weights = config.get("weights", {
-            "keywords": 0.3,
-            "length": 0.2,
-            "structure": 0.2,
-            "entities": 0.15,
+            "keywords": 0.25,
+            "length": 0.20,
+            "structure": 0.20,
+            "entities": 0.20,
             "recency": 0.15
+        })
+        
+        self.keywords_high = set(config.get("keywords_high", self.DEFAULT_KEYWORDS_HIGH))
+        self.keywords_medium = set(config.get("keywords_medium", self.DEFAULT_KEYWORDS_MEDIUM))
+        self.keywords_low = set(config.get("keywords_low", self.DEFAULT_KEYWORDS_LOW))
+        self.keywords_irrelevant = set(config.get("keywords_irrelevant", self.DEFAULT_KEYWORDS_IRRELEVANT))
+        
+        self.length_config = config.get("length", {
+            "optimal_min": 50,
+            "optimal_max": 500,
+            "optimal_center": 275,
+            "sigma": 200,
+            "max_expected_length": 2000,
+        })
+        
+        self.keyword_scoring = config.get("keyword_scoring", {
+            "high_weight": 0.08,
+            "medium_weight": 0.04,
+            "low_penalty": 0.04,
+            "irrelevant_penalty": 0.08,
+            "high_cap": 0.3,
+            "medium_cap": 0.15,
+            "low_cap": 0.15,
+            "irrelevant_cap": 0.4,
+        })
+        
+        self.recency_config = config.get("recency", {
+            "halflife_days": 30,
+            "min_score": 0.1,
         })
 
     def score(self, text: str, metadata: dict = None) -> float:
@@ -103,12 +135,9 @@ class ImportanceScorer:
             return 1.0
         
         try:
-            # 支持多种时间格式
             if isinstance(created_at, (int, float)):
-                # Unix时间戳
                 created_time = datetime.fromtimestamp(created_at, tz=timezone.utc)
             elif isinstance(created_at, str):
-                # ISO格式字符串
                 created_time = datetime.fromisoformat(created_at.replace('Z', '+00:00'))
             else:
                 return 1.0
@@ -116,12 +145,11 @@ class ImportanceScorer:
             now = datetime.now(timezone.utc)
             age_days = (now - created_time).total_seconds() / 86400
             
-            # 指数衰减: e^(-age/halflife)
-            # 半衰期30天：30天后得分变为0.5
-            halflife_days = 30
+            halflife_days = self.recency_config["halflife_days"]
+            min_score = self.recency_config["min_score"]
             score = math.exp(-age_days / halflife_days)
             
-            return max(0.1, min(1.0, score))
+            return max(min_score, min(1.0, score))
         except Exception as e:
             logger.debug(f"Error calculating recency: {e}")
             return 1.0
@@ -129,16 +157,17 @@ class ImportanceScorer:
     def _score_keywords(self, text: str) -> float:
         text_lower = text.lower()
         
-        high_matches = sum(1 for kw in self.KEYWORDS_HIGH if kw in text_lower)
-        medium_matches = sum(1 for kw in self.KEYWORDS_MEDIUM if kw in text_lower)
-        low_matches = sum(1 for kw in self.KEYWORDS_LOW if kw in text_lower)
-        irrelevant_matches = sum(1 for kw in self.KEYWORDS_IRRELEVANT if kw in text_lower)
+        high_matches = sum(1 for kw in self.keywords_high if kw in text_lower)
+        medium_matches = sum(1 for kw in self.keywords_medium if kw in text_lower)
+        low_matches = sum(1 for kw in self.keywords_low if kw in text_lower)
+        irrelevant_matches = sum(1 for kw in self.keywords_irrelevant if kw in text_lower)
         
+        ks = self.keyword_scoring
         score = 0.5
-        score += min(0.3, high_matches * 0.1)
-        score += min(0.15, medium_matches * 0.05)
-        score -= min(0.15, low_matches * 0.05)
-        score -= min(0.4, irrelevant_matches * 0.1)
+        score += min(ks["high_cap"], high_matches * ks["high_weight"])
+        score += min(ks["medium_cap"], medium_matches * ks["medium_weight"])
+        score -= min(ks["low_cap"], low_matches * ks["low_penalty"])
+        score -= min(ks["irrelevant_cap"], irrelevant_matches * ks["irrelevant_penalty"])
         
         return max(0.0, min(1.0, score))
 
@@ -147,10 +176,10 @@ class ImportanceScorer:
         使用长度归一化计算得分，防止长条目占据主导地位
         
         设计原则：
-        - 太短（<50字符）：信息可能不完整，低分
-        - 适中（50-500字符）：最佳区间，高分
-        - 较长（500-2000字符）：可接受，中等分数
-        - 过长（>2000字符）：可能冗余，适当扣分
+        - 太短（<optimal_min字符）：信息可能不完整，低分
+        - 适中（optimal_min-optimal_max字符）：最佳区间，高分
+        - 较长（optimal_max-max_expected_length字符）：可接受，中等分数
+        - 过长（>max_expected_length字符）：可能冗余，适当扣分
         
         使用对数归一化 + 高斯衰减的组合策略
         """
@@ -159,51 +188,34 @@ class ImportanceScorer:
         if length == 0:
             return 0.0
         
-        # 最佳长度区间
-        optimal_min = 50
-        optimal_max = 500
-        optimal_center = (optimal_min + optimal_max) / 2  # 275
+        lc = self.length_config
+        optimal_min = lc["optimal_min"]
+        optimal_max = lc["optimal_max"]
+        optimal_center = lc["optimal_center"]
+        sigma = lc["sigma"]
+        max_expected_length = lc["max_expected_length"]
         
-        # 1. 基础得分：对数归一化（防止长文本主导）
-        # 使用 log(1 + length) 来压缩长文本的影响
-        max_expected_length = 2000
         log_normalized = math.log(1 + min(length, max_expected_length)) / math.log(1 + max_expected_length)
         
-        # 2. 最佳区间奖励：高斯分布，以最佳长度为中心
-        # 在最佳区间内得分最高，两边递减
-        sigma = 200  # 标准差，控制曲线宽度
         gaussian_score = math.exp(-((length - optimal_center) ** 2) / (2 * sigma ** 2))
         
-        # 3. 组合策略：
-        # - 短文本：主要受对数归一化影响（低分）
-        # - 最佳区间：高斯得分高（高分）
-        # - 长文本：对数归一化压缩 + 高斯衰减（中等分数）
-        
         if length < optimal_min:
-            # 短文本：信息可能不完整
-            # 使用对数归一化，但给予一定的起步分
             base_score = 0.3 + 0.4 * log_normalized
-            # 额外惩罚过短文本
             if length < 20:
                 base_score *= 0.5
             score = base_score
         elif length <= optimal_max:
-            # 最佳区间：高分
-            # 在区间内，越接近中心得分越高
             distance_from_center = abs(length - optimal_center)
             max_distance = (optimal_max - optimal_min) / 2
-            position_score = 1 - (distance_from_center / max_distance) * 0.2  # 最多扣20%
+            position_score = 1 - (distance_from_center / max_distance) * 0.2
             score = 0.8 + 0.2 * position_score
-        elif length <= 2000:
-            # 较长但可接受：中等分数，逐渐衰减
+        elif length <= max_expected_length:
             excess = length - optimal_max
-            decay_rate = 0.0003  # 每多一个字符扣0.03%
+            decay_rate = 0.0003
             decay = math.exp(-excess * decay_rate)
             score = 0.75 * decay + 0.25 * log_normalized
         else:
-            # 过长：可能冗余，显著扣分
-            excess = length - 2000
-            # 使用平方根衰减，防止过度惩罚
+            excess = length - max_expected_length
             penalty = 1 - math.sqrt(excess / (excess + 5000))
             score = 0.5 * penalty * log_normalized
         
