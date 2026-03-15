@@ -391,3 +391,6 @@ class L2MemoryUnit:
     
     def get_chunk_count(self) -> int:
         return len(self.chunks)
+
+
+MemoryUnit = L0MemoryUnit

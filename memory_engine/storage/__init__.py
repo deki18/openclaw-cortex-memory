@@ -10,7 +10,6 @@ from .tiered_storage import (
 )
 from .layered_storage import (
     LayeredMemoryStorage,
-    LayeredMemoryItem,
     StorageLevel,
     L0Index,
     L1SummaryLayer,
@@ -27,7 +26,6 @@ __all__ = [
     "ColdMemoryArchive",
     "CoreRulesCache",
     "LayeredMemoryStorage",
-    "LayeredMemoryItem",
     "StorageLevel",
     "L0Index",
     "L1SummaryLayer",

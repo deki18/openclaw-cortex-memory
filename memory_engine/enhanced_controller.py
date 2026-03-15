@@ -312,7 +312,7 @@ class EnhancedMemoryController:
                     )
                     self.store.add_memories([chunk_memory])
             
-            self.deduplicator.add(memory_id, structured_summary.summary or text[:500], vector)
+            self.deduplicator.add(memory_id, structured_summary.summary_text or text[:500], vector)
             
             tiered_item = TieredMemoryItem(
                 id=memory_id,
@@ -400,7 +400,7 @@ class EnhancedMemoryController:
         indices_to_embed = []
         for i, (text, quality, summary) in enumerate(zip(preprocessed_texts, qualities, structured_summaries)):
             if quality.should_store:
-                summary_text = summary.summary or text[:500]
+                summary_text = summary.summary_text or text[:500]
                 dedup_result = self.deduplicator.check_duplicate(summary_text, None)
                 if not dedup_result.is_duplicate:
                     texts_to_embed.append(text)
@@ -1037,7 +1037,7 @@ class EnhancedMemoryController:
         
         system_metadata.quality_level = quality.score.level.value
         
-        summary_text = structured_summary.summary or text[:500]
+        summary_text = structured_summary.summary_text or text[:500]
         dedup_result = self.deduplicator.check_duplicate(summary_text, None)
         if dedup_result.is_duplicate:
             return WriteResult(success=False, is_duplicate=True, error="Duplicate")

@@ -1,2 +1,4 @@
 plugin/node_modules/
 plugin/dist/
+
+venv/

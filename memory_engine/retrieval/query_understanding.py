@@ -259,9 +259,9 @@ class QueryUnderstanding:
             "original_query": self.original_query,
             "intent": self.intent.value,
             "search_strategy": {
-                "type_weights": self.search_strategy.type_weights,
+                "category_weights": self.search_strategy.category_weights,
                 "enable_time_filter": self.search_strategy.enable_time_filter,
-                "priority_types": self.search_strategy.priority_types,
+                "priority_categories": self.search_strategy.priority_categories,
             },
             "entities": [e.to_dict() for e in self.entities],
             "keywords": self.keywords,

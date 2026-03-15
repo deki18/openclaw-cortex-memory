@@ -132,9 +132,9 @@ def load_config(config_path: str = "config.yaml") -> Dict[str, Any]:
     if os.environ.get("CORTEX_MEMORY_RERANKER_ENDPOINT"):
         config["reranker_api"]["url"] = os.environ["CORTEX_MEMORY_RERANKER_ENDPOINT"]
     
-    if "lancedb_path" in config:
+    if config.get("lancedb_path"):
         config["lancedb_path"] = os.path.expanduser(config["lancedb_path"])
-    if "openclaw_base_path" in config:
+    if config.get("openclaw_base_path"):
         config["openclaw_base_path"] = os.path.expanduser(config["openclaw_base_path"])
         
     return config
