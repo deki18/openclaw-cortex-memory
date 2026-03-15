@@ -23,7 +23,7 @@ from .retrieval import (
 )
 from .storage import (
     TieredMemoryManager, TierConfig, TieredMemoryItem, MemoryTier,
-    LayeredMemoryStorage, StorageLevel
+    LayeredMemoryStorage, StorageLevel, CoreRulesCache
 )
 from .graph import EnhancedMemoryGraph, GraphEnhancedRetriever
 from .models.memory_unit import (
@@ -31,6 +31,9 @@ from .models.memory_unit import (
     L0MemoryUnit, L1MemoryUnit, L2MemoryUnit
 )
 from .preprocess import TextPreprocessor, PreprocessConfig
+from .episodic_memory import EpisodicMemory
+from .episodic.session_manager import SessionManager
+from .models.episodic_event import EpisodicEvent
 
 logger = logging.getLogger(__name__)
 
@@ -171,6 +174,13 @@ class EnhancedMemoryController:
         
         self.enable_chunking = config.get("enable_chunking", False)
         
+        self.episodic = EpisodicMemory()
+        self._session_manager = SessionManager(self.episodic, self.llm_client)
+        
+        cortex_rules_path = os.path.join(data_dir, "CORTEX_RULES.md")
+        local_cortex_rules_path = os.path.join(os.path.dirname(__file__), "..", "data", "memory", "CORTEX_RULES.md")
+        self.core_rules_cache = CoreRulesCache(cortex_rules_path, local_cortex_rules_path)
+        
         self._lock = threading.RLock()
         self._started = False
 
@@ -180,6 +190,13 @@ class EnhancedMemoryController:
         
         self.write_queue.set_processor(self._process_write_task)
         self.write_queue.start()
+        
+        if self.core_rules_cache.load():
+            logger.info("Core rules cache loaded successfully")
+            if hasattr(self.unified_search, 'core_rules_searcher') and self.unified_search.core_rules_searcher:
+                self.unified_search.core_rules_searcher.set_core_rules_cache(self.core_rules_cache)
+                self.unified_search.core_rules_searcher.load()
+        
         self._started = True
         logger.info("EnhancedMemoryController started")
 
@@ -196,7 +213,8 @@ class EnhancedMemoryController:
         text: str,
         source: str = "manual",
         metadata: dict = None,
-        async_write: bool = False
+        async_write: bool = False,
+        role: str = "user"
     ) -> WriteResult:
         if not text or not text.strip():
             return WriteResult(
@@ -251,15 +269,21 @@ class EnhancedMemoryController:
             task_id = self.write_queue.submit(
                 text, structured_summary, system_metadata, vector, chunks, quality
             )
+            self._session_manager.add_message(role, text, task_id)
             return WriteResult(
                 success=True,
                 memory_id=task_id,
                 quality=quality
             )
         
-        return self._write_sync(
+        result = self._write_sync(
             text, structured_summary, system_metadata, vector, chunks, quality
         )
+        
+        if result.success and result.memory_id:
+            self._session_manager.add_message(role, text, result.memory_id)
+        
+        return result
 
     def _create_chunks(self, text: str) -> List[Chunk]:
         semantic_chunks = self.chunker.chunk(text)
@@ -619,3 +643,193 @@ class EnhancedMemoryController:
         self.tiered_manager.run_maintenance()
         self.write_queue.clear_completed()
         logger.debug("Maintenance completed")
+    
+    def end_session(self) -> List[EpisodicEvent]:
+        if not self._session_manager:
+            return []
+        
+        events = self._session_manager.end_session()
+        
+        for event in events:
+            self._update_graph_from_event(event)
+        
+        logger.info(f"Session ended, {len(events)} events generated")
+        return events
+    
+    def start_session(self, session_id: str = None):
+        if self._session_manager:
+            return self._session_manager.start_session(session_id)
+        return None
+    
+    def _update_graph_from_event(self, event: EpisodicEvent):
+        if not event.entities:
+            return
+        
+        try:
+            for entity_name in event.entities:
+                self.memory_graph.add_node(
+                    node_id=f"entity:{entity_name}",
+                    node_type="entity",
+                    name=entity_name,
+                    memory_id=event.id
+                )
+            
+            if len(event.entities) >= 2:
+                for i, source in enumerate(event.entities):
+                    for target in event.entities[i+1:]:
+                        self.memory_graph.add_edge(
+                            source_id=f"entity:{source}",
+                            target_id=f"entity:{target}",
+                            relation_type="co_occurred",
+                            weight=1.0,
+                            evidence=event.id
+                        )
+            
+            logger.debug(f"Updated graph with {len(event.entities)} entities from event {event.id}")
+        except Exception as e:
+            logger.warning(f"Failed to update graph from event: {e}")
+    
+    def store_event(
+        self,
+        summary: str,
+        memory_id: str = None,
+        entities: list = None,
+        relations: list = None,
+        outcome: str = ""
+    ) -> Optional[str]:
+        if not summary or not summary.strip():
+            logger.warning("Empty summary provided, skipping event storage")
+            return None
+        
+        try:
+            entity_refs = []
+            
+            if entities:
+                for entity in entities:
+                    if isinstance(entity, dict):
+                        entity_text = entity.get("name") or entity.get("text") or str(entity)
+                        entity_type = entity.get("type", "entity")
+                    else:
+                        entity_text = str(entity)
+                        entity_type = "entity"
+                    
+                    self.memory_graph.add_node(
+                        node_id=f"entity:{entity_text}",
+                        node_type=entity_type,
+                        name=entity_text,
+                        memory_id=memory_id
+                    )
+                    entity_refs.append(entity_text)
+            
+            if relations:
+                for rel in relations:
+                    if isinstance(rel, dict):
+                        source = rel.get("source")
+                        target = rel.get("target")
+                        relation_type = rel.get("type") or rel.get("relation")
+                        weight = rel.get("weight", 1.0)
+                    else:
+                        source, target, relation_type = rel
+                        weight = 1.0
+                    
+                    if source and target and relation_type:
+                        self.memory_graph.add_edge(
+                            source_id=f"entity:{source}",
+                            target_id=f"entity:{target}",
+                            relation_type=relation_type,
+                            weight=weight,
+                            evidence=memory_id
+                        )
+            
+            event_id = self.episodic.store_event(
+                summary=summary,
+                memory_id=memory_id,
+                entity_refs=entity_refs,
+                outcome=outcome
+            )
+            
+            return event_id
+        except Exception as e:
+            logger.error(f"Failed to store event: {e}")
+            return None
+    
+    def get_events(self, limit: int = 100) -> List[Dict[str, Any]]:
+        try:
+            return self.episodic.load_events(limit=limit)
+        except Exception as e:
+            logger.error(f"Failed to get events: {e}")
+            return []
+    
+    def query_graph(self, entity: str) -> List[Dict[str, Any]]:
+        try:
+            nodes = self.memory_graph.find_nodes_by_name(entity)
+            results = []
+            for node in nodes:
+                neighbors = self.memory_graph.get_connected_nodes(node.id)
+                for neighbor, edge in neighbors:
+                    results.append({
+                        "source": node.name,
+                        "target": neighbor.name,
+                        "relation": edge.relation_type,
+                        "weight": edge.weight
+                    })
+            return results
+        except Exception as e:
+            logger.error(f"Failed to query graph: {e}")
+            return []
+    
+    def get_hot_context(self, limit: int = 20) -> List[Dict[str, Any]]:
+        try:
+            hot_items = self.tiered_manager.hot_cache.get_recent(limit)
+            return [
+                {
+                    "id": item.id,
+                    "text": item.text[:500] if len(item.text) > 500 else item.text,
+                    "importance_score": item.importance_score
+                }
+                for item in hot_items
+            ]
+        except Exception as e:
+            logger.error(f"Failed to get hot context: {e}")
+            return []
+    
+    def reflect(self) -> Dict[str, Any]:
+        from .reflection_engine import ReflectionEngine
+        try:
+            engine = ReflectionEngine()
+            engine.reflect()
+            
+            if self.core_rules_cache.reload():
+                if hasattr(self.unified_search, 'core_rules_searcher') and self.unified_search.core_rules_searcher:
+                    self.unified_search.core_rules_searcher.reload()
+            
+            logger.info("Memory reflection completed")
+            return {"status": "ok", "message": "Reflection completed"}
+        except Exception as e:
+            logger.error(f"Reflection failed: {e}")
+            return {"status": "error", "message": str(e)}
+    
+    def promote(self) -> Dict[str, Any]:
+        from .promotion_engine import PromotionEngine
+        try:
+            engine = PromotionEngine()
+            promoted_count = 0
+            
+            all_memories = self.store.list_all(limit=1000)
+            for memory in all_memories:
+                memory_dict = memory.model_dump() if hasattr(memory, 'model_dump') else memory
+                hit_count = memory_dict.get("hit_count", 0)
+                text = memory_dict.get("text", "")
+                
+                if engine.check_and_promote(hit_count, text):
+                    promoted_count += 1
+            
+            if self.core_rules_cache.reload():
+                if hasattr(self.unified_search, 'core_rules_searcher') and self.unified_search.core_rules_searcher:
+                    self.unified_search.core_rules_searcher.reload()
+            
+            logger.info(f"Promoted {promoted_count} memories to core rules")
+            return {"status": "ok", "promoted_count": promoted_count}
+        except Exception as e:
+            logger.error(f"Promotion failed: {e}")
+            return {"status": "error", "message": str(e)}

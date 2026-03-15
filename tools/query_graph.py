@@ -1,6 +1,7 @@
-from memory_engine.memory_controller import MemoryController
+from memory_engine.enhanced_controller import EnhancedMemoryController
 
-controller = MemoryController()
+controller = EnhancedMemoryController()
+controller.start()
 
 def query_graph(entity: str):
     return controller.query_graph(entity)

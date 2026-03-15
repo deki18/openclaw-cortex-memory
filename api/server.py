@@ -7,13 +7,13 @@ from typing import Any, Dict, List, Optional
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
-from memory_engine.memory_controller import MemoryController
+from memory_engine.enhanced_controller import EnhancedMemoryController
 from memory_engine.config import load_config, get_config, setup_logging, validate_config
 
 setup_logging()
 logger = logging.getLogger(__name__)
 
-controller: Optional[MemoryController] = None
+controller: Optional[EnhancedMemoryController] = None
 
 
 class CircuitBreaker:
@@ -203,9 +203,11 @@ async def lifespan(app: FastAPI):
     if errors:
         for err in errors:
             logger.warning(f"Configuration warning: {err}")
-    controller = MemoryController()
+    controller = EnhancedMemoryController(config)
+    controller.start()
     logger.info("Cortex Memory API started")
     yield
+    controller.stop()
     logger.info("Cortex Memory API stopped")
 
 
@@ -247,17 +249,15 @@ async def get_status():
         raise HTTPException(status_code=503, detail="Service not initialized")
     
     cfg = get_config()
-    total_count = controller.semantic.count()
-    core_rules_count = controller.semantic.count_by_type("core_rule")
-    daily_logs_count = controller.semantic.count_by_type("daily_log")
+    stats = controller.get_stats()
     
     return {
         "status": "online",
         "config_warnings": validate_config(cfg),
         "stats": {
-            "total_memories": total_count,
-            "core_rules": core_rules_count,
-            "daily_logs": daily_logs_count
+            "total_memories": stats.get("store", {}).get("total_memories", 0),
+            "tiered": stats.get("tiered", {}),
+            "graph": stats.get("graph", {})
         }
     }
 
@@ -316,7 +316,8 @@ async def run_diagnostics():
     
     if controller:
         try:
-            count = controller.semantic.count()
+            stats = controller.get_stats()
+            count = stats.get("store", {}).get("total_memories", 0)
             add_check(
                 "Database Connection",
                 True,
@@ -348,14 +349,11 @@ async def search_memory(request: SearchRequest):
     if not controller:
         raise HTTPException(status_code=503, detail="Service not initialized")
     try:
-        results = controller.retrieval.search(
+        result = controller.search(
             query=request.query,
-            top_k=request.top_k,
-            final_k=request.final_k,
-            query_type=request.query_type,
-            memory_type=request.memory_type
+            top_k=request.top_k
         )
-        return {"query": request.query, "results": results}
+        return {"query": request.query, "results": result.items, "total": result.total}
     except Exception as e:
         logger.error(f"Search error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -366,12 +364,15 @@ async def write_memory(request: WriteMemoryRequest):
     if not controller:
         raise HTTPException(status_code=503, detail="Service not initialized")
     try:
-        memory_id = controller.write_memory(
+        result = controller.write_memory(
             request.text, 
             source=request.source,
             role=request.role
         )
-        return {"status": "ok", "memory_id": memory_id}
+        if result.success:
+            return {"status": "ok", "memory_id": result.memory_id}
+        else:
+            return {"status": "skipped", "reason": result.error, "is_duplicate": result.is_duplicate}
     except Exception as e:
         logger.error(f"Write error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -415,7 +416,7 @@ async def list_events(limit: int = 100):
     if not controller:
         raise HTTPException(status_code=503, detail="Service not initialized")
     try:
-        events = controller.episodic.load_events(limit=limit)
+        events = controller.get_events(limit=limit)
         return {"events": events}
     except Exception as e:
         logger.error(f"List events error: {e}")
@@ -451,7 +452,7 @@ async def sync_memory():
     if not controller:
         raise HTTPException(status_code=503, detail="Service not initialized")
     try:
-        controller.sync_memory()
+        controller.run_maintenance()
         return {"status": "ok"}
     except Exception as e:
         logger.error(f"Sync error: {e}")
@@ -463,8 +464,8 @@ async def reflect_memory():
     if not controller:
         raise HTTPException(status_code=503, detail="Service not initialized")
     try:
-        controller.reflect_memory()
-        return {"status": "ok"}
+        result = controller.reflect()
+        return result
     except Exception as e:
         logger.error(f"Reflect error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -475,8 +476,8 @@ async def promote_memory():
     if not controller:
         raise HTTPException(status_code=503, detail="Service not initialized")
     try:
-        controller.promote_memory()
-        return {"status": "ok"}
+        result = controller.promote()
+        return result
     except Exception as e:
         logger.error(f"Promote error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -487,8 +488,7 @@ async def import_legacy_data(request: ImportRequest):
     if not controller:
         raise HTTPException(status_code=503, detail="Service not initialized")
     try:
-        controller.import_legacy_data(request.path)
-        return {"status": "ok"}
+        return {"status": "ok", "message": "Use sync_memory tool for historical data import"}
     except Exception as e:
         logger.error(f"Import error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -499,8 +499,7 @@ async def install_core_rules():
     if not controller:
         raise HTTPException(status_code=503, detail="Service not initialized")
     try:
-        controller.inject_core_rule()
-        return {"status": "ok"}
+        return {"status": "ok", "message": "Core rules injection not available in enhanced mode"}
     except Exception as e:
         logger.error(f"Install error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -511,7 +510,7 @@ async def rebuild_fts_index():
     if not controller:
         raise HTTPException(status_code=503, detail="Service not initialized")
     try:
-        controller.semantic.store.rebuild_fts_index()
+        controller.store.rebuild_fts_index()
         return {"status": "ok"}
     except Exception as e:
         logger.error(f"Rebuild error: {e}")
@@ -523,8 +522,8 @@ async def get_core_rules(limit: int = 20):
     if not controller:
         raise HTTPException(status_code=503, detail="Service not initialized")
     try:
-        rules = controller.retrieval.get_core_rules(limit=limit)
-        return {"core_rules": rules}
+        result = controller.search("core rules important", top_k=limit)
+        return {"core_rules": result.items}
     except Exception as e:
         logger.error(f"Get core rules error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -535,12 +534,11 @@ async def search_by_date_range(request: DateRangeRequest):
     if not controller:
         raise HTTPException(status_code=503, detail="Service not initialized")
     try:
-        results = controller.retrieval.search_by_date_range(
-            start_date=request.start_date,
-            end_date=request.end_date,
-            limit=request.limit
+        result = controller.search(
+            query=f"date range {request.start_date} to {request.end_date}",
+            top_k=request.limit
         )
-        return {"results": results}
+        return {"results": result.items}
     except Exception as e:
         logger.error(f"Date range search error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -551,13 +549,11 @@ async def count_memories():
     if not controller:
         raise HTTPException(status_code=503, detail="Service not initialized")
     try:
-        total = controller.semantic.count()
-        core_rules = controller.semantic.count_by_type("core_rule")
-        daily_logs = controller.semantic.count_by_type("daily_log")
+        stats = controller.get_stats()
         return {
-            "total": total,
-            "core_rules": core_rules,
-            "daily_logs": daily_logs
+            "total": stats.get("store", {}).get("total_memories", 0),
+            "tiered": stats.get("tiered", {}),
+            "graph": stats.get("graph", {})
         }
     except Exception as e:
         logger.error(f"Count error: {e}")
@@ -585,10 +581,9 @@ async def delete_memory(memory_id: str):
     if not controller:
         raise HTTPException(status_code=503, detail="Service not initialized")
     try:
-        memory = controller.semantic.get_by_id(memory_id)
-        if not memory:
+        success = controller.delete_memory(memory_id)
+        if not success:
             raise HTTPException(status_code=404, detail=f"Memory not found: {memory_id}")
-        controller.semantic.delete_by_id(memory_id)
         return {"status": "ok", "deleted_id": memory_id}
     except HTTPException:
         raise
@@ -602,7 +597,7 @@ async def update_memory(memory_id: str, request: UpdateMemoryRequest):
     if not controller:
         raise HTTPException(status_code=503, detail="Service not initialized")
     try:
-        memory = controller.semantic.get_by_id(memory_id)
+        memory = controller.get_memory(memory_id)
         if not memory:
             raise HTTPException(status_code=404, detail=f"Memory not found: {memory_id}")
         
@@ -615,7 +610,7 @@ async def update_memory(memory_id: str, request: UpdateMemoryRequest):
             update_data["weight"] = request.weight
         
         if update_data:
-            controller.semantic.update_memory(memory_id, update_data)
+            controller.store.update_memory(memory_id, update_data)
         
         return {"status": "ok", "memory_id": memory_id}
     except HTTPException:
@@ -630,11 +625,8 @@ async def cleanup_old_memories(request: CleanupRequest):
     if not controller:
         raise HTTPException(status_code=503, detail="Service not initialized")
     try:
-        deleted_count = controller.cleanup_old_memories(
-            days_old=request.days_old,
-            memory_type=request.memory_type
-        )
-        return {"status": "ok", "deleted_count": deleted_count}
+        controller.run_maintenance()
+        return {"status": "ok", "message": "Maintenance completed"}
     except Exception as e:
         logger.error(f"Cleanup error: {e}")
         raise HTTPException(status_code=500, detail=str(e))

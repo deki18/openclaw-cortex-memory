@@ -323,3 +323,87 @@ class TieredMemoryManager:
             if (age_hours > self.config.hot_max_age_hours and 
                 item.access_count < self.config.hot_access_threshold):
                 self._demote_to_warm(item)
+
+
+class CoreRulesCache:
+    CORE_RULES_PRIORITY = 1.0
+    CORE_RULES_SOURCE = "core_rules"
+
+    def __init__(self, cortex_rules_path: str = None, local_cortex_rules_path: str = None):
+        self.cortex_rules_path = cortex_rules_path
+        self.local_cortex_rules_path = local_cortex_rules_path
+        self._content: Optional[str] = None
+        self._loaded: bool = False
+        self._last_modified: float = 0.0
+        self._lock = threading.RLock()
+
+    def load(self) -> bool:
+        with self._lock:
+            paths = []
+            if self.cortex_rules_path:
+                paths.append(self.cortex_rules_path)
+            if self.local_cortex_rules_path:
+                paths.append(self.local_cortex_rules_path)
+            
+            for path in paths:
+                full_path = os.path.abspath(path)
+                if os.path.exists(full_path):
+                    try:
+                        current_modified = os.path.getmtime(full_path)
+                        if self._loaded and current_modified == self._last_modified:
+                            return True
+                        
+                        with open(full_path, "r", encoding="utf-8") as f:
+                            self._content = f.read()
+                        self._loaded = True
+                        self._last_modified = current_modified
+                        logger.info(f"Loaded CORTEX_RULES.md from {full_path}")
+                        return True
+                    except Exception as e:
+                        logger.warning(f"Failed to load CORTEX_RULES.md from {full_path}: {e}")
+            
+            self._content = None
+            self._loaded = False
+            return False
+
+    def reload(self) -> bool:
+        with self._lock:
+            self._loaded = False
+            return self.load()
+
+    def get_content(self) -> Optional[str]:
+        with self._lock:
+            if not self._loaded:
+                self.load()
+            return self._content
+
+    def is_loaded(self) -> bool:
+        with self._lock:
+            return self._loaded
+
+    def get_as_search_item(self) -> Optional[TieredMemoryItem]:
+        content = self.get_content()
+        if not content:
+            return None
+        
+        return TieredMemoryItem(
+            id="CORTEX_RULES",
+            text=content,
+            tier=MemoryTier.HOT,
+            access_count=999999,
+            last_accessed=datetime.now(timezone.utc).timestamp(),
+            created_at=0,
+            importance_score=self.CORE_RULES_PRIORITY,
+            metadata={
+                "source": self.CORE_RULES_SOURCE,
+                "priority": self.CORE_RULES_PRIORITY,
+                "no_decay": True
+            },
+            vector=None
+        )
+
+    def clear(self):
+        with self._lock:
+            self._content = None
+            self._loaded = False
+            self._last_modified = 0.0

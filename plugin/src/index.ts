@@ -70,6 +70,7 @@ interface OpenClawPluginApi {
   }): void;
   unregisterHook?(event: string): void;
   getLogger(): {
+    debug: (message: string, ...args: unknown[]) => void;
     info: (message: string, ...args: unknown[]) => void;
     warn: (message: string, ...args: unknown[]) => void;
     error: (message: string, ...args: unknown[]) => void;
@@ -870,15 +871,6 @@ async function onSessionEndHandler(payload: unknown, context: ToolContext): Prom
   } catch (error) {
     logger.warn(`Failed to end session: ${formatApiError(error)}`);
   }
-  
-  if (config?.autoSync) {
-    try {
-      await apiCall("/sync", "POST");
-      logger.info(`Synced memory for session ${context.sessionId}`);
-    } catch (error) {
-      logger.warn(`Failed to sync on session end: ${formatApiError(error)}`);
-    }
-  }
 }
 
 async function onTimerHandler(payload: unknown, _context: ToolContext): Promise<void> {
@@ -978,7 +970,7 @@ function registerTools(): void {
     },
     {
       name: "sync_memory",
-      description: "Sync session data from OpenClaw to memory system",
+      description: "Import historical session data from OpenClaw workspace into memory system. Use this to import past conversations. Incremental processing - won't reprocess already imported data.",
       parameters: { type: "object", properties: {} },
       execute: async ({ args, context }: { args: Record<string, unknown>; context: ToolContext }) => 
         syncMemory(args, context),

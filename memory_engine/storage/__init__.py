@@ -5,7 +5,8 @@ from .tiered_storage import (
     MemoryTier,
     HotMemoryCache,
     WarmMemoryStore,
-    ColdMemoryArchive
+    ColdMemoryArchive,
+    CoreRulesCache
 )
 from .layered_storage import (
     LayeredMemoryStorage,
@@ -24,6 +25,7 @@ __all__ = [
     "HotMemoryCache",
     "WarmMemoryStore",
     "ColdMemoryArchive",
+    "CoreRulesCache",
     "LayeredMemoryStorage",
     "LayeredMemoryItem",
     "StorageLevel",

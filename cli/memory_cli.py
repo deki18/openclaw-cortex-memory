@@ -1,6 +1,6 @@
 import argparse
 import sys
-from memory_engine.memory_controller import MemoryController
+from memory_engine.enhanced_controller import EnhancedMemoryController
 
 def main():
     parser = argparse.ArgumentParser(description="OpenClaw Cortex Memory CLI")
@@ -45,7 +45,8 @@ def main():
     count_parser = subparsers.add_parser("count", help="Count total memories")
 
     args = parser.parse_args()
-    controller = MemoryController()
+    controller = EnhancedMemoryController()
+    controller.start()
 
     if args.command == "status":
         count = controller.semantic.count()

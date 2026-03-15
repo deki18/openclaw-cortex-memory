@@ -13,20 +13,20 @@ class HotMemory:
             from .config import get_openclaw_base_path
             base_dir = get_openclaw_base_path()
         self.base_dir = os.path.expanduser(base_dir)
-        self.soul_path = os.path.join(self.base_dir, "workspace", "SOUL.md")
-        self.local_soul_path = os.path.join(os.path.dirname(__file__), "..", "data", "memory", "SOUL.md")
+        self.cortex_rules_path = os.path.join(self.base_dir, "workspace", "CORTEX_RULES.md")
+        self.local_cortex_rules_path = os.path.join(os.path.dirname(__file__), "..", "data", "memory", "CORTEX_RULES.md")
         self.sessions_dir = os.path.join(self.base_dir, "agents", "main", "sessions")
         self.local_sessions_dir = os.path.join(os.path.dirname(__file__), "..", "data", "memory", "sessions", "active")
 
-    def load_soul(self) -> str:
-        for path in [self.soul_path, self.local_soul_path]:
+    def load_cortex_rules(self) -> str:
+        for path in [self.cortex_rules_path, self.local_cortex_rules_path]:
             full_path = os.path.abspath(path)
             if os.path.exists(full_path):
                 try:
                     with open(full_path, "r", encoding="utf-8") as f:
                         return f.read()
                 except Exception as e:
-                    logger.warning(f"Failed to load SOUL.md from {full_path}: {e}")
+                    logger.warning(f"Failed to load CORTEX_RULES.md from {full_path}: {e}")
         return ""
 
     def load_recent_sessions(self, limit: int = 20) -> List[str]:
@@ -39,10 +39,10 @@ class HotMemory:
         return items[:limit]
 
     def build_hot_context(self, limit: int = 20) -> str:
-        soul = self.load_soul().strip()
+        cortex_rules = self.load_cortex_rules().strip()
         recent = self.load_recent_sessions(limit)
         recent_text = "\n".join(recent).strip()
-        parts = [p for p in [soul, recent_text] if p]
+        parts = [p for p in [cortex_rules, recent_text] if p]
         return "\n\n".join(parts)
 
     def _latest_session_files(self) -> List[str]:

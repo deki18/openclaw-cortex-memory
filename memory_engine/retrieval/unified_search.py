@@ -20,6 +20,7 @@ class SearchSource(Enum):
     KEYWORD = "keyword"
     GRAPH = "graph"
     EPISODIC = "episodic"
+    CORE_RULES = "core_rules"
     FUSION = "fusion"
 
 
@@ -69,12 +70,14 @@ class SearchConfig:
     keyword_k: int = 30
     graph_k: int = 20
     episodic_k: int = 20
+    core_rules_k: int = 5
     
     enable_hot_cache: bool = True
     enable_vector: bool = True
     enable_keyword: bool = True
     enable_graph: bool = True
     enable_episodic: bool = True
+    enable_core_rules: bool = True
     
     enable_time_decay: bool = True
     enable_rerank: bool = True
@@ -82,6 +85,8 @@ class SearchConfig:
     fusion_k: int = 60
     
     time_decay_halflife: float = 30.0
+    
+    core_rules_priority: float = 1.0
     
     weights: Dict[str, float] = field(default_factory=lambda: {
         "relevance": 0.4,
@@ -452,6 +457,168 @@ class EpisodicSearcherWrapper:
             return 0
 
 
+class CoreRulesSearcher:
+    CORE_RULES_ID = "CORTEX_RULES"
+    
+    def __init__(self, core_rules_cache=None, embedding_module=None):
+        self.core_rules_cache = core_rules_cache
+        self.embedding_module = embedding_module
+        self._content: Optional[str] = None
+        self._chunks: List[Dict[str, Any]] = []
+        self._chunk_vectors: List[List[float]] = []
+        self._loaded: bool = False
+    
+    def set_core_rules_cache(self, cache):
+        self.core_rules_cache = cache
+    
+    def set_embedding_module(self, module):
+        self.embedding_module = module
+    
+    def load(self) -> bool:
+        if self._loaded:
+            return True
+        
+        if self.core_rules_cache:
+            content = self.core_rules_cache.get_content()
+            if content:
+                self._content = content
+                self._chunk_content()
+                self._loaded = True
+                logger.info(f"CoreRulesSearcher loaded {len(self._chunks)} chunks")
+                return True
+        
+        return False
+    
+    def reload(self) -> bool:
+        self._loaded = False
+        self._chunks = []
+        self._chunk_vectors = []
+        return self.load()
+    
+    def _chunk_content(self):
+        if not self._content:
+            return
+        
+        self._chunks = []
+        lines = self._content.split('\n')
+        current_chunk = []
+        current_title = ""
+        
+        for line in lines:
+            if line.startswith('# ') or line.startswith('## '):
+                if current_chunk:
+                    chunk_text = '\n'.join(current_chunk).strip()
+                    if chunk_text:
+                        self._chunks.append({
+                            "title": current_title,
+                            "text": chunk_text,
+                            "id": f"{self.CORE_RULES_ID}_{len(self._chunks)}"
+                        })
+                current_title = line.strip('# ').strip()
+                current_chunk = [line]
+            else:
+                current_chunk.append(line)
+        
+        if current_chunk:
+            chunk_text = '\n'.join(current_chunk).strip()
+            if chunk_text:
+                self._chunks.append({
+                    "title": current_title,
+                    "text": chunk_text,
+                    "id": f"{self.CORE_RULES_ID}_{len(self._chunks)}"
+                })
+        
+        if self.embedding_module and self._chunks:
+            texts = [c["text"] for c in self._chunks]
+            try:
+                self._chunk_vectors = self.embedding_module.embed_text(texts)
+            except Exception as e:
+                logger.warning(f"Failed to embed core rules chunks: {e}")
+                self._chunk_vectors = []
+    
+    def search(
+        self,
+        query: str,
+        query_vector: List[float] = None,
+        top_k: int = 5,
+        priority: float = 1.0
+    ) -> List[UnifiedSearchItem]:
+        if not self._loaded:
+            self.load()
+        
+        if not self._chunks:
+            return []
+        
+        if query_vector is None and self.embedding_module:
+            try:
+                query_vector = self.embedding_module.embed_text([query])[0]
+            except Exception as e:
+                logger.warning(f"Failed to embed query for core rules: {e}")
+        
+        scored_chunks = []
+        
+        for i, chunk in enumerate(self._chunks):
+            score = 0.5
+            
+            if query_vector and i < len(self._chunk_vectors) and self._chunk_vectors[i]:
+                similarity = self._cosine_similarity(query_vector, self._chunk_vectors[i])
+                score = similarity
+            
+            query_lower = query.lower()
+            text_lower = chunk["text"].lower()
+            if query_lower in text_lower:
+                score = max(score, 0.8)
+            
+            title_lower = chunk.get("title", "").lower()
+            if query_lower in title_lower:
+                score = max(score, 0.9)
+            
+            query_words = set(query_lower.split())
+            text_words = set(text_lower.split())
+            word_overlap = len(query_words & text_words) / max(len(query_words), 1)
+            score = max(score, word_overlap * 0.6)
+            
+            final_score = score * priority
+            
+            if final_score > 0.1:
+                scored_chunks.append((chunk, final_score))
+        
+        scored_chunks.sort(key=lambda x: x[1], reverse=True)
+        
+        results = []
+        for chunk, score in scored_chunks[:top_k]:
+            results.append(UnifiedSearchItem(
+                id=chunk["id"],
+                text=chunk["text"],
+                score=score,
+                source=SearchSource.CORE_RULES,
+                metadata={
+                    "title": chunk.get("title", ""),
+                    "source": "core_rules",
+                    "no_decay": True,
+                    "priority": priority
+                }
+            ))
+        
+        return results
+    
+    def _cosine_similarity(self, vec1: List[float], vec2: List[float]) -> float:
+        if not vec1 or not vec2 or len(vec1) != len(vec2):
+            return 0.0
+        
+        dot = sum(a * b for a, b in zip(vec1, vec2))
+        norm1 = math.sqrt(sum(a * a for a in vec1))
+        norm2 = math.sqrt(sum(b * b for b in vec2))
+        
+        if norm1 == 0 or norm2 == 0:
+            return 0.0
+        
+        return dot / (norm1 * norm2)
+    
+    def is_loaded(self) -> bool:
+        return self._loaded
+
+
 class ResultFusion:
     @staticmethod
     def reciprocal_rank_fusion(
@@ -639,6 +806,10 @@ class UnifiedSearchPipeline:
         else:
             from ..episodic_memory import EpisodicMemory
             self.episodic_searcher = EpisodicSearcherWrapper(EpisodicMemory())
+        
+        self.core_rules_searcher = CoreRulesSearcher(
+            embedding_module=self.embedding_module
+        )
     
     def search(
         self,
@@ -782,6 +953,18 @@ class UnifiedSearchPipeline:
                 ), "episodic")
             )
         
+        core_rules_k = self.config.core_rules_k
+        if self.config.enable_core_rules and self.core_rules_searcher and core_rules_k > 0:
+            futures.append(
+                (self._executor.submit(
+                    self.core_rules_searcher.search,
+                    query,
+                    query_vector,
+                    max(1, core_rules_k),
+                    self.config.core_rules_priority
+                ), "core_rules")
+            )
+        
         all_items = []
         for future, source_name in futures:
             try:
@@ -842,7 +1025,9 @@ class UnifiedSearchPipeline:
             
             scores["relevance"] = item.score
             
-            if enable_time_decay:
+            if item.metadata.get("no_decay") or item.source == SearchSource.CORE_RULES:
+                scores["recency"] = 1.0
+            elif enable_time_decay:
                 scores["recency"] = self.time_decay_scorer.score(item)
             else:
                 scores["recency"] = 1.0

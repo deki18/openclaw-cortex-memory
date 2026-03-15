@@ -27,6 +27,9 @@ class SessionManager:
         
         self._session_timeout_seconds = 1800
         self._last_activity_time = None
+        self._last_processed_index = -1
+        self._session_failures: List[EpisodicEvent] = []
+        self._auto_reflect_enabled = True
     
     def start_session(self, session_id: str = None) -> SessionContext:
         with self._lock:
@@ -41,6 +44,8 @@ class SessionManager:
             )
             
             self._last_activity_time = datetime.now(timezone.utc)
+            self._last_processed_index = -1
+            self._session_failures = []
             
             logger.info(f"Started new session: {session_id}")
             return self._current_session
@@ -73,16 +78,45 @@ class SessionManager:
         if not self._current_session or not self._current_session.messages:
             return []
         
-        events = self.event_generator.generate_from_session(self._current_session)
+        messages = self._current_session.messages
+        start_idx = self._last_processed_index + 1
+        
+        events = []
+        
+        if start_idx < len(messages):
+            unprocessed_messages = messages[start_idx:]
+            
+            temp_session = SessionContext(
+                session_id=self._current_session.session_id,
+                start_time=self._current_session.start_time,
+            )
+            temp_session.messages = unprocessed_messages
+            temp_session.memory_ids = self._current_session.memory_ids
+            
+            new_events = self.event_generator.generate_from_session(temp_session)
+            
+            for event in new_events:
+                event.memory_ids = [
+                    messages[start_idx + i].get("memory_id")
+                    for i, m in enumerate(unprocessed_messages)
+                    if i < len(unprocessed_messages) and messages[start_idx + i].get("memory_id")
+                ]
+            
+            events.extend(new_events)
         
         if events:
             self._store_events(events)
         
         session_id = self._current_session.session_id
+        total_messages = len(messages)
+        processed_during_session = self._last_processed_index + 1
+        processed_at_end = len(messages) - processed_during_session
+        
         self._current_session = None
         self._last_activity_time = None
+        self._last_processed_index = -1
         
-        logger.info(f"Ended session {session_id}, generated {len(events)} events")
+        logger.info(f"Ended session {session_id}: {total_messages} messages, {processed_during_session} processed during session, {processed_at_end} processed at end, {len(events)} events generated")
         return events
     
     def _should_trigger_event_generation(self, content: str, role: str) -> bool:
@@ -103,16 +137,35 @@ class SessionManager:
             return []
         
         messages = self._current_session.messages
-        tasks = self.task_detector.detect_tasks(messages)
+        start_idx = self._last_processed_index + 1
+        
+        if start_idx >= len(messages):
+            return []
+        
+        unprocessed_messages = messages[start_idx:]
+        tasks = self.task_detector.detect_tasks(unprocessed_messages)
         
         events = []
+        max_processed_idx = self._last_processed_index
+        
         for task in tasks:
             if task.is_complete:
-                event = self._create_event_from_task(task)
+                adjusted_task = self._adjust_task_indices(task, start_idx)
+                event = self._create_event_from_task(adjusted_task)
                 if event:
                     events.append(event)
+                    max_processed_idx = max(max_processed_idx, adjusted_task.end_idx)
+        
+        if max_processed_idx > self._last_processed_index:
+            self._last_processed_index = max_processed_idx
+            logger.debug(f"Updated last processed index to {max_processed_idx}")
         
         return events
+    
+    def _adjust_task_indices(self, task, offset: int):
+        task.start_idx += offset
+        task.end_idx += offset
+        return task
     
     def _create_event_from_task(self, task) -> Optional[EpisodicEvent]:
         task_messages = self._current_session.messages[task.start_idx:task.end_idx + 1]
@@ -153,7 +206,57 @@ class SessionManager:
         return extracted or {}
     
     def _store_events(self, events: List[EpisodicEvent]) -> List[str]:
-        return self.episodic.store_events_batch(events)
+        stored_ids = self.episodic.store_events_batch(events)
+        
+        if not self._auto_reflect_enabled:
+            return stored_ids
+        
+        should_reflect = False
+        reflect_reason = ""
+        
+        for event in events:
+            if event.outcome == "failure":
+                self._session_failures.append(event)
+                logger.debug(f"Recorded failure event: {event.summary[:50]}")
+            
+            elif event.outcome == "success" and self._session_failures:
+                related_failure = self._find_related_failure(event)
+                if related_failure:
+                    should_reflect = True
+                    reflect_reason = f"Success after failure: '{related_failure.summary[:30]}...' -> '{event.summary[:30]}...'"
+                    break
+        
+        if should_reflect:
+            self._trigger_auto_reflect(reflect_reason)
+        
+        return stored_ids
+    
+    def _find_related_failure(self, success_event: EpisodicEvent) -> Optional[EpisodicEvent]:
+        success_entities = set(success_event.entities or [])
+        success_words = set(success_event.summary.lower().split())
+        
+        for failure in self._session_failures:
+            failure_entities = set(failure.entities or [])
+            if success_entities and failure_entities and success_entities & failure_entities:
+                return failure
+            
+            failure_words = set(failure.summary.lower().split())
+            common_words = success_words & failure_words
+            meaningful_words = common_words - {"the", "a", "an", "is", "are", "was", "were", "to", "for", "and", "or", "in", "on", "at"}
+            if len(meaningful_words) >= 2:
+                return failure
+        
+        return None
+    
+    def _trigger_auto_reflect(self, reason: str):
+        logger.info(f"Auto-reflect triggered: {reason}")
+        try:
+            from ..reflection_engine import ReflectionEngine
+            engine = ReflectionEngine()
+            engine.reflect()
+            logger.info("Auto-reflect completed successfully")
+        except Exception as e:
+            logger.error(f"Auto-reflect failed: {e}")
     
     def get_current_session(self) -> Optional[SessionContext]:
         return self._current_session
