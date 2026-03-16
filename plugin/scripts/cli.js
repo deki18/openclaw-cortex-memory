@@ -4,7 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const { spawn } = require('child_process');
 
-const PLUGIN_NAME = 'cortex-memory';
+const PLUGIN_NAME = 'openclaw-cortex-memory';
 
 function findOpenClawConfig() {
   const possiblePaths = [
@@ -54,8 +54,13 @@ function enablePlugin() {
     
     const config = {
       plugins: {
-        [PLUGIN_NAME]: {
-          enabled: true
+        slots: {
+          memory: PLUGIN_NAME
+        },
+        entries: {
+          [PLUGIN_NAME]: {
+            enabled: true
+          }
         }
       }
     };
@@ -69,16 +74,24 @@ function enablePlugin() {
   if (!config.plugins) {
     config.plugins = {};
   }
+  if (!config.plugins.entries) {
+    config.plugins.entries = {};
+  }
   
-  if (config.plugins[PLUGIN_NAME]?.enabled === true) {
+  if (config.plugins.entries[PLUGIN_NAME]?.enabled === true) {
     console.log(`Plugin '${PLUGIN_NAME}' is already enabled.`);
     return;
   }
   
-  config.plugins[PLUGIN_NAME] = {
-    ...config.plugins[PLUGIN_NAME],
+  config.plugins.entries[PLUGIN_NAME] = {
+    ...config.plugins.entries[PLUGIN_NAME],
     enabled: true
   };
+  
+  if (!config.plugins.slots) {
+    config.plugins.slots = {};
+  }
+  config.plugins.slots.memory = PLUGIN_NAME;
   
   saveConfig(configPath, config);
   console.log(`Plugin '${PLUGIN_NAME}' has been enabled.`);
@@ -96,13 +109,16 @@ function disablePlugin() {
   
   const config = loadConfig(configPath);
   
-  if (!config.plugins?.[PLUGIN_NAME] || config.plugins[PLUGIN_NAME].enabled !== false) {
+  if (!config.plugins?.entries?.[PLUGIN_NAME] || config.plugins.entries[PLUGIN_NAME].enabled !== false) {
     if (!config.plugins) {
       config.plugins = {};
     }
+    if (!config.plugins.entries) {
+      config.plugins.entries = {};
+    }
     
-    config.plugins[PLUGIN_NAME] = {
-      ...config.plugins[PLUGIN_NAME],
+    config.plugins.entries[PLUGIN_NAME] = {
+      ...config.plugins.entries[PLUGIN_NAME],
       enabled: false
     };
     
@@ -130,7 +146,7 @@ function getStatus() {
   console.log(`Config file: ${configPath}`);
   
   const config = loadConfig(configPath);
-  const pluginConfig = config.plugins?.[PLUGIN_NAME];
+  const pluginConfig = config.plugins?.entries?.[PLUGIN_NAME];
   
   if (!pluginConfig) {
     console.log('Status: Enabled (default)');

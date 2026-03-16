@@ -234,7 +234,8 @@ Python 后端服务随插件加载自动启动。
 | embedding.baseURL | 否 | - | 自定义端点 |
 | llm.provider | 是 | - | LLM 提供商 |
 | llm.model | 是 | - | LLM 模型名称 |
-| reranker.model | 是 | - | Reranker 模型 |
+| reranker.provider | 否 | - | Reranker 提供商 |
+| reranker.model | 否 | - | Reranker 模型 |
 | reranker.apiKey | 否 | - | Reranker API Key |
 | reranker.endpoint | 否 | - | Reranker 端点 |
 | dbPath | 否 | ~/.openclaw/agents/main/lancedb_store | 数据库路径 |
@@ -327,9 +328,10 @@ cortex-memory doctor              # 运行诊断
 ```json
 {
   "plugins": {
-    "cortex-memory": {
-      "enabled": false,
-      "fallbackToBuiltin": true
+    "entries": {
+      "openclaw-cortex-memory": {
+        "enabled": false
+      }
     }
   }
 }
