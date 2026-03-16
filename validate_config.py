@@ -6,11 +6,6 @@ import sys
 from pathlib import Path
 from typing import Dict, List, Any, Optional
 
-try:
-    import yaml
-except ImportError:
-    yaml = None
-
 COLORS = {
     'RED': '\033[91m',
     'GREEN': '\033[92m',
@@ -38,19 +33,81 @@ def print_check(name: str, passed: bool, message: str = "", fix: str = ""):
     if not passed and fix:
         print(f"         {colorize('Fix: ' + fix, 'YELLOW')}")
 
-def load_config() -> Dict[str, Any]:
-    config = {}
+def find_openclaw_config() -> Optional[str]:
+    possible_paths = [
+        os.path.join(os.getcwd(), "openclaw.json"),
+        os.path.join(Path.home(), ".openclaw", "openclaw.json"),
+        os.environ.get("OPENCLAW_CONFIG_PATH", ""),
+    ]
     
-    config_path = "config.yaml"
-    if os.path.exists(config_path):
-        if yaml is None:
-            print(colorize("Warning: PyYAML not installed, cannot read config.yaml", "YELLOW"))
-        else:
-            try:
-                with open(config_path, "r", encoding="utf-8") as f:
-                    config = yaml.safe_load(f) or {}
-            except Exception as e:
-                print(colorize(f"Error reading config.yaml: {e}", "RED"))
+    for path in possible_paths:
+        if path and os.path.exists(path):
+            return path
+    return None
+
+def load_openclaw_config() -> Dict[str, Any]:
+    config_path = find_openclaw_config()
+    if not config_path:
+        return {}
+    
+    try:
+        with open(config_path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception as e:
+        print(colorize(f"Error reading openclaw.json: {e}", "RED"))
+        return {}
+
+def extract_plugin_config(openclaw_config: Dict[str, Any]) -> Dict[str, Any]:
+    entries = openclaw_config.get("plugins", {}).get("entries", {})
+    plugin_config = entries.get("openclaw-cortex-memory", {}).get("config", {})
+    result = {}
+    
+    embedding = plugin_config.get("embedding", {})
+    if embedding:
+        if embedding.get("provider"):
+            result["embedding_provider"] = embedding["provider"]
+        if embedding.get("model"):
+            result["embedding_model"] = embedding["model"]
+        if embedding.get("apiKey"):
+            result["embedding_api_key"] = embedding["apiKey"]
+        if embedding.get("baseURL"):
+            result["embedding_base_url"] = embedding["baseURL"]
+        if embedding.get("dimensions"):
+            result["embedding_dimensions"] = embedding["dimensions"]
+    
+    llm = plugin_config.get("llm", {})
+    if llm:
+        if llm.get("provider"):
+            result["llm_provider"] = llm["provider"]
+        if llm.get("model"):
+            result["llm_model"] = llm["model"]
+        if llm.get("apiKey"):
+            result["llm_api_key"] = llm["apiKey"]
+        if llm.get("baseURL"):
+            result["llm_base_url"] = llm["baseURL"]
+    
+    reranker = plugin_config.get("reranker", {})
+    if reranker:
+        if reranker.get("provider"):
+            result["reranker_provider"] = reranker["provider"]
+        if reranker.get("model"):
+            result["reranker_model"] = reranker["model"]
+        if reranker.get("apiKey"):
+            result["reranker_api_key"] = reranker["apiKey"]
+        if reranker.get("endpoint"):
+            result["reranker_endpoint"] = reranker["endpoint"]
+    
+    if plugin_config.get("dbPath"):
+        result["lancedb_path"] = plugin_config["dbPath"]
+    if plugin_config.get("autoSync") is not None:
+        result["auto_sync"] = plugin_config["autoSync"]
+    if plugin_config.get("autoReflect") is not None:
+        result["auto_reflect"] = plugin_config["autoReflect"]
+    
+    return result
+
+def load_config_from_env() -> Dict[str, Any]:
+    result = {}
     
     env_mappings = {
         "embedding_provider": "CORTEX_MEMORY_EMBEDDING_PROVIDER",
@@ -63,12 +120,34 @@ def load_config() -> Dict[str, Any]:
         "llm_api_key": "CORTEX_MEMORY_LLM_API_KEY",
         "llm_base_url": "CORTEX_MEMORY_LLM_BASE_URL",
         "reranker_provider": "CORTEX_MEMORY_RERANKER_PROVIDER",
+        "reranker_model": "CORTEX_MEMORY_RERANKER_MODEL",
         "reranker_api_key": "CORTEX_MEMORY_RERANKER_API_KEY",
+        "reranker_endpoint": "CORTEX_MEMORY_RERANKER_ENDPOINT",
+        "lancedb_path": "CORTEX_MEMORY_DB_PATH",
     }
     
     for key, env_var in env_mappings.items():
-        if os.environ.get(env_var):
-            config[key] = os.environ[env_var]
+        env_value = os.environ.get(env_var)
+        if env_value:
+            if key == "embedding_dimensions":
+                try:
+                    result[key] = int(env_value)
+                except ValueError:
+                    pass
+            else:
+                result[key] = env_value
+    
+    return result
+
+def load_config() -> Dict[str, Any]:
+    config = {}
+    
+    openclaw_config = load_openclaw_config()
+    if openclaw_config:
+        config = extract_plugin_config(openclaw_config)
+    
+    env_config = load_config_from_env()
+    config.update(env_config)
     
     return config
 
@@ -107,23 +186,10 @@ def validate_llm_config(config: Dict[str, Any]) -> List[str]:
 def validate_reranker_config(config: Dict[str, Any]) -> List[str]:
     errors = []
     
-    reranker_config = config.get("reranker_api", {})
-    model = reranker_config.get("model")
+    model = config.get("reranker_model")
     
     if not model:
         errors.append("reranker.model is recommended for better retrieval quality")
-    
-    return errors
-
-def validate_paths(config: Dict[str, Any]) -> List[str]:
-    errors = []
-    
-    db_path = config.get("lancedb_path")
-    if db_path:
-        db_path = os.path.expanduser(db_path)
-        parent_dir = os.path.dirname(db_path)
-        if not os.path.exists(parent_dir):
-            errors.append(f"Parent directory for lancedb_path does not exist: {parent_dir}")
     
     return errors
 
@@ -162,15 +228,17 @@ def run_diagnostics(config: Dict[str, Any], verbose: bool = False) -> bool:
     print_header("Cortex Memory Configuration Validator")
     
     print(colorize("Configuration Source:", "BOLD"))
-    config_path = "config.yaml"
-    if os.path.exists(config_path):
-        print(f"  File: {config_path} (exists)")
+    config_path = find_openclaw_config()
+    if config_path:
+        print(f"  File: {config_path} (found)")
     else:
-        print(f"  File: {config_path} (not found, using environment variables)")
+        print(f"  File: openclaw.json (not found)")
     
     env_vars = [k for k in os.environ if k.startswith("CORTEX_MEMORY_")]
     if env_vars:
         print(f"  Environment variables: {len(env_vars)} set")
+    else:
+        print(f"  Environment variables: 0 set")
     
     print_header("Embedding Configuration")
     embedding_errors = validate_embedding_config(config)
@@ -178,13 +246,13 @@ def run_diagnostics(config: Dict[str, Any], verbose: bool = False) -> bool:
         "Embedding Provider",
         bool(config.get("embedding_provider")),
         f"Provider: {config.get('embedding_provider', 'NOT SET')}",
-        "Set CORTEX_MEMORY_EMBEDDING_PROVIDER or add to config.yaml"
+        "Set CORTEX_MEMORY_EMBEDDING_PROVIDER or add to openclaw.json"
     )
     print_check(
         "Embedding Model",
         bool(config.get("embedding_model")),
         f"Model: {config.get('embedding_model', 'NOT SET')}",
-        "Set CORTEX_MEMORY_EMBEDDING_MODEL or add to config.yaml"
+        "Set CORTEX_MEMORY_EMBEDDING_MODEL or add to openclaw.json"
     )
     has_api_key = bool(config.get("embedding_api_key") or os.environ.get("OPENAI_API_KEY"))
     print_check(
@@ -192,6 +260,11 @@ def run_diagnostics(config: Dict[str, Any], verbose: bool = False) -> bool:
         has_api_key,
         "Key: " + ("***" + (config.get("embedding_api_key") or os.environ.get("OPENAI_API_KEY", ""))[-4:] if has_api_key else "NOT SET"),
         "Set OPENAI_API_KEY or CORTEX_MEMORY_EMBEDDING_API_KEY"
+    )
+    print_check(
+        "Embedding Dimensions",
+        bool(config.get("embedding_dimensions")),
+        f"Dimensions: {config.get('embedding_dimensions', 'default')}",
     )
     if embedding_errors:
         all_passed = False
@@ -202,24 +275,29 @@ def run_diagnostics(config: Dict[str, Any], verbose: bool = False) -> bool:
         "LLM Provider",
         bool(config.get("llm_provider")),
         f"Provider: {config.get('llm_provider', 'NOT SET')}",
-        "Set CORTEX_MEMORY_LLM_PROVIDER or add to config.yaml"
+        "Set CORTEX_MEMORY_LLM_PROVIDER or add to openclaw.json"
     )
     print_check(
         "LLM Model",
         bool(config.get("llm_model")),
         f"Model: {config.get('llm_model', 'NOT SET')}",
-        "Set CORTEX_MEMORY_LLM_MODEL or add to config.yaml"
+        "Set CORTEX_MEMORY_LLM_MODEL or add to openclaw.json"
     )
     if llm_errors:
         all_passed = False
     
     print_header("Reranker Configuration")
-    reranker_config = config.get("reranker_api", {})
+    reranker_errors = validate_reranker_config(config)
     print_check(
         "Reranker Model",
-        bool(reranker_config.get("model")),
-        f"Model: {reranker_config.get('model', 'NOT SET (optional)')}",
-        "Add reranker.model to config.yaml for better retrieval"
+        bool(config.get("reranker_model")),
+        f"Model: {config.get('reranker_model', 'NOT SET (optional)')}",
+        "Add reranker.model to openclaw.json for better retrieval"
+    )
+    print_check(
+        "Reranker Endpoint",
+        bool(config.get("reranker_endpoint")),
+        f"Endpoint: {config.get('reranker_endpoint', 'NOT SET')}",
     )
     
     print_header("Python Dependencies")
@@ -287,6 +365,7 @@ Examples:
                 "embedding_model": config.get("embedding_model"),
                 "llm_provider": config.get("llm_provider"),
                 "llm_model": config.get("llm_model"),
+                "reranker_model": config.get("reranker_model"),
             }
         }
         print(json.dumps(result, indent=2))

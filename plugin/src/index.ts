@@ -1012,7 +1012,7 @@ function registerTools(): void {
     },
     {
       name: "get_hot_context",
-      description: "Get current hot context including SOUL.md and recent data",
+      description: "Get current hot context including CORTEX_RULES.md and recent data",
       parameters: {
         type: "object",
         properties: { limit: { type: "number", description: "Max items", default: 20 } },

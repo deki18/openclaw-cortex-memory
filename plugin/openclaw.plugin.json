@@ -99,7 +99,7 @@
     },
     {
       "name": "get_hot_context",
-      "description": "Get the current hot context including SOUL.md and recent session data",
+      "description": "Get the current hot context including CORTEX_RULES.md and recent session data",
       "parameters": {
         "type": "object",
         "properties": {

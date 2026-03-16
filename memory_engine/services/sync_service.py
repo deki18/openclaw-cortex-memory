@@ -40,23 +40,6 @@ class MemorySyncService:
             logger.warning(f"Directory not found: {base_dir}")
             return
 
-        memory_md_path = os.path.join(base_dir, "workspace", "MEMORY.md")
-        if os.path.exists(memory_md_path):
-            logger.info(f"Importing long-term memory: {memory_md_path}")
-            try:
-                with open(memory_md_path, "r", encoding="utf-8") as f:
-                    content = f.read()
-                    if content.strip():
-                        meta = MemoryMetadata(
-                            type="core_rule",
-                            date=datetime.now(timezone.utc).strftime("%Y-%m-%d"),
-                            agent="openclaw",
-                            source_file=memory_md_path
-                        )
-                        self.semantic.add_memory(content, meta)
-            except Exception as e:
-                logger.error(f"Failed to import {memory_md_path}: {e}")
-        
         daily_records_pattern = os.path.join(base_dir, "workspace", "memory", "*.md")
         for file_path in glob.glob(daily_records_pattern):
             logger.info(f"Importing daily record: {file_path}")
@@ -94,10 +77,20 @@ class MemorySyncService:
 You are equipped with the **Cortex Memory** engine. You must proactively manage and utilize your memory using the provided skills.
 
 1. **Proactive Retrieval**: If a user asks about past interactions, projects, preferences, or technical context that is not in your immediate short-term memory, you MUST use the `search_memory` tool to retrieve semantic memory before answering. Do not guess or hallucinate past events.
-2. **Relational Queries**: If the user asks about the relationship between entities (e.g., "Who worked on Project X?", "What technologies does Person Y use?"), use the `query_graph` tool to query the memory graph.
-3. **Memory Consolidation**: When you learn a new, important fact about the user, complete a significant milestone, or resolve a complex bug, you should summarize it and use `store_event` to record it.
-4. **Self-Reflection**: Periodically, or when asked to review past performance, use the `reflect_memory` tool to generate insights from your episodic memory.
-5. **Trust the Engine**: The memory engine handles vector search, BM25 keyword matching, and time-decay automatically. Trust its top results.
+
+2. **Auto Context**: For proactive memory retrieval without explicit search, use `get_auto_context` to get automatically retrieved relevant memories based on recent user messages, plus hot context.
+
+3. **Hot Context**: When you need current session context including CORTEX_RULES.md and recent data, use `get_hot_context` to retrieve the hot memory layer.
+
+4. **Relational Queries**: If the user asks about the relationship between entities (e.g., "Who worked on Project X?", "What technologies does Person Y use?"), use the `query_graph` tool to query the memory graph.
+
+5. **Memory Consolidation**: When you learn a new, important fact about the user, complete a significant milestone, or resolve a complex bug, you should summarize it and use `store_event` to record it.
+
+6. **Self-Reflection**: Periodically, or when asked to review past performance, use the `reflect_memory` tool to generate insights from your episodic memory.
+
+7. **Historical Sync**: To import historical session data from OpenClaw workspace, use `sync_memory` tool. This is incremental and won't reprocess already imported data.
+
+8. **Trust the Engine**: The memory engine handles vector search, BM25 keyword matching, and time-decay automatically. Trust its top results.
 """
         
         content = ""

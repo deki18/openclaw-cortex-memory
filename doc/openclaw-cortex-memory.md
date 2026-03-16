@@ -55,7 +55,7 @@ Hot Memory / Semantic Memory / Episodic Memory / Procedural Memory
 
 内容：
 
--   SOUL.md\
+-   CORTEX_RULES.md\
 -   当前对话
 
 特点：
@@ -219,7 +219,7 @@ memory_cli.py
 
 data\
 memory\
-SOUL.md\
+CORTEX_RULES.md\
 MEMORY.md\
 today.md
 

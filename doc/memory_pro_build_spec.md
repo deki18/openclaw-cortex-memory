@@ -51,7 +51,7 @@ query_graph.py
 
 cli/ memory_cli.py
 
-data/ memory/ SOUL.md MEMORY.md today.md daily-summary/ sessions/
+data/ memory/ CORTEX_RULES.md MEMORY.md today.md daily-summary/ sessions/
 active/ archive/
 
 vector_store/

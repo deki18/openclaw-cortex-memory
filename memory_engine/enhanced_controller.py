@@ -966,13 +966,12 @@ class EnhancedMemoryController:
                 total_processed += session_result.get("processed", 0)
                 total_sessions = session_result.get("sessions", 0)
             
-            memory_md_path = os.path.join(openclaw_base, "workspace", "MEMORY.md")
-            if os.path.exists(memory_md_path):
-                memory_md_result = self._process_memory_md(memory_md_path, state_path)
-                if memory_md_result.get("processed"):
-                    segments_count = memory_md_result.get("segments", 0)
-                    results["memory_md_segments"] = segments_count
-                    total_processed += segments_count
+            daily_memory_dir = os.path.join(openclaw_base, "workspace", "memory")
+            if os.path.isdir(daily_memory_dir):
+                daily_result = self._process_daily_memories(daily_memory_dir, state_path)
+                if daily_result.get("processed"):
+                    results["daily_memories"] = daily_result.get("processed", 0)
+                    total_processed += daily_result.get("processed", 0)
             
             results["total_memories"] = total_processed
             
@@ -1043,46 +1042,52 @@ class EnhancedMemoryController:
         
         return {"processed": total_processed, "sessions": total_sessions}
     
-    def _process_memory_md(self, memory_md_path: str, state_path: str) -> Dict[str, Any]:
-        state = self._load_sync_state(state_path)
-        file_key = f"memory_md:{os.path.abspath(memory_md_path)}"
+    def _process_daily_memories(self, daily_memory_dir: str, state_path: str) -> Dict[str, Any]:
+        import glob
         
-        try:
-            current_mtime = os.path.getmtime(memory_md_path)
-            last_mtime = state.get(file_key, 0)
+        state = self._load_sync_state(state_path)
+        total_processed = 0
+        
+        for daily_file in glob.glob(os.path.join(daily_memory_dir, "*.md")):
+            file_key = f"daily_memory:{os.path.abspath(daily_file)}"
             
-            if current_mtime <= last_mtime:
-                return {"processed": False, "reason": "Not modified"}
-            
-            with open(memory_md_path, "r", encoding="utf-8") as f:
-                content = f.read()
-            
-            if not content or not content.strip():
-                return {"processed": False, "reason": "Empty content"}
-            
-            segments = self.llm_extractor.split_session(content)
-            processed_count = 0
-            
-            for seg in segments:
-                seg_content = seg.get("content", "")
-                seg_topic = seg.get("topic", "")
+            try:
+                current_mtime = os.path.getmtime(daily_file)
+                last_mtime = state.get(file_key, 0)
                 
-                if seg_content and len(seg_content.strip()) >= 30:
-                    result = self._write_memory_internal(
-                        text=seg_content.strip(),
-                        source=f"openclaw_memory_md:{seg_topic}"
-                    )
-                    if result.success:
-                        processed_count += 1
-            
-            state[file_key] = current_mtime
-            self._save_sync_state(state_path, state)
-            
-            return {"processed": True, "segments": processed_count}
-            
-        except Exception as e:
-            logger.error(f"Error processing MEMORY.md: {e}")
-            return {"processed": False, "error": str(e)}
+                if current_mtime <= last_mtime:
+                    continue
+                
+                with open(daily_file, "r", encoding="utf-8") as f:
+                    content = f.read()
+                
+                if not content or not content.strip():
+                    continue
+                
+                segments = self.llm_extractor.split_session(content)
+                file_processed = 0
+                
+                for seg in segments:
+                    seg_content = seg.get("content", "")
+                    seg_topic = seg.get("topic", "")
+                    
+                    if seg_content and len(seg_content.strip()) >= 30:
+                        result = self._write_memory_internal(
+                            text=seg_content.strip(),
+                            source=f"daily_memory:{os.path.basename(daily_file)}:{seg_topic}"
+                        )
+                        if result.success:
+                            file_processed += 1
+                            total_processed += 1
+                
+                state[file_key] = current_mtime
+                
+            except Exception as e:
+                logger.error(f"Error processing daily memory {daily_file}: {e}")
+        
+        self._save_sync_state(state_path, state)
+        
+        return {"processed": total_processed}
     
     def _load_sync_state(self, state_path: str) -> Dict[str, Any]:
         if os.path.exists(state_path):

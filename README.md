@@ -1,37 +1,40 @@
 # OpenClaw Cortex Memory
 
-A long-term memory plugin for OpenClaw, providing semantic search, episodic event tracking, and procedural memory management.
+OpenClaw 长期记忆插件，提供语义搜索、事件追踪、知识图谱和规则管理功能。
 
-## Features
+## 功能特性
 
-- **Semantic Search**: Vector-based memory retrieval with LanceDB
-- **Episodic Memory**: Track events and milestones across sessions
-- **Procedural Memory**: Store and retrieve operational rules (SOUL.md)
-- **Memory Graph**: Relationship tracking between entities
-- **Hot Context**: Real-time context injection for LLM interactions
-- **Memory Lifecycle**: Automatic decay, reflection, and promotion
+| 特性 | 说明 |
+|------|------|
+| 语义记忆 | 基于 LanceDB 的向量检索，支持混合搜索（向量+BM25）和重排序 |
+| 情景记忆 | 事件时间线追踪，记录里程碑和重要节点，支持实体和关系 |
+| 知识图谱 | 实体关系网络，支持关系查询、邻接遍历和关系链提取 |
+| 规则记忆 | CORTEX_RULES.md 存储核心规则，通过反思和晋升机制自动更新 |
+| 热上下文 | 当前会话上下文 + 近期数据实时注入，优先级最高 |
+| 记忆生命周期 | 自动衰减（半衰期30天）、反思、晋升机制，确保记忆质量 |
 
-## Quick Start
+## 安装
 
-### Prerequisites
+### 前置要求
+
 - Python 3.10+
 - Node.js 22+
-- OpenAI API Key
+- OpenAI API Key（或其他兼容 API）
 
-### Install
+### 安装步骤
 
 ```bash
-cd /path/to/your/openclaw/workspace
-git clone https://github.com/deki18/openclaw-cortex-memory.git plugins/openclaw-cortex-memory
-cd plugins/openclaw-cortex-memory/plugin
+cd ~/.openclaw/plugins
+git clone https://github.com/deki18/openclaw-cortex-memory.git
+cd openclaw-cortex-memory/plugin
 npm install
 ```
 
-`npm install` automatically sets up the Python environment.
+`npm install` 会自动创建 Python 虚拟环境并安装依赖。
 
-### Configure
+## 配置
 
-Add to your `openclaw.json`:
+在 `~/.openclaw/openclaw.json` 中添加：
 
 ```json
 {
@@ -69,329 +72,113 @@ Add to your `openclaw.json`:
 }
 ```
 
-### Start
+### 配置项说明
+
+| 配置项 | 必填 | 说明 |
+|--------|------|------|
+| `embedding.provider` | 是 | 嵌入模型提供商：`openai`、`openai-compatible`、`ollama` |
+| `embedding.model` | 是 | 嵌入模型名称 |
+| `embedding.dimensions` | 是 | 向量维度，需与模型匹配 |
+| `llm.provider` | 是 | LLM 提供商，用于记忆提取和反思 |
+| `llm.model` | 是 | LLM 模型名称 |
+| `reranker` | 否 | 重排序模型配置，推荐配置以提升检索精度 |
+| `autoSync` | 否 | 会话结束时自动同步历史记录，默认 `true` |
+| `autoReflect` | 否 | 自动触发记忆反思，默认 `false` |
+
+### 启动
 
 ```bash
 openclaw config validate
 openclaw gateway restart
 ```
 
-The Python backend service starts automatically when the plugin loads.
+Python 后端服务会在插件加载时自动启动。
 
-## Usage
+## 数据迁移
 
-### Search Memory
+首次安装后，可从 OpenClaw 原有记忆文件导入历史数据。
 
-```javascript
-// The agent can search its memory
-const results = await tools.search_memory({
-  query: "What did we discuss about the authentication system?",
-  top_k: 5
-});
-```
+### 导入数据源
 
-### Store Events
+| 来源路径 | 说明 |
+|----------|------|
+| `~/.openclaw/workspace/memory/*.md` | 每日总结文件 |
+| `~/.openclaw/agents/main/sessions/*.jsonl` | 会话记录 |
 
-```javascript
-// Store significant events
-await tools.store_event({
-  summary: "Successfully deployed the new API",
-  entities: [
-    { name: "API Server", type: "service" },
-    { name: "Production", type: "environment" }
-  ],
-  outcome: "Zero downtime deployment completed"
-});
-```
+### 导入方式
 
-### Query Graph
-
-```javascript
-// Query relationships
-const graph = await tools.query_graph({
-  entity: "API Server"
-});
-```
-
-## Architecture
-
-```
-┌─────────────────┐     ┌──────────────────┐     ┌─────────────────┐
-│   OpenClaw      │────▶│  TypeScript      │────▶│  Python         │
-│   Gateway       │     │  Plugin          │     │  Backend        │
-└─────────────────┘     └──────────────────┘     └─────────────────┘
-                               │                         │
-                               ▼                         ▼
-                        ┌──────────────┐          ┌──────────────┐
-                        │  openclaw.json│          │  LanceDB     │
-                        │  Config      │          │  Vector DB   │
-                        └──────────────┘          └──────────────┘
-```
-
-## Hot-plug Support
-
-The plugin supports hot-plug functionality - enable/disable without restarting OpenClaw.
-
-### CLI Commands
+**方式一：CLI 命令**
 
 ```bash
-cortex-memory enable              # Enable plugin
-cortex-memory disable             # Disable plugin (fallback to builtin memory)
-cortex-memory status              # Check current status
-cortex-memory uninstall           # Uninstall plugin completely
-cortex-memory uninstall --keep-data  # Uninstall but keep memory data
-cortex-memory config              # Show configuration summary
-cortex-memory config --validate   # Validate configuration
-cortex-memory config --show       # Show current configuration
-cortex-memory config --check-openclaw  # Check openclaw.json location
-cortex-memory doctor              # Run diagnostics and check system health
+cortex-memory import --path ~/.openclaw
 ```
 
-### Uninstall Options
+**方式二：工具调用**
 
-| Option | Description |
-|--------|-------------|
-| `--keep-data` | Keep memory data files (LanceDB, episodic memory, etc.) |
-| `--keep-config` | Keep plugin entry in openclaw.json |
-
-Uninstall will:
-1. Stop the Python backend service
-2. Remove the Python virtual environment
-3. Remove node_modules and build artifacts
-4. Remove memory data files (unless `--keep-data`)
-5. Remove plugin from openclaw.json (unless `--keep-config`)
-
-### Configuration
-
-Set in `openclaw.json`:
-
-```json
-{
-  "plugins": {
-    "cortex-memory": {
-      "enabled": true,
-      "fallbackToBuiltin": true
-    }
-  }
-}
-```
-
-| Option | Default | Description |
-|--------|---------|-------------|
-| `enabled` | `true` | Enable/disable the plugin |
-| `fallbackToBuiltin` | `true` | Fall back to OpenClaw builtin memory when disabled |
-
-When disabled, `search_memory` and `store_event` automatically fall back to OpenClaw's builtin memory system.
-
-## Available Tools
-
-| Tool | Description |
-|------|-------------|
-| `search_memory` | Semantic search across all memory stores |
-| `store_event` | Store episodic events with entities and relations |
-| `query_graph` | Query entity relationship graph |
-| `get_hot_context` | Retrieve current hot context for LLM |
-| `reflect_memory` | Trigger reflection process |
-| `sync_memory` | Sync OpenClaw session data |
-| `promote_memory` | Promote hot memories to rules |
-| `delete_memory` | Delete a specific memory by ID |
-| `update_memory` | Update memory content, type, or weight |
-| `cleanup_memories` | Clean up old memories beyond specified days |
-| `diagnostics` | Run system diagnostics |
-| `cortex_memory_status` | Get plugin status (enabled/disabled) |
-
-## Memory System Architecture
-
-### Four Memory Stores
+在对话中让 Agent 调用 `sync_memory` 工具：
 
 ```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                        MemoryController                                 │
-├─────────────┬─────────────┬─────────────┬───────────────────────────────┤
-│   Semantic  │   Episodic  │    Graph    │     Procedural                │
-│   Memory    │   Memory    │   Memory    │      Memory                   │
-├─────────────┼─────────────┼─────────────┼───────────────────────────────┤
-│  LanceDB    │   JSONL     │    JSON     │      YAML                     │
-│  向量+文本  │   时间线    │   关系网络  │     规则文件                  │
-└──────┬──────┴──────┬──────┴──────┬──────┴───────────┬───────────────────┘
-       │             │             │                  │
-       └─────────────┴─────────────┴──────────────────┘
-                         │
-                    ┌────┴────┐
-                    │ HotMemory│  (SOUL.md + 近期会话)
-                    └────┬────┘
-                         │
-                    ┌────┴────┐
-                    │ Retrieval│  (搜索+排序)
-                    │ Pipeline │
-                    └─────────┘
+请帮我同步历史会话数据到记忆系统
 ```
 
-### Write Flow
+导入过程为增量处理，已导入的数据不会重复处理。
 
-```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                           用户输入                                       │
-│  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐  ┌─────────────────┐ │
-│  │ 普通文本    │  │ 事件描述    │  │ 会话结束    │  │ 实体关系        │ │
-│  │ write_memory│  │ store_event │  │ sync_memory │  │ (entities)      │ │
-│  └──────┬──────┘  └──────┬──────┘  └──────┬──────┘  └─────────────────┘ │
-│         │                │                │                              │
-└─────────┼────────────────┼────────────────┼──────────────────────────────┘
-          │                │                │
-          ▼                ▼                ▼
-┌─────────────────────────────────────────────────────────────────────────┐
-│                      四大记忆库并行写入                                  │
-│                                                                         │
-│  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────────────┐ │
-│  │  Semantic       │  │   Episodic      │  │        Graph            │ │
-│  │  Memory         │  │   Memory        │  │       Memory            │ │
-│  │  ├─向量嵌入     │  │   ├─事件记录    │  │   ├─节点(实体)          │ │
-│  │  ├─文本内容     │  │   ├─时间戳      │  │   │  ├─name             │ │
-│  │  ├─category=event│  │   └─JSONL追加   │  │   │  ├─type             │ │
-│  │  └─LanceDB      │  │                 │  │   │  └─attributes       │ │
-│  │                 │  │                 │  │   ├─边(关系)            │ │
-│  │  ┌───────────┐  │  │                 │  │   │  ├─source           │ │
-│  │  │去重检测   │  │  │                 │  │   │  ├─target           │ │
-│  │  │相似度>0.95│  │  │                 │  │   │  └─edge_type        │ │
-│  │  └───────────┘  │  │                 │  │   └─JSON文件            │ │
-│  └─────────────────┘  └─────────────────┘  └─────────────────────────┘ │
-│                                                                         │
-│  ┌─────────────────────────────────────────────────────────────────┐   │
-│  │                     Procedural Memory                           │   │
-│  │                     (通过 reflect/promote 触发)                 │   │
-│  │                     ├─SOUL.md (热上下文)                        │   │
-│  │                     └─MEMORY.md (核心规则)                      │   │
-│  └─────────────────────────────────────────────────────────────────┘   │
-│                                                                         │
-└─────────────────────────────────────────────────────────────────────────┘
-```
+## 可用工具
 
-### Read Flow
+| 工具 | 说明 |
+|------|------|
+| `search_memory` | 语义搜索记忆库，支持 top_k 参数 |
+| `store_event` | 存储事件，可包含实体和关系 |
+| `query_graph` | 查询实体关系图谱 |
+| `get_hot_context` | 获取热上下文（CORTEX_RULES.md + 近期会话） |
+| `get_auto_context` | 自动检索相关记忆 + 热上下文 |
+| `reflect_memory` | 触发记忆反思，将事件转化为规则 |
+| `sync_memory` | 同步 OpenClaw 历史会话（增量） |
+| `promote_memory` | 晋升热记忆为规则 |
+| `delete_memory` | 删除指定记忆 |
+| `update_memory` | 更新记忆内容、类型或权重 |
+| `cleanup_memories` | 清理指定天数前的记忆 |
+| `diagnostics` | 系统诊断 |
 
-```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                           查询请求                                       │
-│  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐  ┌─────────────────┐ │
-│  │ 语义搜索    │  │ 图谱查询    │  │ 热上下文    │  │ 时间范围搜索    │ │
-│  │ search_     │  │ query_      │  │ get_hot_    │  │ search_by_date  │ │
-│  │ memory()    │  │ graph()     │  │ context()   │  │ _range()        │ │
-│  └──────┬──────┘  └──────┬──────┘  └──────┬──────┘  └─────────────────┘ │
-│         │                │                │                              │
-└─────────┼────────────────┼────────────────┼──────────────────────────────┘
-          │                │                │
-          ▼                ▼                ▼
-┌─────────────────────────────────────────────────────────────────────────┐
-│                         数据检索层                                       │
-│                                                                         │
-│   ┌─────────────────┐    ┌─────────────────┐    ┌─────────────────────┐ │
-│   │  Retrieval      │    │   Graph         │    │    Hot Memory       │ │
-│   │  Pipeline       │    │   Memory        │    │                     │ │
-│   │                 │    │                 │    │  ┌───────────────┐  │ │
-│   │  ├─向量搜索     │    │  ├─节点查找     │    │  │  SOUL.md      │  │ │
-│   │  ├─BM25文本     │    │  ├─邻接遍历     │    │  │  (规则知识)   │  │ │
-│   │  ├─混合搜索     │    │  ├─关系提取     │    │  └───────────────┘  │ │
-│   │  │              │    │  └─结构化返回   │    │                     │ │
-│   │  ├─时间衰减     │◄───┤                │    │  ┌───────────────┐  │ │
-│   │  │ (半衰期30天) │    │                │    │  │ 近期会话      │  │ │
-│   │  ├─重排序       │    │                │    │  │ (最近20条)    │  │ │
-│   │  └─命中计数     │    │                │    │  └───────────────┘  │ │
-│   │                 │    │                 │    │                     │ │
-│   └────────┬────────┘    └────────┬────────┘    └──────────┬──────────┘ │
-│            │                      │                        │            │
-└────────────┼──────────────────────┼────────────────────────┼────────────┘
-             │                      │                        │
-             ▼                      ▼                        ▼
-┌─────────────────────────────────────────────────────────────────────────┐
-│                      结果融合与返回                                      │
-│                                                                         │
-│   ┌─────────────────────────────────────────────────────────────────┐   │
-│   │                      智能融合层                                  │   │
-│   │                                                                 │   │
-│   │   ┌─────────────┐    ┌─────────────┐    ┌─────────────────────┐ │   │
-│   │   │ 语义结果    │    │ 关系结果    │    │ 上下文增强          │ │   │
-│   │   │ ├─相关记忆  │    │ ├─实体信息  │    │ ├─规则注入          │ │   │
-│   │   │ ├─评分排序  │    │ ├─关系链    │    │ ├─近期背景          │ │   │
-│   │   │ └─来源追溯  │    │ └─关联实体  │    │ └─时间线            │ │   │
-│   │   └──────┬──────┘    └──────┬──────┘    └──────────┬──────────┘ │   │
-│   │          │                  │                      │             │   │
-│   │          └──────────────────┼──────────────────────┘             │   │
-│   │                             ▼                                    │   │
-│   │                    ┌─────────────────┐                          │   │
-│   │                    │   综合答案生成   │                          │   │
-│   │                    │  (供LLM使用)     │                          │   │
-│   │                    └─────────────────┘                          │   │
-│   │                                                                 │   │
-│   └─────────────────────────────────────────────────────────────────┘   │
-│                                                                         │
-└─────────────────────────────────────────────────────────────────────────┘
-```
-
-### Memory Lifecycle
-
-```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                         记忆生命周期                                     │
-│                                                                         │
-│   写入 ──────► 活跃期 ──────► 衰退期 ──────► 沉淀/删除                  │
-│                                                                         │
-│    │            │             │             │                           │
-│    ▼            ▼             ▼             ▼                           │
-│ ┌──────┐   ┌────────┐   ┌──────────┐   ┌──────────┐                    │
-│ │新记忆│   │ 高频访问 │   │ 时间衰减  │   │ 核心规则  │                    │
-│ │      │   │        │   │ (30天半衰)│   │ (promote)│                    │
-│ │event │   │ hit++  │   │ 权重下降  │   │          │                    │
-│ │daily │   │        │   │          │   │ 或删除    │                    │
-│ │_log  │   │        │   │          │   │ (cleanup)│                    │
-│ └──────┘   └────────┘   └──────────┘   └──────────┘                    │
-│                                                                         │
-│   ┌─────────────────────────────────────────────────────────────────┐   │
-│   │                        触发机制                                  │   │
-│   │                                                                 │   │
-│   │  写入: write_memory / store_event / sync                        │   │
-│   │  活跃: 每次search命中 +1                                        │   │
-│   │  衰退: 自动时间衰减 (search时计算)                              │   │
-│   │  沉淀: hit > threshold (默认3次)                                │   │
-│   │  删除: cleanup_memories (默认90天)                              │   │
-│   │                                                                 │   │
-│   └─────────────────────────────────────────────────────────────────┘   │
-│                                                                         │
-└─────────────────────────────────────────────────────────────────────────┘
-```
-
-## Configuration Options
-
-| Option | Required | Default | Description |
-|--------|----------|---------|-------------|
-| `embedding.provider` | Yes | - | Provider type: `openai`, `openai-compatible`, `jina` |
-| `embedding.model` | Yes | - | Embedding model name |
-| `embedding.apiKey` | No | `${OPENAI_API_KEY}` | API key for embeddings |
-| `embedding.baseURL` | No | - | Custom API endpoint |
-| `llm.model` | Yes | - | LLM model for reflection/extraction |
-| `llm.apiKey` | No | `${OPENAI_API_KEY}` | API key for LLM |
-| `llm.baseURL` | No | - | Custom API endpoint |
-| `reranker.provider` | No | - | Reranker provider |
-| `reranker.model` | Yes | - | Reranker model name |
-| `reranker.apiKey` | No | - | API key for reranker |
-| `reranker.endpoint` | No | - | Reranker API endpoint |
-| `dbPath` | No | `~/.openclaw/agents/main/lancedb_store` | Database path |
-| `autoSync` | No | `true` | Auto-sync on session end |
-| `autoReflect` | No | `false` | Auto-trigger reflection |
-
-## Development
+## CLI 命令
 
 ```bash
-# Install dependencies
-cd plugin
-npm install
-
-# Build TypeScript
-npm run build
-
-# Watch mode
-npm run dev
+cortex-memory status              # 查看插件状态
+cortex-memory enable              # 启用插件
+cortex-memory disable             # 禁用插件（回退到内置记忆）
+cortex-memory uninstall           # 卸载插件
+cortex-memory uninstall --keep-data  # 卸载但保留数据
+cortex-memory config --validate   # 验证配置
+cortex-memory import --path PATH  # 导入历史数据
+cortex-memory doctor              # 系统诊断
 ```
 
-## License
+## 数据存储
 
-MIT
+| 路径 | 说明 |
+|------|------|
+| `~/.openclaw/workspace/cortex_memory/` | 记忆数据库（LanceDB） |
+| `~/.openclaw/workspace/cortex_memory/episodic.jsonl` | 情景记忆 |
+| `~/.openclaw/workspace/cortex_memory/graph.json` | 知识图谱 |
+| `~/.openclaw/workspace/CORTEX_RULES.md` | 核心规则文件 |
+
+## 记忆写入触发
+
+| 触发方式 | 说明 |
+|----------|------|
+| 消息钩子 | 用户消息自动触发实时写入（需插件启用） |
+| 会话结束 | 批量处理会话记录和每日总结 |
+| 工具调用 | `store_event`、`sync_memory` 手动触发 |
+
+## 注意事项
+
+1. **API Key 安全**：使用环境变量 `${OPENAI_API_KEY}` 而非硬编码
+2. **向量维度**：必须与嵌入模型匹配，如 `text-embedding-3-large` 为 3072
+3. **重排序**：推荐配置 reranker 以提升检索精度
+4. **热插拔**：支持启用/禁用插件而无需重启 OpenClaw
+5. **数据迁移**：卸载时使用 `--keep-data` 保留记忆数据
+6. **首次使用**：安装后运行 `cortex-memory import` 导入历史数据
+
+## 许可证
+
+MIT License
