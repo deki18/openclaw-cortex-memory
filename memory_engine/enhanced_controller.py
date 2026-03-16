@@ -39,6 +39,29 @@ from .write_pipeline import WritePipeline
 
 logger = logging.getLogger(__name__)
 
+_controller_instance: Optional["EnhancedMemoryController"] = None
+_controller_lock = threading.Lock()
+
+
+def get_controller(config: dict = None) -> "EnhancedMemoryController":
+    global _controller_instance
+    if _controller_instance is None:
+        with _controller_lock:
+            if _controller_instance is None:
+                _controller_instance = EnhancedMemoryController(config)
+    return _controller_instance
+
+
+def reset_controller():
+    global _controller_instance
+    with _controller_lock:
+        if _controller_instance is not None:
+            try:
+                _controller_instance.stop()
+            except Exception:
+                pass
+        _controller_instance = None
+
 
 @dataclass
 class WriteResult:
@@ -232,13 +255,79 @@ class EnhancedMemoryController:
         
         self._session_manager.add_message(role, text, None)
         
-        logger.debug(f"Message queued for session: {text[:100]}...")
+        preprocessed = self.preprocessor.preprocess(text)
+        if not preprocessed:
+            return WriteResult(
+                success=False,
+                error="Text preprocessing failed or text is empty after preprocessing"
+            )
         
-        return WriteResult(
-            success=True,
-            memory_id=None,
-            quality=None
+        try:
+            structured_summary = self.llm_extractor.extract(preprocessed)
+        except Exception as e:
+            logger.warning(f"LLM extraction failed, using fallback: {e}")
+            structured_summary = StructuredSummary(
+                summary_text=preprocessed[:500],
+                category="other",
+                importance_score=0.5,
+                entities=[],
+                key_facts=[]
+            )
+        
+        quality = self.quality_evaluator.evaluate(preprocessed, {
+            "structured_summary": structured_summary.to_dict()
+        })
+        
+        if not quality.should_store:
+            logger.debug(f"Memory not stored due to low quality: {quality.score.overall:.2f}")
+            return WriteResult(
+                success=False,
+                quality=quality,
+                error=f"Quality below threshold: {quality.score.overall:.2f}"
+            )
+        
+        summary_text = structured_summary.summary_text or preprocessed[:500]
+        dedup_result = self.deduplicator.check_duplicate(summary_text, None)
+        if dedup_result.is_duplicate:
+            logger.debug(f"Duplicate memory detected: {dedup_result.similar_memory_id}")
+            return WriteResult(
+                success=False,
+                is_duplicate=True,
+                quality=quality,
+                error=f"Duplicate of existing memory: {dedup_result.similar_memory_id}"
+            )
+        
+        vector = self.embedding_module.embed_text([preprocessed])[0]
+        
+        system_metadata = SystemMetadata.create(
+            source=source,
+            quality_level=quality.score.level.value
         )
+        if metadata:
+            if metadata.get("agent"):
+                system_metadata.agent = metadata["agent"]
+        
+        chunks = None
+        if self.enable_chunking and len(preprocessed) > 500:
+            chunks = self._create_chunks(preprocessed)
+        
+        if async_write:
+            self.write_queue.submit(
+                preprocessed, 
+                structured_summary, 
+                system_metadata, 
+                vector, 
+                chunks, 
+                quality
+            )
+            return WriteResult(
+                success=True,
+                memory_id=None,
+                quality=quality
+            )
+        
+        result = self._write_sync(preprocessed, structured_summary, system_metadata, vector, chunks, quality)
+        return result
 
     def _create_chunks(self, text: str) -> List[Chunk]:
         semantic_chunks = self.chunker.chunk(text)

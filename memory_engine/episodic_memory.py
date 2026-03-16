@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import tempfile
 import threading
 import uuid
 from datetime import datetime, timezone
@@ -79,8 +80,33 @@ class EpisodicMemory:
     def _save_event(self, event_dict: Dict[str, Any]) -> Optional[str]:
         with self._lock:
             try:
-                with open(self.store_path, "a", encoding="utf-8") as f:
-                    f.write(json.dumps(event_dict, ensure_ascii=False) + "\n")
+                line = json.dumps(event_dict, ensure_ascii=False) + "\n"
+                
+                if os.name == 'nt':
+                    with open(self.store_path, "a", encoding="utf-8") as f:
+                        f.write(line)
+                        f.flush()
+                        os.fsync(f.fileno())
+                else:
+                    fd, temp_path = tempfile.mkstemp(
+                        dir=os.path.dirname(self.store_path),
+                        prefix=".tmp_episodic_",
+                        suffix=".jsonl"
+                    )
+                    try:
+                        if os.path.exists(self.store_path):
+                            with open(self.store_path, "r", encoding="utf-8") as src:
+                                os.write(fd, src.read().encode("utf-8"))
+                        os.write(fd, line.encode("utf-8"))
+                        os.fsync(fd)
+                        os.close(fd)
+                        os.replace(temp_path, self.store_path)
+                    except Exception as e:
+                        os.close(fd)
+                        if os.path.exists(temp_path):
+                            os.unlink(temp_path)
+                        raise e
+                
                 return event_dict.get("id")
             except Exception as e:
                 logger.error(f"Failed to store event: {e}")

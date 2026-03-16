@@ -463,23 +463,89 @@ function formatApiError(error: unknown): string {
   return `${err.message} (${err.code}). Details: ${message}`;
 }
 
+interface PendingRequest<T> {
+  promise: Promise<T>;
+  resolve: (value: T) => void;
+  reject: (error: Error) => void;
+}
+
+const pendingRequests: Map<string, PendingRequest<unknown>> = new Map();
+const requestDebounceMs = 100;
+
+function getRequestKey(endpoint: string, method: string, body?: unknown): string {
+  const bodyHash = body ? JSON.stringify(body).slice(0, 100) : "";
+  return `${method}:${endpoint}:${bodyHash}`;
+}
+
 async function apiCallWithRetry<T>(
   endpoint: string,
   method: "GET" | "POST" | "DELETE" | "PATCH" = "GET",
   body?: unknown,
-  maxRetries: number = 3,
-  baseDelay: number = 1000
+  options?: {
+    maxRetries?: number;
+    baseDelay?: number;
+    timeout?: number;
+    skipDebounce?: boolean;
+  }
+): Promise<T> {
+  const { maxRetries = 3, baseDelay = 1000, timeout = 30000, skipDebounce = false } = options || {};
+  
+  if (!skipDebounce) {
+    const requestKey = getRequestKey(endpoint, method, body);
+    const pending = pendingRequests.get(requestKey);
+    if (pending) {
+      logger.debug(`Reusing pending request for ${endpoint}`);
+      return pending.promise as Promise<T>;
+    }
+    
+    let resolveRef: (value: unknown) => void;
+    let rejectRef: (error: Error) => void;
+    const promise = new Promise<T>((resolve, reject) => {
+      resolveRef = resolve as (value: unknown) => void;
+      rejectRef = reject;
+    });
+    
+    pendingRequests.set(requestKey, {
+      promise,
+      resolve: resolveRef!,
+      reject: rejectRef!
+    });
+    
+    try {
+      const result = await apiCallInternal<T>(endpoint, method, body, maxRetries, baseDelay, timeout);
+      resolveRef!(result);
+      return result;
+    } catch (error) {
+      rejectRef!(error as Error);
+      throw error;
+    } finally {
+      setTimeout(() => pendingRequests.delete(requestKey), requestDebounceMs);
+    }
+  }
+  
+  return apiCallInternal<T>(endpoint, method, body, maxRetries, baseDelay, timeout);
+}
+
+async function apiCallInternal<T>(
+  endpoint: string,
+  method: "GET" | "POST" | "DELETE" | "PATCH",
+  body: unknown,
+  maxRetries: number,
+  baseDelay: number,
+  timeout: number
 ): Promise<T> {
   let lastError: Error | null = null;
   
   for (let attempt = 0; attempt < maxRetries; attempt++) {
     try {
-      return await apiCall<T>(endpoint, method, body);
+      return await apiCall<T>(endpoint, method, body, timeout);
     } catch (error) {
       lastError = error instanceof Error ? error : new Error(String(error));
       const isRetryable = lastError.message.includes("E001") || 
                           lastError.message.includes("E002") ||
-                          lastError.message.includes("timeout");
+                          lastError.message.includes("timeout") ||
+                          lastError.message.includes("ECONNREFUSED") ||
+                          lastError.message.includes("ENOTFOUND");
       
       if (attempt < maxRetries - 1 && isRetryable) {
         const delay = baseDelay * Math.pow(2, attempt);
@@ -492,10 +558,15 @@ async function apiCallWithRetry<T>(
   throw lastError;
 }
 
-async function apiCall<T>(endpoint: string, method: "GET" | "POST" | "DELETE" | "PATCH" = "GET", body?: unknown): Promise<T> {
+async function apiCall<T>(
+  endpoint: string,
+  method: "GET" | "POST" | "DELETE" | "PATCH" = "GET",
+  body?: unknown,
+  timeout: number = 30000
+): Promise<T> {
   const url = `${getBaseUrl()}${endpoint}`;
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 8000);
+  const timeoutId = setTimeout(() => controller.abort(), timeout);
   const options: RequestInit = {
     method,
     headers: { "Content-Type": "application/json" },
@@ -520,7 +591,7 @@ async function apiCall<T>(endpoint: string, method: "GET" | "POST" | "DELETE" | 
   } catch (error) {
     throw new Error(formatApiError(error));
   } finally {
-    clearTimeout(timeout);
+    clearTimeout(timeoutId);
   }
 }
 
@@ -864,7 +935,7 @@ async function onSessionEndHandler(payload: unknown, context: ToolContext): Prom
   
   try {
     const endResult = await apiCall<{ events_generated: number }>(
-      "/session/end", 
+      "/session-end", 
       "POST"
     );
     logger.info(`Session ${context.sessionId} ended, generated ${endResult.events_generated} events`);

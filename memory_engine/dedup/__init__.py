@@ -119,56 +119,64 @@ class ThreeStageDeduplicator:
     阶段3: Vector余弦相似度
     """
     
+    MAX_MEMORY_ITEMS = 10000
+    
     def __init__(self, config: dict = None):
         config = config or {}
         
-        # 阶段1: SimHash
         self.simhash = SimHash(hash_bits=config.get("simhash_bits", 64))
-        self.simhash_threshold = config.get("simhash_threshold", 0.85)  # 海明距离≤9
+        self.simhash_threshold = config.get("simhash_threshold", 0.85)
         self.simhash_max_distance = config.get("simhash_max_distance", 9)
         
-        # 阶段2: MinHash
         self.minhash = MinHash(num_perm=config.get("minhash_permutations", 128))
         self.minhash_threshold = config.get("minhash_threshold", 0.7)
         
-        # 阶段3: Vector
         self.vector_threshold = config.get("vector_threshold", 0.95)
         
-        # 候选集限制
         self.max_candidates = config.get("max_candidates", 50)
         
-        # 数据存储
+        self.max_items = config.get("max_items", self.MAX_MEMORY_ITEMS)
+        
         self._text_store: Dict[str, str] = {}
         self._simhash_store: Dict[str, int] = {}
         self._minhash_store: Dict[str, List[int]] = {}
         self._vector_store: Dict[str, List[float]] = {}
+        self._item_order: List[str] = []
         
-        # 持久化配置
         self.persist_path = config.get("persist_path")
         self._lock = threading.RLock()
         
-        # 加载已有数据
         if self.persist_path:
             self._load()
 
     def add(self, item_id: str, text: str, vector: List[float] = None):
         """添加新的记忆到去重索引"""
         with self._lock:
-            self._text_store[item_id] = text
+            if item_id in self._text_store:
+                self._item_order.remove(item_id)
+                self._item_order.append(item_id)
+                return
             
-            # 计算并存储SimHash
+            while len(self._text_store) >= self.max_items:
+                oldest_id = self._item_order.pop(0)
+                self._text_store.pop(oldest_id, None)
+                self._simhash_store.pop(oldest_id, None)
+                self._minhash_store.pop(oldest_id, None)
+                self._vector_store.pop(oldest_id, None)
+                logger.debug(f"Removed oldest item {oldest_id} from dedup index")
+            
+            self._text_store[item_id] = text
+            self._item_order.append(item_id)
+            
             simhash_val = self.simhash.compute(text)
             self._simhash_store[item_id] = simhash_val
             
-            # 计算并存储MinHash
             minhash_sig = self.minhash.compute(text)
             self._minhash_store[item_id] = minhash_sig
             
-            # 存储Vector（如果有）
             if vector:
                 self._vector_store[item_id] = vector
             
-            # 持久化
             if self.persist_path:
                 self._save()
 

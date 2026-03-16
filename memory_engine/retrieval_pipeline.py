@@ -7,6 +7,7 @@ from .config import get_config
 from .lancedb_store import OpenClawMemory
 from .reranker import Reranker
 from .semantic_memory import SemanticMemory
+from .llm_client import LLMClient
 
 logger = logging.getLogger(__name__)
 
@@ -16,6 +17,7 @@ class RetrievalPipeline:
         config = get_config()
         self.semantic_memory = SemanticMemory()
         self.reranker = Reranker()
+        self.llm_client = LLMClient()
         self.time_decay_halflife = config.get("time_decay_halflife", 30)
 
     def search(
@@ -26,7 +28,8 @@ class RetrievalPipeline:
         query_type: str = "hybrid",
         category: Optional[str] = None,
         apply_time_decay: bool = True,
-        apply_rerank: bool = True
+        apply_rerank: bool = True,
+        merge_with_llm: bool = False
     ) -> List[Dict[str, Any]]:
         results = self.semantic_memory.search(
             query=query,
@@ -46,12 +49,91 @@ class RetrievalPipeline:
         
         results.sort(key=lambda x: x.get("final_score", 0), reverse=True)
         
-        for r in results[:final_k]:
+        top_results = results[:final_k]
+        
+        for r in top_results:
             memory_id = r.get("id")
             if memory_id:
                 self.semantic_memory.update_hit_count(memory_id)
         
-        return results[:final_k]
+        if merge_with_llm and self.llm_client.is_available() and len(top_results) > 1:
+            merged_result = self._merge_with_llm(query, top_results)
+            if merged_result:
+                top_results = merged_result
+        
+        return top_results
+
+    def _merge_with_llm(self, query: str, results: List[Dict[str, Any]]) -> Optional[List[Dict[str, Any]]]:
+        if not results or len(results) < 2:
+            return results
+        
+        try:
+            context_parts = []
+            for i, r in enumerate(results):
+                text = r.get("text", "")
+                category = r.get("category", "unknown")
+                date = r.get("date", "")
+                context_parts.append(f"[{i+1}] Category: {category}, Date: {date}\n{text}")
+            
+            context = "\n\n".join(context_parts)
+            
+            prompt = f"""Based on the following search results for query "{query}", please:
+1. Identify and merge duplicate or highly similar information
+2. Preserve all unique information from each result
+3. Establish causal relationships if any exist
+4. Output a consolidated summary
+
+IMPORTANT: Only use information from the provided results. Do not add any information not present in the results.
+
+Search Results:
+{context}
+
+Please output in the following JSON format:
+{{
+  "merged_summary": "consolidated summary text",
+  "sources_used": [1, 2, 3],
+  "duplicates_found": [[1, 2], [3, 4]],
+  "causal_relations": ["A leads to B"]
+}}"""
+
+            response = self.llm_client.client.chat.completions.create(
+                model=self.llm_client.model,
+                messages=[
+                    {"role": "system", "content": "You are a memory consolidation assistant. Merge and summarize information accurately without adding new information."},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.1
+            )
+            
+            content = response.choices[0].message.content.strip()
+            
+            try:
+                if content.startswith("```"):
+                    content = content.split("```")[1]
+                    if content.startswith("json"):
+                        content = content[4:]
+                merged_data = eval(content) if "{" in content else {}
+            except Exception:
+                merged_data = {"merged_summary": content}
+            
+            if merged_data.get("merged_summary"):
+                merged_item = {
+                    "id": "merged",
+                    "text": merged_data["merged_summary"],
+                    "category": "merged",
+                    "final_score": max(r.get("final_score", 0) for r in results),
+                    "source_ids": [r.get("id") for r in results],
+                    "sources_used": merged_data.get("sources_used", []),
+                    "duplicates_found": merged_data.get("duplicates_found", []),
+                    "causal_relations": merged_data.get("causal_relations", []),
+                    "is_merged": True
+                }
+                return [merged_item] + results
+            
+        except Exception as e:
+            logger.warning(f"LLM merge failed: {e}")
+        
+        return results
 
     def _apply_time_decay(self, results: List[OpenClawMemory]) -> List[Dict[str, Any]]:
         now = datetime.now(timezone.utc)
@@ -84,13 +166,51 @@ class RetrievalPipeline:
     def _parse_date(self, date_str: str) -> Optional[datetime]:
         if not date_str:
             return None
+        
+        date_str = str(date_str).strip()
+        
+        date_formats = [
+            "%Y-%m-%d",
+            "%Y/%m/%d",
+            "%Y.%m.%d",
+            "%d-%m-%Y",
+            "%d/%m/%Y",
+            "%Y-%m-%dT%H:%M:%S",
+            "%Y-%m-%dT%H:%M:%SZ",
+            "%Y-%m-%dT%H:%M:%S.%f",
+            "%Y-%m-%dT%H:%M:%S.%fZ",
+            "%Y-%m-%d %H:%M:%S",
+            "%Y/%m/%d %H:%M:%S",
+        ]
+        
+        for fmt in date_formats:
+            try:
+                parsed = datetime.strptime(date_str, fmt)
+                if parsed.tzinfo is None:
+                    parsed = parsed.replace(tzinfo=timezone.utc)
+                return parsed
+            except ValueError:
+                continue
+        
         try:
-            if len(date_str) == 10:
-                return datetime.strptime(date_str, "%Y-%m-%d")
-            cleaned = date_str.replace("Z", "")
+            cleaned = date_str.replace("Z", "+00:00")
+            if "+" in cleaned and cleaned.count("+") == 1:
+                cleaned = cleaned.replace("+", "T", 1) if "T" not in cleaned else cleaned
             return datetime.fromisoformat(cleaned)
-        except Exception:
-            return None
+        except ValueError:
+            pass
+        
+        import re
+        match = re.match(r"(\d{4})[-/](\d{1,2})[-/](\d{1,2})", date_str)
+        if match:
+            try:
+                year, month, day = int(match.group(1)), int(match.group(2)), int(match.group(3))
+                return datetime(year, month, day, tzinfo=timezone.utc)
+            except ValueError:
+                pass
+        
+        logger.debug(f"Failed to parse date: {date_str}")
+        return None
 
     def _apply_rerank(self, query: str, results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         if not results:

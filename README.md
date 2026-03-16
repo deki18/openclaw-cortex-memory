@@ -140,6 +140,11 @@ cortex-memory disable             # Disable plugin (fallback to builtin memory)
 cortex-memory status              # Check current status
 cortex-memory uninstall           # Uninstall plugin completely
 cortex-memory uninstall --keep-data  # Uninstall but keep memory data
+cortex-memory config              # Show configuration summary
+cortex-memory config --validate   # Validate configuration
+cortex-memory config --show       # Show current configuration
+cortex-memory config --check-openclaw  # Check openclaw.json location
+cortex-memory doctor              # Run diagnostics and check system health
 ```
 
 ### Uninstall Options
@@ -243,7 +248,7 @@ When disabled, `search_memory` and `store_event` automatically fall back to Open
 │  │  Memory         │  │   Memory        │  │       Memory            │ │
 │  │  ├─向量嵌入     │  │   ├─事件记录    │  │   ├─节点(实体)          │ │
 │  │  ├─文本内容     │  │   ├─时间戳      │  │   │  ├─name             │ │
-│  │  ├─type=event   │  │   └─JSONL追加   │  │   │  ├─type             │ │
+│  │  ├─category=event│  │   └─JSONL追加   │  │   │  ├─type             │ │
 │  │  └─LanceDB      │  │                 │  │   │  └─attributes       │ │
 │  │                 │  │                 │  │   ├─边(关系)            │ │
 │  │  ┌───────────┐  │  │                 │  │   │  ├─source           │ │

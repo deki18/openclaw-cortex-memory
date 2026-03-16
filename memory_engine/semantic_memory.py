@@ -24,10 +24,10 @@ class SemanticMemory:
             id=doc_id,
             vector=embedding,
             text=text,
-            type=metadata.type or "daily_log",
+            category=metadata.category or "other",
             date=metadata.date or datetime.now(timezone.utc).strftime("%Y-%m-%d"),
             agent=metadata.agent or "openclaw",
-            source_file=metadata.source_file,
+            source=metadata.source or "",
             hit_count=metadata.hit_count or 0,
             weight=metadata.weight or 1
         )

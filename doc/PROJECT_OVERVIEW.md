@@ -724,7 +724,7 @@ class EpisodicEvent:
 │  │  触发条件: onSessionEnd 钩子触发                                     │   │
 │  │  触发位置: plugin/src/index.ts - onSessionEndHandler()               │   │
 │  │  处理逻辑:                                                           │   │
-│  │    1. 调用 POST /session/end 接口                                    │   │
+│  │    1. 调用 POST /session-end 接口                                   │   │
 │  │    2. SessionManager 处理未完成消息                                  │   │
 │  │    3. EventGenerator 生成情景事件                                    │   │
 │  └─────────────────────────────────────────────────────────────────────┘   │

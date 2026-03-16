@@ -286,7 +286,7 @@ class LanceDBStore:
         try:
             return (
                 table.search()
-                .where("type = 'core_rule'")
+                .where("category = 'core_rule'")
                 .limit(limit)
                 .to_pydantic(MemoryModel)
             )

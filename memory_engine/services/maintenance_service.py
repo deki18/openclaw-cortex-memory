@@ -57,8 +57,8 @@ class MemoryMaintenanceService:
             memories = self.semantic.list_all(limit=1000)
             promoted_count = 0
             for memory in memories:
-                if memory.type != "core_rule" and self.promotion.check_and_promote(memory.hit_count, memory.text):
-                    memory.type = "core_rule"
+                if memory.category != "core_rule" and self.promotion.check_and_promote(memory.hit_count, memory.text):
+                    memory.category = "core_rule"
                     memory.weight = 10
                     self.semantic.store.add_memories([memory])
                     promoted_count += 1
@@ -87,8 +87,8 @@ class MemoryMaintenanceService:
         try:
             return {
                 "total_memories": self.semantic.count(),
-                "core_rules": self.semantic.count_by_type("core_rule"),
-                "daily_logs": self.semantic.count_by_type("daily_log"),
+                "core_rules": self.semantic.count_by_category("core_rule"),
+                "daily_logs": self.semantic.count_by_category("daily_log"),
                 "events": self.episodic.count_events()
             }
         except Exception as e:

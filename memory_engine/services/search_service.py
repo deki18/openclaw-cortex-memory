@@ -61,8 +61,8 @@ class MemorySearchService:
         try:
             return {
                 "total": self.semantic.count(),
-                "core_rules": self.semantic.count_by_type("core_rule"),
-                "daily_logs": self.semantic.count_by_type("daily_log")
+                "core_rules": self.semantic.count_by_category("core_rule"),
+                "daily_logs": self.semantic.count_by_category("daily_log")
             }
         except Exception as e:
             logger.error(f"Failed to count memories: {e}")

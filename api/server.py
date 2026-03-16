@@ -7,7 +7,7 @@ from typing import Any, Dict, List, Optional
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
-from memory_engine.enhanced_controller import EnhancedMemoryController
+from memory_engine.enhanced_controller import EnhancedMemoryController, get_controller, reset_controller
 from memory_engine.config import load_config, get_config, setup_logging, validate_config
 
 setup_logging()
@@ -136,7 +136,33 @@ ERROR_CODES = {
     "DATABASE_ERROR": "E002",
     "INVALID_INPUT": "E003",
     "NOT_FOUND": "E404",
-    "INTERNAL_ERROR": "E500"
+    "INTERNAL_ERROR": "E500",
+    "EMBEDDING_UNAVAILABLE": "E101",
+    "LLM_UNAVAILABLE": "E102",
+    "EMPTY_QUERY": "E201",
+    "EMPTY_TEXT": "E202",
+    "DUPLICATE_MEMORY": "E203",
+    "LOW_QUALITY": "E204",
+    "RATE_LIMITED": "E429",
+    "TIMEOUT": "E408"
+}
+
+
+ERROR_MESSAGES = {
+    "SERVICE_NOT_INITIALIZED": "Memory service is not ready. Please wait a moment and try again.",
+    "CONFIG_ERROR": "Configuration error. Please check your openclaw.json settings.",
+    "DATABASE_ERROR": "Database operation failed. The memory store may be corrupted or inaccessible.",
+    "INVALID_INPUT": "Invalid input provided. Please check your request parameters.",
+    "NOT_FOUND": "The requested resource was not found.",
+    "INTERNAL_ERROR": "An internal error occurred. Please try again later.",
+    "EMBEDDING_UNAVAILABLE": "Embedding service is unavailable. Check your API key and model configuration.",
+    "LLM_UNAVAILABLE": "LLM service is unavailable. Check your API key and model configuration.",
+    "EMPTY_QUERY": "Search query cannot be empty.",
+    "EMPTY_TEXT": "Memory text cannot be empty.",
+    "DUPLICATE_MEMORY": "This memory appears to be a duplicate of an existing one.",
+    "LOW_QUALITY": "Memory was not stored due to low quality score.",
+    "RATE_LIMITED": "Too many requests. Please wait before trying again.",
+    "TIMEOUT": "Request timed out. Please try again."
 }
 
 
@@ -203,11 +229,11 @@ async def lifespan(app: FastAPI):
     if errors:
         for err in errors:
             logger.warning(f"Configuration warning: {err}")
-    controller = EnhancedMemoryController(config)
+    controller = get_controller(config)
     controller.start()
     logger.info("Cortex Memory API started")
     yield
-    controller.stop()
+    reset_controller()
     logger.info("Cortex Memory API stopped")
 
 
@@ -347,10 +373,33 @@ async def run_diagnostics():
 @app.post("/search")
 async def search_memory(request: SearchRequest):
     if not controller:
-        raise HTTPException(status_code=503, detail="Service not initialized")
+        raise HTTPException(
+            status_code=503, 
+            detail=create_error_response(
+                ERROR_MESSAGES["SERVICE_NOT_INITIALIZED"],
+                ERROR_CODES["SERVICE_NOT_INITIALIZED"]
+            )
+        )
+    
+    if not request.query or not request.query.strip():
+        raise HTTPException(
+            status_code=400,
+            detail=create_error_response(
+                ERROR_MESSAGES["EMPTY_QUERY"],
+                ERROR_CODES["EMPTY_QUERY"],
+                {"query": request.query}
+            )
+        )
+    
     try:
         if not controller.should_search(request.query):
-            return {"query": request.query, "results": [], "total": 0, "skipped": True, "reason": "Simple greeting or response"}
+            return {
+                "query": request.query, 
+                "results": [], 
+                "total": 0, 
+                "skipped": True, 
+                "reason": "Query is a simple greeting or response that doesn't require memory search"
+            }
         
         result = controller.search(
             query=request.query,
@@ -359,13 +408,37 @@ async def search_memory(request: SearchRequest):
         return {"query": request.query, "results": result.items, "total": result.total, "skipped": False}
     except Exception as e:
         logger.error(f"Search error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(
+            status_code=500,
+            detail=create_error_response(
+                ERROR_MESSAGES["INTERNAL_ERROR"],
+                ERROR_CODES["INTERNAL_ERROR"],
+                {"original_error": str(e)}
+            )
+        )
 
 
 @app.post("/write")
 async def write_memory(request: WriteMemoryRequest):
     if not controller:
-        raise HTTPException(status_code=503, detail="Service not initialized")
+        raise HTTPException(
+            status_code=503,
+            detail=create_error_response(
+                ERROR_MESSAGES["SERVICE_NOT_INITIALIZED"],
+                ERROR_CODES["SERVICE_NOT_INITIALIZED"]
+            )
+        )
+    
+    if not request.text or not request.text.strip():
+        raise HTTPException(
+            status_code=400,
+            detail=create_error_response(
+                ERROR_MESSAGES["EMPTY_TEXT"],
+                ERROR_CODES["EMPTY_TEXT"],
+                {"text": request.text}
+            )
+        )
+    
     try:
         result = controller.write_memory(
             request.text, 
@@ -374,14 +447,39 @@ async def write_memory(request: WriteMemoryRequest):
         )
         if result.success:
             return {"status": "ok", "memory_id": result.memory_id}
+        elif result.is_duplicate:
+            return {
+                "status": "skipped",
+                "reason": ERROR_MESSAGES["DUPLICATE_MEMORY"],
+                "error_code": ERROR_CODES["DUPLICATE_MEMORY"],
+                "is_duplicate": True
+            }
+        elif result.quality and not result.quality.should_store:
+            return {
+                "status": "skipped",
+                "reason": ERROR_MESSAGES["LOW_QUALITY"],
+                "error_code": ERROR_CODES["LOW_QUALITY"],
+                "quality_score": result.quality.score.overall if result.quality.score else None
+            }
         else:
-            return {"status": "skipped", "reason": result.error, "is_duplicate": result.is_duplicate}
+            return {
+                "status": "skipped",
+                "reason": result.error or "Unknown reason",
+                "error_code": ERROR_CODES["INTERNAL_ERROR"]
+            }
     except Exception as e:
         logger.error(f"Write error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(
+            status_code=500,
+            detail=create_error_response(
+                ERROR_MESSAGES["INTERNAL_ERROR"],
+                ERROR_CODES["INTERNAL_ERROR"],
+                {"original_error": str(e)}
+            )
+        )
 
 
-@app.post("/session/end")
+@app.post("/session-end")
 async def end_session():
     if not controller:
         raise HTTPException(status_code=503, detail="Service not initialized")

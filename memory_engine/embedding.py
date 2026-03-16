@@ -1,6 +1,9 @@
 import logging
 import os
-from typing import List, Optional
+import threading
+import time
+from typing import List, Optional, Dict, Tuple
+from collections import OrderedDict
 
 from .config import get_config
 
@@ -12,6 +15,12 @@ except Exception:
     OpenAI = None  # type: ignore
 
 _client: Optional["OpenAI"] = None
+_client_lock = threading.Lock()
+
+_pending_requests: Dict[str, Tuple[threading.Event, Optional[List[float]]]] = {}
+_pending_lock = threading.Lock()
+_request_cooldown: Dict[str, float] = {}
+_cooldown_ms = 100
 
 
 def _get_client() -> Optional["OpenAI"]:
@@ -19,56 +28,67 @@ def _get_client() -> Optional["OpenAI"]:
     if _client is not None:
         return _client
     
-    if OpenAI is None:
-        logger.warning("OpenAI library not installed")
-        return None
-    
-    config = get_config()
-    api_key = config.get("embedding_api_key") or os.environ.get("OPENAI_API_KEY")
-    if not api_key:
-        logger.warning("API key not set, embedding will return zero vectors")
-        return None
-    
-    base_url = config.get("embedding_base_url") or os.environ.get("OPENAI_BASE_URL")
-    _client = OpenAI(api_key=api_key, base_url=base_url) if base_url else OpenAI(api_key=api_key)
-    return _client
+    with _client_lock:
+        if _client is not None:
+            return _client
+        
+        if OpenAI is None:
+            logger.warning("OpenAI library not installed")
+            return None
+        
+        config = get_config()
+        api_key = config.get("embedding_api_key") or os.environ.get("OPENAI_API_KEY")
+        if not api_key:
+            logger.warning("API key not set, embedding will return zero vectors")
+            return None
+        
+        base_url = config.get("embedding_base_url") or os.environ.get("OPENAI_BASE_URL")
+        _client = OpenAI(api_key=api_key, base_url=base_url) if base_url else OpenAI(api_key=api_key)
+        return _client
+
+
+def _wait_for_cooldown(model: str):
+    with _pending_lock:
+        last_time = _request_cooldown.get(model, 0)
+        now = time.time() * 1000
+        elapsed = now - last_time
+        if elapsed < _cooldown_ms:
+            time.sleep((_cooldown_ms - elapsed) / 1000)
+        _request_cooldown[model] = time.time() * 1000
 
 
 class EmbeddingCache:
     def __init__(self, max_size: int = 500):
-        self._cache: dict = {}
+        self._cache: OrderedDict[str, tuple] = OrderedDict()
         self._max_size = max_size
-        self._access_order: List[str] = []
+        self._lock = threading.Lock()
     
     def get(self, key: str) -> Optional[tuple]:
-        if key in self._cache:
-            if key in self._access_order:
-                self._access_order.remove(key)
-            self._access_order.append(key)
-            return self._cache[key]
+        with self._lock:
+            if key in self._cache:
+                self._cache.move_to_end(key)
+                return self._cache[key]
         return None
     
     def set(self, key: str, value: tuple):
-        if key in self._cache:
-            if key in self._access_order:
-                self._access_order.remove(key)
-            self._access_order.append(key)
+        with self._lock:
+            if key in self._cache:
+                self._cache.move_to_end(key)
+                self._cache[key] = value
+                return
+            
+            if len(self._cache) >= self._max_size:
+                self._cache.popitem(last=False)
+            
             self._cache[key] = value
-            return
-        
-        if len(self._cache) >= self._max_size:
-            oldest_key = self._access_order.pop(0)
-            del self._cache[oldest_key]
-        
-        self._cache[key] = value
-        self._access_order.append(key)
     
     def clear(self):
-        self._cache.clear()
-        self._access_order.clear()
+        with self._lock:
+            self._cache.clear()
     
     def size(self) -> int:
-        return len(self._cache)
+        with self._lock:
+            return len(self._cache)
 
 
 _embedding_cache: Optional[EmbeddingCache] = None
@@ -88,6 +108,7 @@ class EmbeddingModule:
         self.model = config.get("embedding_model")
         self.dimensions = config.get("embedding_dimensions") or 3072
         self._cache = get_embedding_cache()
+        self._batch_size = 100
         if not self.provider or not self.model:
             logger.warning("embedding provider and model not configured")
         
@@ -100,9 +121,26 @@ class EmbeddingModule:
         if cached is not None:
             return cached
         
+        request_key = f"{self.model}:{hash(text)}"
+        with _pending_lock:
+            if request_key in _pending_requests:
+                event, _ = _pending_requests[request_key]
+                event.wait(timeout=30)
+                with _pending_lock:
+                    _, result = _pending_requests.get(request_key, (None, None))
+                    if result is not None:
+                        return tuple(result)
+        
         client = _get_client()
         if not client or not self.model:
             return tuple([0.0] * self.dimensions)
+        
+        _wait_for_cooldown(self.model)
+        
+        event = threading.Event()
+        with _pending_lock:
+            _pending_requests[request_key] = (event, None)
+        
         try:
             response = client.embeddings.create(
                 input=text,
@@ -110,17 +148,70 @@ class EmbeddingModule:
             )
             result = tuple(response.data[0].embedding)
             self._cache.set(cache_key, result)
+            
+            with _pending_lock:
+                _pending_requests[request_key] = (event, list(result))
+            event.set()
+            
             return result
         except Exception as e:
             logger.error(f"Embedding error: {e}")
+            with _pending_lock:
+                _pending_requests.pop(request_key, None)
+            event.set()
             return tuple([0.0] * self.dimensions)
+        finally:
+            with _pending_lock:
+                _pending_requests.pop(request_key, None)
 
     def embed_text(self, texts: List[str]) -> List[List[float]]:
-        embeddings = []
-        for text in texts:
-            emb = self._embed_single(text)
-            embeddings.append(list(emb))
-        return embeddings
+        if not texts:
+            return []
+        
+        results = [None] * len(texts)
+        uncached_indices = []
+        uncached_texts = []
+        
+        for i, text in enumerate(texts):
+            cache_key = self._get_cache_key(text)
+            cached = self._cache.get(cache_key)
+            if cached is not None:
+                results[i] = list(cached)
+            else:
+                uncached_indices.append(i)
+                uncached_texts.append(text)
+        
+        if uncached_texts:
+            client = _get_client()
+            if client and self.model:
+                _wait_for_cooldown(self.model)
+                
+                for batch_start in range(0, len(uncached_texts), self._batch_size):
+                    batch_texts = uncached_texts[batch_start:batch_start + self._batch_size]
+                    batch_indices = uncached_indices[batch_start:batch_start + self._batch_size]
+                    
+                    try:
+                        response = client.embeddings.create(
+                            input=batch_texts,
+                            model=self.model
+                        )
+                        
+                        for j, data in enumerate(response.data):
+                            idx = batch_indices[j]
+                            emb = list(data.embedding)
+                            results[idx] = emb
+                            cache_key = self._get_cache_key(batch_texts[j])
+                            self._cache.set(cache_key, tuple(emb))
+                            
+                    except Exception as e:
+                        logger.error(f"Batch embedding error: {e}")
+                        for idx in batch_indices:
+                            results[idx] = [0.0] * self.dimensions
+            else:
+                for idx in uncached_indices:
+                    results[idx] = [0.0] * self.dimensions
+        
+        return results
     
     def is_available(self) -> bool:
         return _get_client() is not None and self.model is not None

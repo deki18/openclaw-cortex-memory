@@ -8,15 +8,15 @@ from memory_engine.lancedb_store import get_memory_model, DEFAULT_VECTOR_DIM
 
 class TestMemorySystem(unittest.TestCase):
     def test_metadata(self):
-        meta = MemoryMetadata(type="event", date="2023-01-01T00:00:00Z", agent="test")
-        self.assertEqual(meta.type, "event")
+        meta = MemoryMetadata(category="event", date="2023-01-01T00:00:00Z", agent="test")
+        self.assertEqual(meta.category, "event")
         self.assertEqual(meta.agent, "test")
         self.assertEqual(meta.hit_count, 0)
         
         meta_dict = meta.to_dict()
-        self.assertIn("type", meta_dict)
+        self.assertIn("category", meta_dict)
         self.assertIn("date", meta_dict)
-        self.assertEqual(meta_dict["type"], "event")
+        self.assertEqual(meta_dict["category"], "event")
 
     def test_config_defaults(self):
         self.assertIn("embedding_model", CONFIG)
@@ -61,13 +61,13 @@ class TestMemorySystem(unittest.TestCase):
             id="test-id",
             vector=[0.0] * DEFAULT_VECTOR_DIM,
             text="test memory",
-            type="daily_log",
+            category="daily_log",
             date="2023-01-01",
             agent="openclaw"
         )
         self.assertEqual(memory.id, "test-id")
         self.assertEqual(memory.text, "test memory")
-        self.assertEqual(memory.type, "daily_log")
+        self.assertEqual(memory.category, "daily_log")
         self.assertEqual(memory.hit_count, 0)
         self.assertEqual(memory.weight, 1)
 
@@ -77,14 +77,14 @@ class TestMemorySystem(unittest.TestCase):
             id="test-id",
             vector=[0.0] * DEFAULT_VECTOR_DIM,
             text="test memory",
-            type="core_rule",
+            category="core_rule",
             date="2023-01-01",
             agent="openclaw",
-            source_file="test.jsonl",
+            source="test.jsonl",
             hit_count=5,
             weight=10
         )
-        self.assertEqual(memory.source_file, "test.jsonl")
+        self.assertEqual(memory.source, "test.jsonl")
         self.assertEqual(memory.hit_count, 5)
         self.assertEqual(memory.weight, 10)
 
@@ -94,7 +94,7 @@ class TestMemorySystem(unittest.TestCase):
             id="test-id",
             vector=[0.0] * DEFAULT_VECTOR_DIM,
             text="test memory",
-            type="daily_log",
+            category="daily_log",
             date="2023-01-01",
             agent="openclaw"
         )

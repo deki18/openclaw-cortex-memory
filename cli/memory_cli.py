@@ -1,51 +1,58 @@
 import argparse
 import sys
-from memory_engine.enhanced_controller import EnhancedMemoryController
+import os
+from memory_engine.enhanced_controller import get_controller
+from memory_engine.config import get_config, validate_config, load_openclaw_config, find_openclaw_config
 
 def main():
     parser = argparse.ArgumentParser(description="OpenClaw Cortex Memory CLI")
     subparsers = parser.add_subparsers(dest="command")
 
-    # Status
     status_parser = subparsers.add_parser("status", help="Show memory status")
 
-    # Search
     search_parser = subparsers.add_parser("search", help="Search memory")
     search_parser.add_argument("query", type=str, help="Search query")
     search_parser.add_argument("--top-k", type=int, default=5, help="Number of results")
 
-    # Sync
     sync_parser = subparsers.add_parser("sync", help="Sync memory")
 
-    # Rebuild
     rebuild_parser = subparsers.add_parser("rebuild", help="Rebuild FTS index")
 
-    # Promote
     promote_parser = subparsers.add_parser("promote", help="Promote memory")
 
-    # Events
     events_parser = subparsers.add_parser("events", help="List episodic events")
     events_parser.add_argument("--limit", type=int, default=50, help="Max events to show")
 
-    # Graph
     graph_parser = subparsers.add_parser("graph", help="Query memory graph")
     graph_parser.add_argument("entity", type=str, help="Entity to query")
 
-    # Reflect
     reflect_parser = subparsers.add_parser("reflect", help="Trigger reflection engine")
 
-    # Import
     import_parser = subparsers.add_parser("import", help="Import legacy OpenClaw memory data")
     import_parser.add_argument("--path", type=str, default="~/.openclaw", help="Path to legacy data directory")
 
-    # Install
     install_parser = subparsers.add_parser("install", help="Install Cortex Memory core rules into OpenClaw")
 
-    # Count
     count_parser = subparsers.add_parser("count", help="Count total memories")
 
+    config_parser = subparsers.add_parser("config", help="Validate and display configuration")
+    config_parser.add_argument("--validate", action="store_true", help="Validate configuration")
+    config_parser.add_argument("--show", action="store_true", help="Show current configuration")
+    config_parser.add_argument("--check-openclaw", action="store_true", help="Check openclaw.json location")
+
+    doctor_parser = subparsers.add_parser("doctor", help="Run diagnostics and check system health")
+
     args = parser.parse_args()
-    controller = EnhancedMemoryController()
+
+    if args.command == "config":
+        handle_config_command(args)
+        return
+    
+    if args.command == "doctor":
+        run_doctor()
+        return
+
+    controller = get_controller()
     controller.start()
 
     if args.command == "status":
@@ -87,6 +94,163 @@ def main():
         print(f"Total memories: {count}")
     else:
         parser.print_help()
+
+
+def handle_config_command(args):
+    print("=" * 60)
+    print("OpenClaw Cortex Memory Configuration")
+    print("=" * 60)
+    
+    if args.check_openclaw:
+        config_path = find_openclaw_config()
+        if config_path:
+            print(f"\n[OK] Found openclaw.json at: {config_path}")
+            openclaw_config = load_openclaw_config()
+            plugin_config = openclaw_config.get("plugins", {}).get("cortex-memory", {})
+            if plugin_config:
+                print(f"[OK] Cortex Memory plugin config found in openclaw.json")
+            else:
+                print(f"[WARNING] No cortex-memory plugin config in openclaw.json")
+        else:
+            print("\n[ERROR] openclaw.json not found")
+            print("  Searched locations:")
+            print("  - ./openclaw.json")
+            print("  - ~/.openclaw/openclaw.json")
+            print("  - $OPENCLAW_CONFIG_PATH")
+    
+    if args.validate or args.show:
+        config = get_config()
+        warnings = validate_config(config)
+        
+        if args.show:
+            print("\nCurrent Configuration:")
+            print("-" * 40)
+            safe_keys = [
+                "embedding_provider", "embedding_model", "embedding_dimensions",
+                "llm_provider", "llm_model",
+                "reranker_provider", "reranker_model",
+                "time_decay_halflife", "enable_chunking"
+            ]
+            for key in safe_keys:
+                value = config.get(key)
+                if value is not None:
+                    print(f"  {key}: {value}")
+        
+        if args.validate:
+            print("\nValidation Results:")
+            print("-" * 40)
+            if warnings:
+                for warning in warnings:
+                    print(f"  [WARNING] {warning}")
+                print(f"\n[FAILED] {len(warnings)} configuration issue(s) found")
+            else:
+                print("  [OK] All configuration checks passed")
+    
+    if not (args.validate or args.show or args.check_openclaw):
+        config = get_config()
+        warnings = validate_config(config)
+        config_path = find_openclaw_config()
+        
+        print(f"\nConfig file: {config_path or 'Not found'}")
+        print(f"Embedding: {config.get('embedding_provider', 'NOT SET')}/{config.get('embedding_model', 'NOT SET')}")
+        print(f"LLM: {config.get('llm_provider', 'NOT SET')}/{config.get('llm_model', 'NOT SET')}")
+        print(f"Reranker: {config.get('reranker_provider', 'NOT SET')}/{config.get('reranker_model', 'NOT SET')}")
+        
+        if warnings:
+            print(f"\n[WARNING] {len(warnings)} issue(s) found:")
+            for w in warnings:
+                print(f"  - {w}")
+        else:
+            print("\n[OK] Configuration is valid")
+
+
+def run_doctor():
+    print("=" * 60)
+    print("OpenClaw Cortex Memory Diagnostics")
+    print("=" * 60)
+    
+    checks_passed = 0
+    checks_failed = 0
+    
+    def check(name: str, passed: bool, message: str, fix: str = None):
+        nonlocal checks_passed, checks_failed
+        status = "[OK]" if passed else "[FAILED]"
+        print(f"\n{status} {name}")
+        print(f"     {message}")
+        if not passed and fix:
+            print(f"     Fix: {fix}")
+        if passed:
+            checks_passed += 1
+        else:
+            checks_failed += 1
+    
+    config_path = find_openclaw_config()
+    check(
+        "Config File",
+        config_path is not None,
+        f"Location: {config_path or 'Not found'}",
+        "Create openclaw.json in project root or ~/.openclaw/"
+    )
+    
+    config = get_config()
+    warnings = validate_config(config)
+    check(
+        "Configuration",
+        len(warnings) == 0,
+        f"{len(warnings)} warning(s)" if warnings else "All required fields set",
+        "Set embedding and llm configuration in openclaw.json"
+    )
+    
+    embedding_provider = config.get("embedding_provider")
+    embedding_model = config.get("embedding_model")
+    check(
+        "Embedding Service",
+        bool(embedding_provider and embedding_model),
+        f"Provider: {embedding_provider or 'NOT SET'}, Model: {embedding_model or 'NOT SET'}",
+        "Add embedding config to openclaw.json plugins.cortex-memory"
+    )
+    
+    llm_provider = config.get("llm_provider")
+    llm_model = config.get("llm_model")
+    check(
+        "LLM Service",
+        bool(llm_provider and llm_model),
+        f"Provider: {llm_provider or 'NOT SET'}, Model: {llm_model or 'NOT SET'}",
+        "Add llm config to openclaw.json plugins.cortex-memory"
+    )
+    
+    try:
+        from memory_engine.embedding import EmbeddingModule
+        emb = EmbeddingModule()
+        check(
+            "Embedding Client",
+            emb.is_available(),
+            "Client initialized" if emb.is_available() else "Client not available",
+            "Check API key and base URL"
+        )
+    except Exception as e:
+        check("Embedding Client", False, f"Error: {e}", "Install openai package and configure API key")
+    
+    try:
+        from memory_engine.config import get_openclaw_base_path
+        base_path = get_openclaw_base_path()
+        check(
+            "Storage Path",
+            os.path.exists(base_path),
+            f"Path: {base_path}",
+            f"Create directory: {base_path}"
+        )
+    except Exception as e:
+        check("Storage Path", False, f"Error: {e}")
+    
+    print("\n" + "=" * 60)
+    print(f"Results: {checks_passed} passed, {checks_failed} failed")
+    if checks_failed == 0:
+        print("[OK] All checks passed!")
+    else:
+        print("[WARNING] Some checks failed. Please fix the issues above.")
+    print("=" * 60)
+
 
 if __name__ == "__main__":
     main()
