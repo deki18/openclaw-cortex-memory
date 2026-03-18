@@ -1,0 +1,287 @@
+types:
+  Person:
+    required: [name]
+    properties:
+      name: string
+      email: string?
+      phone: string?
+      organization: string?
+      notes: string?
+      tags: string[]?
+
+  Organization:
+    required: [name]
+    properties:
+      name: string
+      type: enum(company, team, community, other)?
+      website: string?
+      members: string[]?
+
+  Project:
+    required: [name]
+    properties:
+      name: string
+      description: string?
+      status: enum(planning, active, paused, completed, archived)?
+      owner: string?
+      team: string[]?
+      goals: string[]?
+      start_date: date?
+      end_date: date?
+      tags: string[]?
+
+  Task:
+    required: [title, status]
+    properties:
+      title: string
+      description: string?
+      status: enum(open, in_progress, blocked, done, cancelled)?
+      priority: enum(low, medium, high, urgent)?
+      assignee: string?
+      project: string?
+      due: datetime?
+      estimate_hours: number?
+      blockers: string[]?
+      tags: string[]?
+
+  Goal:
+    required: [description]
+    properties:
+      description: string
+      target_date: date?
+      status: enum(active, achieved, abandoned)?
+      metrics: string[]?
+
+  Event:
+    required: [title, start]
+    properties:
+      title: string
+      description: string?
+      start: datetime
+      end: datetime?
+      location: string?
+      attendees: string[]?
+      recurrence: string?
+      status: enum(confirmed, tentative, cancelled)?
+
+  Location:
+    required: [name]
+    properties:
+      name: string
+      address: string?
+      city: string?
+      country: string?
+      coordinates: string?
+      timezone: string?
+
+  Document:
+    required: [title]
+    properties:
+      title: string
+      path: string?
+      url: string?
+      mime_type: string?
+      summary: string?
+      content_hash: string?
+      tags: string[]?
+
+  Message:
+    required: [content, sender]
+    properties:
+      content: string
+      sender: string
+      recipients: string[]?
+      thread: string?
+      timestamp: datetime
+      platform: string?
+
+  Thread:
+    required: [subject]
+    properties:
+      subject: string
+      participants: string[]?
+      messages: string[]?
+      status: enum(active, archived)?
+      last_activity: datetime?
+
+  Note:
+    required: [content]
+    properties:
+      content: string
+      title: string?
+      tags: string[]?
+      refs: string[]?
+      created: datetime
+
+  Account:
+    required: [service, username]
+    properties:
+      service: string
+      username: string
+      url: string?
+      credential_ref: string?
+
+  Device:
+    required: [name, type]
+    properties:
+      name: string
+      type: enum(computer, phone, tablet, server, iot, other)
+      os: string?
+      identifiers: string?
+      owner: string?
+
+  Credential:
+    required: [service, secret_ref]
+    forbidden_properties: [password, secret, token, key, api_key]
+    properties:
+      service: string
+      secret_ref: string
+      expires: datetime?
+      scope: string[]?
+
+  Concept:
+    required: [name]
+    properties:
+      name: string
+      description: string?
+      category: string?
+      aliases: string[]?
+      related_concepts: string[]?
+
+  Technology:
+    required: [name]
+    properties:
+      name: string
+      type: enum(language, framework, library, tool, platform, service, other)?
+      version: string?
+      description: string?
+      url: string?
+      tags: string[]?
+
+  Topic:
+    required: [name]
+    properties:
+      name: string
+      description: string?
+      category: string?
+      keywords: string[]?
+
+relations:
+  owns:
+    from_types: [Person, Organization]
+    to_types: [Account, Device, Document, Project]
+    cardinality: one_to_many
+
+  has_owner:
+    from_types: [Project, Task, Document, Event]
+    to_types: [Person]
+    cardinality: many_to_one
+
+  assigned_to:
+    from_types: [Task]
+    to_types: [Person]
+    cardinality: many_to_one
+
+  has_task:
+    from_types: [Project]
+    to_types: [Task]
+    cardinality: one_to_many
+
+  has_goal:
+    from_types: [Project]
+    to_types: [Goal]
+    cardinality: one_to_many
+
+  member_of:
+    from_types: [Person]
+    to_types: [Organization]
+    cardinality: many_to_many
+
+  part_of:
+    from_types: [Task, Document, Event]
+    to_types: [Project]
+    cardinality: many_to_one
+
+  blocks:
+    from_types: [Task]
+    to_types: [Task]
+    acyclic: true
+    cardinality: many_to_many
+
+  depends_on:
+    from_types: [Task, Project]
+    to_types: [Task, Project, Event, Document]
+    acyclic: true
+    cardinality: many_to_many
+
+  requires:
+    from_types: [Task, Project]
+    to_types: [Technology, Document]
+    cardinality: many_to_many
+
+  mentions:
+    from_types: [Document, Message, Note]
+    to_types: [Person, Project, Task, Event, Concept, Technology]
+    cardinality: many_to_many
+
+  references:
+    from_types: [Document, Note]
+    to_types: [Document, Note]
+    cardinality: many_to_many
+
+  follows_up:
+    from_types: [Task, Event]
+    to_types: [Event, Message]
+    cardinality: many_to_one
+
+  attendee_of:
+    from_types: [Person]
+    to_types: [Event]
+    cardinality: many_to_many
+
+  located_at:
+    from_types: [Event, Person, Device]
+    to_types: [Location]
+    cardinality: many_to_one
+
+  related_to:
+    from_types: [Concept, Technology, Topic]
+    to_types: [Concept, Technology, Topic, Project, Task]
+    cardinality: many_to_many
+
+  uses:
+    from_types: [Project, Task]
+    to_types: [Technology]
+    cardinality: many_to_many
+
+  knows:
+    from_types: [Person]
+    to_types: [Person, Technology, Concept]
+    cardinality: many_to_many
+
+  created:
+    from_types: [Person]
+    to_types: [Project, Task, Document, Note]
+    cardinality: one_to_many
+
+  modified:
+    from_types: [Person]
+    to_types: [Document, Note]
+    cardinality: many_to_many
+
+constraints:
+  - type: Credential
+    rule: "forbidden_properties: [password, secret, token]"
+    message: "Credentials must use secret_ref to reference external secret storage"
+
+  - type: Event
+    rule: "if end exists: end >= start"
+    message: "Event end time must be after start time"
+
+  - relation: blocks
+    rule: "acyclic"
+    message: "Circular task dependencies are not allowed"
+
+  - relation: depends_on
+    rule: "acyclic"
+    message: "Circular dependencies are not allowed"

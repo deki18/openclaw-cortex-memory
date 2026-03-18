@@ -3,7 +3,9 @@ from .enhanced_graph import (
     GraphNode,
     GraphEdge,
     GraphPath,
-    GraphEnhancedRetriever
+    GraphEnhancedRetriever,
+    SchemaManager,
+    ValidationResult,
 )
 
 __all__ = [
@@ -11,5 +13,7 @@ __all__ = [
     "GraphNode",
     "GraphEdge",
     "GraphPath",
-    "GraphEnhancedRetriever"
+    "GraphEnhancedRetriever",
+    "SchemaManager",
+    "ValidationResult",
 ]

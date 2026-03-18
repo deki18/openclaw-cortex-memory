@@ -773,23 +773,32 @@ class EnhancedMemoryController:
         
         try:
             for entity_name in event.entities:
-                self.memory_graph.add_node(
-                    node_id=f"entity:{entity_name}",
-                    node_type="entity",
+                node, warnings = self.memory_graph.add_node(
+                    node_type="Entity",
                     name=entity_name,
-                    memory_id=event.id
+                    memory_id=event.id,
+                    validate=False
                 )
+                if warnings:
+                    logger.debug(f"Node warnings for {entity_name}: {warnings}")
             
             if len(event.entities) >= 2:
                 for i, source in enumerate(event.entities):
                     for target in event.entities[i+1:]:
-                        self.memory_graph.add_edge(
-                            source_id=f"entity:{source}",
-                            target_id=f"entity:{target}",
-                            relation_type="co_occurred",
-                            weight=1.0,
-                            evidence=event.id
-                        )
+                        source_nodes = self.memory_graph.find_nodes_by_name(source, fuzzy=False)
+                        target_nodes = self.memory_graph.find_nodes_by_name(target, fuzzy=False)
+                        
+                        if source_nodes and target_nodes:
+                            edge, errors = self.memory_graph.add_edge(
+                                source_id=source_nodes[0].id,
+                                target_id=target_nodes[0].id,
+                                relation_type="co_occurred_with",
+                                weight=1.0,
+                                evidence=event.id,
+                                validate=False
+                            )
+                            if errors:
+                                logger.debug(f"Edge creation skipped: {errors}")
             
             logger.debug(f"Updated graph with {len(event.entities)} entities from event {event.id}")
         except Exception as e:
@@ -809,23 +818,32 @@ class EnhancedMemoryController:
         
         try:
             entity_refs = []
+            entity_nodes = {}
             
             if entities:
                 for entity in entities:
                     if isinstance(entity, dict):
                         entity_text = entity.get("name") or entity.get("text") or str(entity)
-                        entity_type = entity.get("type", "entity")
+                        entity_type = entity.get("type", "Entity")
+                        entity_attrs = entity.get("attributes", {})
                     else:
                         entity_text = str(entity)
-                        entity_type = "entity"
+                        entity_type = "Entity"
+                        entity_attrs = {}
                     
-                    self.memory_graph.add_node(
-                        node_id=f"entity:{entity_text}",
+                    node, warnings = self.memory_graph.add_node(
                         node_type=entity_type,
                         name=entity_text,
-                        memory_id=memory_id
+                        attributes=entity_attrs,
+                        memory_id=memory_id,
+                        validate=False
                     )
-                    entity_refs.append(entity_text)
+                    
+                    if node:
+                        entity_refs.append(entity_text)
+                        entity_nodes[entity_text] = node
+                    if warnings:
+                        logger.debug(f"Entity node warnings: {warnings}")
             
             if relations:
                 for rel in relations:
@@ -839,13 +857,23 @@ class EnhancedMemoryController:
                         weight = 1.0
                     
                     if source and target and relation_type:
-                        self.memory_graph.add_edge(
-                            source_id=f"entity:{source}",
-                            target_id=f"entity:{target}",
-                            relation_type=relation_type,
-                            weight=weight,
-                            evidence=memory_id
-                        )
+                        source_node = entity_nodes.get(source) or self.memory_graph.find_nodes_by_name(source, fuzzy=False)
+                        target_node = entity_nodes.get(target) or self.memory_graph.find_nodes_by_name(target, fuzzy=False)
+                        
+                        source_id = source_node.id if hasattr(source_node, 'id') else (source_node[0].id if source_node else None)
+                        target_id = target_node.id if hasattr(target_node, 'id') else (target_node[0].id if target_node else None)
+                        
+                        if source_id and target_id:
+                            edge, errors = self.memory_graph.add_edge(
+                                source_id=source_id,
+                                target_id=target_id,
+                                relation_type=relation_type,
+                                weight=weight,
+                                evidence=memory_id,
+                                validate=False
+                            )
+                            if errors:
+                                logger.debug(f"Relation edge warnings: {errors}")
             
             event_id = self.episodic.store_event(
                 summary=summary,
@@ -875,13 +903,48 @@ class EnhancedMemoryController:
                 for neighbor, edge in neighbors:
                     results.append({
                         "source": node.name,
+                        "source_type": node.node_type,
                         "target": neighbor.name,
+                        "target_type": neighbor.node_type,
                         "relation": edge.relation_type,
                         "weight": edge.weight
                     })
             return results
         except Exception as e:
             logger.error(f"Failed to query graph: {e}")
+            return []
+    
+    def get_graph_stats(self) -> Dict[str, Any]:
+        try:
+            return self.memory_graph.get_stats()
+        except Exception as e:
+            logger.error(f"Failed to get graph stats: {e}")
+            return {}
+    
+    def validate_graph(self) -> Dict[str, Any]:
+        try:
+            result = self.memory_graph.validate_graph()
+            return {
+                "valid": result.valid,
+                "errors": result.errors,
+                "warnings": result.warnings
+            }
+        except Exception as e:
+            logger.error(f"Failed to validate graph: {e}")
+            return {"valid": False, "errors": [str(e)], "warnings": []}
+    
+    def get_schema_types(self) -> List[str]:
+        try:
+            return self.memory_graph.schema.get_all_types()
+        except Exception as e:
+            logger.error(f"Failed to get schema types: {e}")
+            return []
+    
+    def get_schema_relations(self) -> List[str]:
+        try:
+            return self.memory_graph.schema.get_all_relations()
+        except Exception as e:
+            logger.error(f"Failed to get schema relations: {e}")
             return []
     
     def get_hot_context(self, limit: int = 20) -> List[Dict[str, Any]]:

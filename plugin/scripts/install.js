@@ -177,7 +177,7 @@ try {
   console.log('               },');
   console.log('               "llm": {');
   console.log('                 "provider": "openai",');
-  console.log('                 "model": "gpt-4",');
+  console.log('                 "model": "gpt-4o-mini",');
   console.log('                 "apiKey": "${OPENAI_API_KEY}"');
   console.log('               },');
   console.log('               "reranker": {');

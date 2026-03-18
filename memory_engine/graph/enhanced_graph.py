@@ -2,12 +2,16 @@ import json
 import logging
 import os
 import threading
+import uuid
 from collections import defaultdict
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 logger = logging.getLogger(__name__)
+
+SCHEMA_PATH = os.path.join(os.path.dirname(__file__), "schema.yaml")
 
 
 @dataclass
@@ -18,6 +22,52 @@ class GraphNode:
     attributes: Dict[str, Any] = field(default_factory=dict)
     memory_ids: List[str] = field(default_factory=list)
     created_at: float = field(default_factory=lambda: datetime.now(timezone.utc).timestamp())
+    updated_at: float = field(default_factory=lambda: datetime.now(timezone.utc).timestamp())
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "id": self.id,
+            "node_type": self.node_type,
+            "name": self.name,
+            "attributes": self.attributes,
+            "memory_ids": self.memory_ids,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "GraphNode":
+        return cls(
+            id=data.get("id", ""),
+            node_type=data.get("node_type", ""),
+            name=data.get("name", ""),
+            attributes=data.get("attributes", {}),
+            memory_ids=data.get("memory_ids", []),
+            created_at=data.get("created_at", datetime.now(timezone.utc).timestamp()),
+            updated_at=data.get("updated_at", datetime.now(timezone.utc).timestamp()),
+        )
+
+    def validate(self, type_schema: Dict[str, Any]) -> List[str]:
+        errors = []
+        
+        required = type_schema.get("required", [])
+        for prop in required:
+            if prop not in self.attributes and not (prop == "name" and self.name):
+                errors.append(f"Missing required property: {prop}")
+        
+        forbidden = type_schema.get("forbidden_properties", [])
+        for prop in forbidden:
+            if prop in self.attributes:
+                errors.append(f"Forbidden property found: {prop}")
+        
+        for key, value in self.attributes.items():
+            enum_key = f"{key}_enum"
+            if enum_key in type_schema:
+                allowed = type_schema[enum_key]
+                if value not in allowed:
+                    errors.append(f"Invalid enum value for '{key}': {value}, allowed: {allowed}")
+        
+        return errors
 
 
 @dataclass
@@ -28,6 +78,30 @@ class GraphEdge:
     weight: float = 1.0
     attributes: Dict[str, Any] = field(default_factory=dict)
     evidence: List[str] = field(default_factory=list)
+    created_at: float = field(default_factory=lambda: datetime.now(timezone.utc).timestamp())
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "source_id": self.source_id,
+            "target_id": self.target_id,
+            "relation_type": self.relation_type,
+            "weight": self.weight,
+            "attributes": self.attributes,
+            "evidence": self.evidence,
+            "created_at": self.created_at,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "GraphEdge":
+        return cls(
+            source_id=data.get("source_id", ""),
+            target_id=data.get("target_id", ""),
+            relation_type=data.get("relation_type", ""),
+            weight=data.get("weight", 1.0),
+            attributes=data.get("attributes", {}),
+            evidence=data.get("evidence", []),
+            created_at=data.get("created_at", datetime.now(timezone.utc).timestamp()),
+        )
 
 
 @dataclass
@@ -38,6 +112,63 @@ class GraphPath:
     length: int
 
 
+@dataclass
+class ValidationResult:
+    valid: bool
+    errors: List[str] = field(default_factory=list)
+    warnings: List[str] = field(default_factory=list)
+
+
+class SchemaManager:
+    def __init__(self, schema_path: str = None):
+        self.schema_path = schema_path or SCHEMA_PATH
+        self._schema: Dict[str, Any] = {}
+        self._load_schema()
+
+    def _load_schema(self):
+        if not os.path.exists(self.schema_path):
+            logger.warning(f"Schema file not found: {self.schema_path}")
+            return
+        
+        try:
+            import yaml
+            with open(self.schema_path, "r", encoding="utf-8") as f:
+                self._schema = yaml.safe_load(f) or {}
+            logger.info(f"Loaded schema with {len(self._schema.get('types', {}))} types and {len(self._schema.get('relations', {}))} relations")
+        except Exception as e:
+            logger.error(f"Failed to load schema: {e}")
+
+    def get_type_schema(self, type_name: str) -> Dict[str, Any]:
+        return self._schema.get("types", {}).get(type_name, {})
+
+    def get_relation_schema(self, relation_type: str) -> Dict[str, Any]:
+        return self._schema.get("relations", {}).get(relation_type, {})
+
+    def get_all_types(self) -> List[str]:
+        return list(self._schema.get("types", {}).keys())
+
+    def get_all_relations(self) -> List[str]:
+        return list(self._schema.get("relations", {}).keys())
+
+    def is_valid_type(self, type_name: str) -> bool:
+        return type_name in self._schema.get("types", {})
+
+    def is_valid_relation(self, relation_type: str) -> bool:
+        return relation_type in self._schema.get("relations", {})
+
+    def validate_node_type(self, type_name: str) -> List[str]:
+        if not self.is_valid_type(type_name):
+            known = self.get_all_types()
+            return [f"Unknown type: '{type_name}'. Known types: {known[:10]}..."]
+        return []
+
+    def validate_relation_type(self, relation_type: str) -> List[str]:
+        if not self.is_valid_relation(relation_type):
+            known = self.get_all_relations()
+            return [f"Unknown relation: '{relation_type}'. Known relations: {known[:10]}..."]
+        return []
+
+
 class EnhancedMemoryGraph:
     def __init__(self, config: dict = None, graph_path: str = None):
         config = config or {}
@@ -45,40 +176,166 @@ class EnhancedMemoryGraph:
         if graph_path is None:
             from ..config import get_openclaw_base_path
             base_path = get_openclaw_base_path()
-            graph_path = os.path.join(base_path, "knowledge_graph.json")
+            graph_path = os.path.join(base_path, "knowledge_graph.jsonl")
         self.graph_path = os.path.expanduser(graph_path)
         
         self._nodes: Dict[str, GraphNode] = {}
-        self._edges: Dict[Tuple[str, str], GraphEdge] = {}
+        self._edges: Dict[Tuple[str, str, str], GraphEdge] = {}
         self._node_index: Dict[str, Set[str]] = defaultdict(set)
         self._type_index: Dict[str, Set[str]] = defaultdict(set)
         self._memory_index: Dict[str, Set[str]] = defaultdict(set)
+        self._edge_index: Dict[str, Set[Tuple[str, str, str]]] = defaultdict(set)
         
         self._lock = threading.RLock()
         
         self.max_path_length = config.get("max_path_length", 5)
         self.min_edge_weight = config.get("min_edge_weight", 0.1)
+        self.enable_validation = config.get("enable_validation", True)
+        
+        self.schema = SchemaManager()
         
         os.makedirs(os.path.dirname(self.graph_path), exist_ok=True)
         self._load()
 
+    def _generate_id(self, type_name: str) -> str:
+        prefix = type_name.lower()[:4]
+        suffix = uuid.uuid4().hex[:8]
+        return f"{prefix}_{suffix}"
+
+    def validate_node(self, node_type: str, name: str, attributes: dict = None) -> ValidationResult:
+        errors = []
+        warnings = []
+        
+        if self.enable_validation:
+            type_errors = self.schema.validate_node_type(node_type)
+            errors.extend(type_errors)
+            
+            if not errors:
+                type_schema = self.schema.get_type_schema(node_type)
+                temp_node = GraphNode(
+                    id="temp",
+                    node_type=node_type,
+                    name=name,
+                    attributes=attributes or {}
+                )
+                validation_errors = temp_node.validate(type_schema)
+                errors.extend(validation_errors)
+        
+        return ValidationResult(
+            valid=len(errors) == 0,
+            errors=errors,
+            warnings=warnings
+        )
+
+    def validate_edge(
+        self,
+        source_type: str,
+        target_type: str,
+        relation_type: str
+    ) -> ValidationResult:
+        errors = []
+        warnings = []
+        
+        if self.enable_validation:
+            rel_errors = self.schema.validate_relation_type(relation_type)
+            if rel_errors:
+                warnings.extend(rel_errors)
+            else:
+                rel_schema = self.schema.get_relation_schema(relation_type)
+                
+                from_types = rel_schema.get("from_types", [])
+                to_types = rel_schema.get("to_types", [])
+                
+                if from_types and source_type not in from_types:
+                    errors.append(
+                        f"Relation '{relation_type}' cannot connect from type '{source_type}'. "
+                        f"Allowed: {from_types}"
+                    )
+                
+                if to_types and target_type not in to_types:
+                    errors.append(
+                        f"Relation '{relation_type}' cannot connect to type '{target_type}'. "
+                        f"Allowed: {to_types}"
+                    )
+        
+        return ValidationResult(
+            valid=len(errors) == 0,
+            errors=errors,
+            warnings=warnings
+        )
+
+    def _check_cardinality(
+        self,
+        source_id: str,
+        relation_type: str,
+        cardinality: str
+    ) -> bool:
+        if cardinality in ("one_to_one", "many_to_one"):
+            existing = [
+                key for key in self._edges
+                if key[0] == source_id and key[2] == relation_type
+            ]
+            if existing:
+                return False
+        return True
+
+    def _would_create_cycle(
+        self,
+        source_id: str,
+        target_id: str,
+        relation_type: str
+    ) -> bool:
+        visited = set()
+        stack = [target_id]
+        
+        while stack:
+            current = stack.pop()
+            if current == source_id:
+                return True
+            if current in visited:
+                continue
+            visited.add(current)
+            
+            for key in self._edge_index.get(current, set()):
+                if key[2] == relation_type:
+                    stack.append(key[1])
+        
+        return False
+
     def add_node(
         self,
-        node_id: str,
         node_type: str,
         name: str,
         attributes: dict = None,
-        memory_id: str = None
-    ) -> GraphNode:
+        memory_id: str = None,
+        node_id: str = None,
+        validate: bool = True
+    ) -> Tuple[Optional[GraphNode], List[str]]:
+        warnings = []
+        
+        if validate and self.enable_validation:
+            validation = self.validate_node(node_type, name, attributes)
+            if not validation.valid:
+                logger.warning(f"Node validation failed: {validation.errors}")
+                return None, validation.errors
+            warnings = validation.warnings
+        
         with self._lock:
-            if node_id in self._nodes:
+            if node_id and node_id in self._nodes:
                 node = self._nodes[node_id]
                 if memory_id and memory_id not in node.memory_ids:
                     node.memory_ids.append(memory_id)
                 if attributes:
                     node.attributes.update(attributes)
-                self._save()
-                return node
+                node.updated_at = datetime.now(timezone.utc).timestamp()
+                self._append_op("update_node", {
+                    "id": node.id,
+                    "properties": attributes or {},
+                    "memory_id": memory_id
+                })
+                return node, warnings
+            
+            node_id = node_id or self._generate_id(node_type)
             
             node = GraphNode(
                 id=node_id,
@@ -90,15 +347,14 @@ class EnhancedMemoryGraph:
             
             self._nodes[node_id] = node
             self._type_index[node_type].add(node_id)
-            
-            name_lower = name.lower()
-            self._node_index[name_lower].add(node_id)
+            self._node_index[name.lower()].add(node_id)
             
             if memory_id:
                 self._memory_index[memory_id].add(node_id)
             
-            self._save()
-            return node
+            self._append_op("create_node", {"entity": node.to_dict()})
+            
+            return node, warnings
 
     def add_edge(
         self,
@@ -107,13 +363,46 @@ class EnhancedMemoryGraph:
         relation_type: str,
         weight: float = 1.0,
         attributes: dict = None,
-        evidence: str = None
-    ) -> Optional[GraphEdge]:
+        evidence: str = None,
+        validate: bool = True
+    ) -> Tuple[Optional[GraphEdge], List[str]]:
+        errors = []
+        warnings = []
+        
         with self._lock:
-            if source_id not in self._nodes or target_id not in self._nodes:
-                return None
+            if source_id not in self._nodes:
+                return None, [f"Source node not found: {source_id}"]
+            if target_id not in self._nodes:
+                return None, [f"Target node not found: {target_id}"]
             
-            edge_key = (source_id, target_id)
+            source = self._nodes[source_id]
+            target = self._nodes[target_id]
+            
+            if validate and self.enable_validation:
+                validation = self.validate_edge(
+                    source.node_type,
+                    target.node_type,
+                    relation_type
+                )
+                errors.extend(validation.errors)
+                warnings.extend(validation.warnings)
+                
+                if not errors:
+                    rel_schema = self.schema.get_relation_schema(relation_type)
+                    
+                    cardinality = rel_schema.get("cardinality")
+                    if cardinality and not self._check_cardinality(source_id, relation_type, cardinality):
+                        errors.append(
+                            f"Cardinality violation: '{relation_type}' has cardinality '{cardinality}'"
+                        )
+                    
+                    if rel_schema.get("acyclic") and self._would_create_cycle(source_id, target_id, relation_type):
+                        errors.append(f"Would create cycle for acyclic relation: {relation_type}")
+            
+            if errors:
+                return None, errors
+            
+            edge_key = (source_id, target_id, relation_type)
             
             if edge_key in self._edges:
                 edge = self._edges[edge_key]
@@ -122,8 +411,14 @@ class EnhancedMemoryGraph:
                     edge.evidence.append(evidence)
                 if attributes:
                     edge.attributes.update(attributes)
-                self._save()
-                return edge
+                self._append_op("update_edge", {
+                    "source_id": source_id,
+                    "target_id": target_id,
+                    "relation_type": relation_type,
+                    "weight": weight,
+                    "evidence": evidence
+                })
+                return edge, warnings
             
             edge = GraphEdge(
                 source_id=source_id,
@@ -135,8 +430,11 @@ class EnhancedMemoryGraph:
             )
             
             self._edges[edge_key] = edge
-            self._save()
-            return edge
+            self._edge_index[source_id].add(edge_key)
+            
+            self._append_op("create_edge", edge.to_dict())
+            
+            return edge, warnings
 
     def get_node(self, node_id: str) -> Optional[GraphNode]:
         with self._lock:
@@ -158,7 +456,7 @@ class EnhancedMemoryGraph:
                         if nid in self._nodes
                     )
             
-            return results
+            return list({n.id: n for n in results}.values())
 
     def get_nodes_by_type(self, node_type: str) -> List[GraphNode]:
         with self._lock:
@@ -178,18 +476,21 @@ class EnhancedMemoryGraph:
             results = []
             
             if direction in ("out", "both"):
-                for (src, tgt), edge in self._edges.items():
-                    if src == node_id:
+                for edge_key in self._edge_index.get(node_id, set()):
+                    edge = self._edges.get(edge_key)
+                    if edge:
                         if relation_type is None or edge.relation_type == relation_type:
-                            if tgt in self._nodes:
-                                results.append((self._nodes[tgt], edge))
+                            target = self._nodes.get(edge.target_id)
+                            if target:
+                                results.append((target, edge))
             
             if direction in ("in", "both"):
-                for (src, tgt), edge in self._edges.items():
-                    if tgt == node_id:
+                for edge_key, edge in self._edges.items():
+                    if edge.target_id == node_id:
                         if relation_type is None or edge.relation_type == relation_type:
-                            if src in self._nodes:
-                                results.append((self._nodes[src], edge))
+                            source = self._nodes.get(edge.source_id)
+                            if source:
+                                results.append((source, edge))
             
             return results
 
@@ -244,65 +545,6 @@ class EnhancedMemoryGraph:
                     queue.append((neighbor.id, new_nodes, new_edges, new_weight))
             
             return None
-
-    def find_all_paths(
-        self,
-        source_id: str,
-        target_id: str,
-        max_length: int = None,
-        limit: int = 10
-    ) -> List[GraphPath]:
-        max_length = max_length or self.max_path_length
-        
-        with self._lock:
-            if source_id not in self._nodes or target_id not in self._nodes:
-                return []
-            
-            paths = []
-            visited_edges = set()
-            
-            def dfs(current_id, path_nodes, path_edges, total_weight):
-                if len(path_nodes) > max_length:
-                    return
-                
-                if current_id == target_id and path_edges:
-                    paths.append(GraphPath(
-                        nodes=path_nodes.copy(),
-                        edges=path_edges.copy(),
-                        total_weight=total_weight,
-                        length=len(path_edges)
-                    ))
-                    return
-                
-                neighbors = self.get_connected_nodes(current_id, direction="out")
-                
-                for neighbor, edge in neighbors:
-                    edge_key = (edge.source_id, edge.target_id, edge.relation_type)
-                    if edge_key in visited_edges:
-                        continue
-                    
-                    if neighbor.id in [n.id for n in path_nodes]:
-                        continue
-                    
-                    visited_edges.add(edge_key)
-                    path_nodes.append(neighbor)
-                    path_edges.append(edge)
-                    
-                    dfs(
-                        neighbor.id,
-                        path_nodes,
-                        path_edges,
-                        total_weight + edge.weight
-                    )
-                    
-                    path_nodes.pop()
-                    path_edges.pop()
-                    visited_edges.remove(edge_key)
-            
-            dfs(source_id, [self._nodes[source_id]], [], 0.0)
-            
-            paths.sort(key=lambda p: p.total_weight, reverse=True)
-            return paths[:limit]
 
     def get_node_context(self, node_id: str, depth: int = 2) -> Dict[str, Any]:
         with self._lock:
@@ -364,6 +606,10 @@ class EnhancedMemoryGraph:
                 if memory_id not in node.memory_ids:
                     node.memory_ids.append(memory_id)
                 self._memory_index[memory_id].add(node_id)
+                self._append_op("link_memory", {
+                    "memory_id": memory_id,
+                    "node_id": node_id
+                })
 
     def remove_node(self, node_id: str):
         with self._lock:
@@ -384,81 +630,200 @@ class EnhancedMemoryGraph:
             ]
             for key in edges_to_remove:
                 del self._edges[key]
+                self._edge_index[key[0]].discard(key)
             
             del self._nodes[node_id]
-            self._save()
+            self._append_op("delete_node", {"id": node_id})
 
-    def _save(self):
+    def update_node(self, node_id: str, attributes: dict) -> Optional[GraphNode]:
+        with self._lock:
+            if node_id not in self._nodes:
+                return None
+            
+            node = self._nodes[node_id]
+            node.attributes.update(attributes)
+            node.updated_at = datetime.now(timezone.utc).timestamp()
+            
+            self._append_op("update_node", {
+                "id": node_id,
+                "properties": attributes
+            })
+            
+            return node
+
+    def delete_edge(self, source_id: str, target_id: str, relation_type: str) -> bool:
+        with self._lock:
+            edge_key = (source_id, target_id, relation_type)
+            if edge_key not in self._edges:
+                return False
+            
+            del self._edges[edge_key]
+            self._edge_index[source_id].discard(edge_key)
+            
+            self._append_op("delete_edge", {
+                "source_id": source_id,
+                "target_id": target_id,
+                "relation_type": relation_type
+            })
+            
+            return True
+
+    def validate_graph(self) -> ValidationResult:
+        errors = []
+        warnings = []
+        
+        with self._lock:
+            for node_id, node in self._nodes.items():
+                type_schema = self.schema.get_type_schema(node.node_type)
+                node_errors = node.validate(type_schema)
+                for err in node_errors:
+                    errors.append(f"Node {node_id}: {err}")
+            
+            for edge_key, edge in self._edges.items():
+                source = self._nodes.get(edge.source_id)
+                target = self._nodes.get(edge.target_id)
+                
+                if not source or not target:
+                    errors.append(f"Edge {edge_key}: references missing node")
+                    continue
+                
+                validation = self.validate_edge(
+                    source.node_type,
+                    target.node_type,
+                    edge.relation_type
+                )
+                for err in validation.errors:
+                    errors.append(f"Edge {edge_key}: {err}")
+                warnings.extend(validation.warnings)
+        
+        return ValidationResult(
+            valid=len(errors) == 0,
+            errors=errors,
+            warnings=warnings
+        )
+
+    def _append_op(self, op_type: str, data: Dict[str, Any]):
         try:
-            data = {
-                "nodes": [
-                    {
-                        "id": node.id,
-                        "node_type": node.node_type,
-                        "name": node.name,
-                        "attributes": node.attributes,
-                        "memory_ids": node.memory_ids,
-                        "created_at": node.created_at
-                    }
-                    for node in self._nodes.values()
-                ],
-                "edges": [
-                    {
-                        "source_id": edge.source_id,
-                        "target_id": edge.target_id,
-                        "relation_type": edge.relation_type,
-                        "weight": edge.weight,
-                        "attributes": edge.attributes,
-                        "evidence": edge.evidence
-                    }
-                    for edge in self._edges.values()
-                ]
+            record = {
+                "op": op_type,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                **data
             }
             
-            temp_path = self.graph_path + ".tmp"
-            with open(temp_path, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-            os.replace(temp_path, self.graph_path)
+            with open(self.graph_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(record, ensure_ascii=False) + "\n")
         except Exception as e:
-            logger.error(f"Failed to save graph: {e}")
+            logger.error(f"Failed to append operation: {e}")
 
     def _load(self):
         if not os.path.exists(self.graph_path):
+            legacy_path = self.graph_path.replace(".jsonl", ".json")
+            if os.path.exists(legacy_path):
+                self._load_legacy(legacy_path)
             return
         
         try:
             with open(self.graph_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    
+                    record = json.loads(line)
+                    op = record.get("op")
+                    
+                    if op == "create_node":
+                        entity = record.get("entity", {})
+                        node = GraphNode.from_dict(entity)
+                        self._nodes[node.id] = node
+                        self._type_index[node.node_type].add(node.id)
+                        self._node_index[node.name.lower()].add(node.id)
+                        for memory_id in node.memory_ids:
+                            self._memory_index[memory_id].add(node.id)
+                    
+                    elif op == "update_node":
+                        node_id = record.get("id")
+                        if node_id in self._nodes:
+                            props = record.get("properties", {})
+                            self._nodes[node_id].attributes.update(props)
+                            memory_id = record.get("memory_id")
+                            if memory_id and memory_id not in self._nodes[node_id].memory_ids:
+                                self._nodes[node_id].memory_ids.append(memory_id)
+                                self._memory_index[memory_id].add(node_id)
+                    
+                    elif op == "delete_node":
+                        node_id = record.get("id")
+                        if node_id in self._nodes:
+                            node = self._nodes[node_id]
+                            self._type_index[node.node_type].discard(node_id)
+                            self._node_index[node.name.lower()].discard(node_id)
+                            for memory_id in node.memory_ids:
+                                self._memory_index[memory_id].discard(memory_id)
+                            del self._nodes[node_id]
+                    
+                    elif op == "create_edge":
+                        edge = GraphEdge.from_dict(record)
+                        edge_key = (edge.source_id, edge.target_id, edge.relation_type)
+                        self._edges[edge_key] = edge
+                        self._edge_index[edge.source_id].add(edge_key)
+                    
+                    elif op == "update_edge":
+                        source_id = record.get("source_id")
+                        target_id = record.get("target_id")
+                        relation_type = record.get("relation_type")
+                        edge_key = (source_id, target_id, relation_type)
+                        if edge_key in self._edges:
+                            evidence = record.get("evidence")
+                            if evidence and evidence not in self._edges[edge_key].evidence:
+                                self._edges[edge_key].evidence.append(evidence)
+                    
+                    elif op == "delete_edge":
+                        source_id = record.get("source_id")
+                        target_id = record.get("target_id")
+                        relation_type = record.get("relation_type")
+                        edge_key = (source_id, target_id, relation_type)
+                        if edge_key in self._edges:
+                            del self._edges[edge_key]
+                            self._edge_index[source_id].discard(edge_key)
+                    
+                    elif op == "link_memory":
+                        memory_id = record.get("memory_id")
+                        node_id = record.get("node_id")
+                        if node_id in self._nodes and memory_id:
+                            if memory_id not in self._nodes[node_id].memory_ids:
+                                self._nodes[node_id].memory_ids.append(memory_id)
+                            self._memory_index[memory_id].add(node_id)
+            
+            logger.info(f"Loaded graph with {len(self._nodes)} nodes and {len(self._edges)} edges")
+        except Exception as e:
+            logger.error(f"Failed to load graph: {e}")
+
+    def _load_legacy(self, legacy_path: str):
+        try:
+            with open(legacy_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
             
             for node_data in data.get("nodes", []):
-                node = GraphNode(
-                    id=node_data["id"],
-                    node_type=node_data["node_type"],
-                    name=node_data["name"],
-                    attributes=node_data.get("attributes", {}),
-                    memory_ids=node_data.get("memory_ids", []),
-                    created_at=node_data.get("created_at", datetime.now(timezone.utc).timestamp())
-                )
+                node = GraphNode.from_dict(node_data)
                 self._nodes[node.id] = node
                 self._type_index[node.node_type].add(node.id)
                 self._node_index[node.name.lower()].add(node.id)
                 for memory_id in node.memory_ids:
                     self._memory_index[memory_id].add(node.id)
+                
+                self._append_op("create_node", {"entity": node.to_dict()})
             
             for edge_data in data.get("edges", []):
-                edge = GraphEdge(
-                    source_id=edge_data["source_id"],
-                    target_id=edge_data["target_id"],
-                    relation_type=edge_data["relation_type"],
-                    weight=edge_data.get("weight", 1.0),
-                    attributes=edge_data.get("attributes", {}),
-                    evidence=edge_data.get("evidence", [])
-                )
-                self._edges[(edge.source_id, edge.target_id)] = edge
+                edge = GraphEdge.from_dict(edge_data)
+                edge_key = (edge.source_id, edge.target_id, edge.relation_type)
+                self._edges[edge_key] = edge
+                self._edge_index[edge.source_id].add(edge_key)
+                
+                self._append_op("create_edge", edge.to_dict())
             
-            logger.info(f"Loaded graph with {len(self._nodes)} nodes and {len(self._edges)} edges")
+            logger.info(f"Migrated legacy graph with {len(self._nodes)} nodes and {len(self._edges)} edges")
         except Exception as e:
-            logger.error(f"Failed to load graph: {e}")
+            logger.error(f"Failed to load legacy graph: {e}")
 
     def clear(self):
         with self._lock:
@@ -467,7 +832,10 @@ class EnhancedMemoryGraph:
             self._node_index.clear()
             self._type_index.clear()
             self._memory_index.clear()
-            self._save()
+            self._edge_index.clear()
+            
+            if os.path.exists(self.graph_path):
+                os.remove(self.graph_path)
 
     def get_stats(self) -> Dict[str, Any]:
         with self._lock:
@@ -484,7 +852,17 @@ class EnhancedMemoryGraph:
                 "total_edges": len(self._edges),
                 "node_types": dict(type_counts),
                 "relation_types": dict(relation_counts),
-                "memory_links": len(self._memory_index)
+                "memory_links": len(self._memory_index),
+                "schema_types": len(self.schema.get_all_types()),
+                "schema_relations": len(self.schema.get_all_relations()),
+            }
+
+    def export_graph(self) -> Dict[str, Any]:
+        with self._lock:
+            return {
+                "nodes": [node.to_dict() for node in self._nodes.values()],
+                "edges": [edge.to_dict() for edge in self._edges.values()],
+                "stats": self.get_stats(),
             }
 
 
@@ -556,120 +934,22 @@ class GraphEnhancedRetriever:
                                 m_dict["graph_context"] = {
                                     "entity": neighbor.name,
                                     "entity_type": neighbor.node_type,
-                                    "via_relation": edge.relation_type,
-                                    "via_entity": node.name
+                                    "via": node.name,
+                                    "relation": edge.relation_type
                                 }
                                 results.append(m_dict)
                                 seen_memory_ids.add(memory_id)
         
         return results[:top_k]
-    
+
     def _has_valid_filters(self, filters: Dict[str, Any]) -> bool:
-        if not filters:
-            return False
-        
-        date_filter = filters.get("date")
-        if date_filter:
-            if date_filter.get("type") == "exact" and date_filter.get("value"):
-                return True
-            if date_filter.get("type") == "range" and date_filter.get("start") and date_filter.get("end"):
-                return True
-        
-        if filters.get("agent"):
-            return True
-        
-        if filters.get("source"):
-            return True
-        
-        return False
-    
+        return bool(filters and any(v is not None for v in filters.values()))
+
     def _match_filters(self, item: Dict[str, Any], filters: Dict[str, Any]) -> bool:
-        date_filter = filters.get("date")
-        if date_filter:
-            item_date = item.get("date", "")
-            if not self._match_date_filter(item_date, date_filter):
+        for key, value in filters.items():
+            if value is None:
+                continue
+            item_value = item.get(key)
+            if item_value != value:
                 return False
-        
-        agent_filter = filters.get("agent")
-        if agent_filter:
-            item_agent = item.get("agent", "")
-            if item_agent != agent_filter:
-                return False
-        
-        source_filter = filters.get("source")
-        if source_filter:
-            item_source = item.get("source", "")
-            if item_source != source_filter:
-                return False
-        
         return True
-    
-    def _match_date_filter(self, item_date: str, date_filter: Dict) -> bool:
-        if not item_date:
-            return True
-        if date_filter.get("type") == "exact":
-            return item_date == date_filter.get("value")
-        elif date_filter.get("type") == "range":
-            start = date_filter.get("start", "")
-            end = date_filter.get("end", "")
-            return start <= item_date <= end
-        return True
-
-    def expand_query_entities(
-        self,
-        entities: List[str],
-        max_expansions: int = None
-    ) -> List[str]:
-        max_expansions = max_expansions or self.max_expanded_nodes
-        expanded = set(entities)
-        
-        for entity in entities:
-            nodes = self.graph.find_nodes_by_name(entity)
-            
-            for node in nodes[:2]:
-                neighbors = self.graph.get_connected_nodes(node.id)
-                
-                for neighbor, edge in neighbors[:3]:
-                    if edge.weight >= 0.5:
-                        expanded.add(neighbor.name)
-                        
-                        if len(expanded) >= max_expansions:
-                            return list(expanded)
-        
-        return list(expanded)
-
-    def find_related_memories(
-        self,
-        memory_id: str,
-        max_related: int = 5
-    ) -> List[Dict[str, Any]]:
-        nodes = self.graph.get_nodes_for_memory(memory_id)
-        
-        related = []
-        seen_ids = {memory_id}
-        
-        for node in nodes:
-            neighbors = self.graph.get_connected_nodes(node.id)
-            
-            for neighbor, edge in neighbors:
-                neighbor_memories = self.graph.get_memories_for_node(neighbor.id)
-                
-                for related_id in neighbor_memories:
-                    if related_id in seen_ids:
-                        continue
-                    
-                    memory = self.store.get_by_id(related_id)
-                    if memory:
-                        m_dict = memory.model_dump() if hasattr(memory, 'model_dump') else memory
-                        m_dict["relation"] = {
-                            "via_node": node.name,
-                            "relation_type": edge.relation_type,
-                            "related_entity": neighbor.name
-                        }
-                        related.append(m_dict)
-                        seen_ids.add(related_id)
-                        
-                        if len(related) >= max_related:
-                            return related
-        
-        return related

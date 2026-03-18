@@ -38,9 +38,9 @@ metadata:
 ### 安装
 
 ```bash
-cd ~/.openclaw/workspace
-git clone https://github.com/deki18/openclaw-cortex-memory.git plugins/openclaw-cortex-memory
-cd plugins/openclaw-cortex-memory/plugin
+cd ~/.openclaw/extensions
+git clone https://github.com/deki18/openclaw-cortex-memory.git
+cd openclaw-cortex-memory/plugin
 npm install
 ```
 
@@ -251,16 +251,23 @@ Python 后端服务随插件加载自动启动。
 │  Semantic   │  Episodic   │    Graph    │   Procedural      │
 │  Memory     │  Memory     │   Memory    │     Memory        │
 ├─────────────┼─────────────┼─────────────┼───────────────────┤
-│  LanceDB    │   JSONL     │    JSON     │     YAML          │
-│  向量+文本  │   时间线    │   关系网络  │    规则文件       │
+│  LanceDB    │   JSONL     │   JSONL     │     YAML          │
+│  向量+文本  │   时间线    │  关系网络   │    规则文件       │
+│             │             │ +Schema验证 │                   │
 └─────────────┴─────────────┴─────────────┴───────────────────┘
 ```
 
 **四大记忆库：**
 - **Semantic Memory**: LanceDB 向量存储，语义相似度检索
 - **Episodic Memory**: JSONL 时间线，事件追踪
-- **Graph Memory**: JSON 关系网络，实体关联
+- **Graph Memory**: JSONL 关系网络，实体关联，支持 Schema 验证和关系约束
 - **Procedural Memory**: YAML 规则文件，操作知识
+
+**Graph Memory 特性：**
+- Schema 定义：16 种实体类型、19 种关系类型
+- 类型验证：必填属性、禁止属性、枚举值检查
+- 关系约束：类型匹配、基数约束（one_to_one/many_to_one/many_to_many）、无环检测
+- 操作审计：JSONL append-only 存储，记录所有创建/更新/删除操作
 
 ## 数据流
 
@@ -363,10 +370,11 @@ cortex-memory doctor              # 运行诊断
 
 | 类型 | 默认位置 |
 |------|---------|
-| 插件目录 | ~/.openclaw/workspace/plugins/openclaw-cortex-memory/ |
+| 插件目录 | ~/.openclaw/extensions/openclaw-cortex-memory/ |
 | LanceDB 数据 | ~/.openclaw/agents/main/lancedb_store/ |
 | 事件记忆 | ~/.openclaw/episodic_memory.jsonl |
-| 记忆图谱 | ~/.openclaw/memory_graph.json |
+| 记忆图谱 | ~/.openclaw/knowledge_graph.jsonl |
+| Schema 定义 | ~/.openclaw/extensions/openclaw-cortex-memory/memory_engine/graph/schema.yaml |
 
 ## 安全注意
 

@@ -24,7 +24,11 @@ def main():
     events_parser.add_argument("--limit", type=int, default=50, help="Max events to show")
 
     graph_parser = subparsers.add_parser("graph", help="Query memory graph")
-    graph_parser.add_argument("entity", type=str, help="Entity to query")
+    graph_parser.add_argument("entity", type=str, nargs="?", help="Entity to query")
+    graph_parser.add_argument("--stats", action="store_true", help="Show graph statistics")
+    graph_parser.add_argument("--validate", action="store_true", help="Validate graph integrity")
+    graph_parser.add_argument("--types", action="store_true", help="List schema types")
+    graph_parser.add_argument("--relations", action="store_true", help="List schema relations")
 
     reflect_parser = subparsers.add_parser("reflect", help="Trigger reflection engine")
 
@@ -80,8 +84,51 @@ def main():
         for e in events:
             print(e)
     elif args.command == "graph":
-        res = controller.query_graph(args.entity)
-        print(res)
+        if args.stats:
+            stats = controller.get_graph_stats()
+            print("Graph Statistics:")
+            print(f"  Total nodes: {stats.get('total_nodes', 0)}")
+            print(f"  Total edges: {stats.get('total_edges', 0)}")
+            print(f"  Schema types: {stats.get('schema_types', 0)}")
+            print(f"  Schema relations: {stats.get('schema_relations', 0)}")
+            if stats.get('node_types'):
+                print("\n  Node types:")
+                for t, c in stats['node_types'].items():
+                    print(f"    - {t}: {c}")
+            if stats.get('relation_types'):
+                print("\n  Relation types:")
+                for r, c in stats['relation_types'].items():
+                    print(f"    - {r}: {c}")
+        elif args.validate:
+            result = controller.validate_graph()
+            if result.get('valid'):
+                print("[OK] Graph validation passed")
+            else:
+                print("[FAILED] Graph validation failed")
+                for err in result.get('errors', []):
+                    print(f"  Error: {err}")
+            for warn in result.get('warnings', []):
+                print(f"  Warning: {warn}")
+        elif args.types:
+            types = controller.get_schema_types()
+            print("Schema Types:")
+            for t in types:
+                print(f"  - {t}")
+        elif args.relations:
+            relations = controller.get_schema_relations()
+            print("Schema Relations:")
+            for r in relations:
+                print(f"  - {r}")
+        elif args.entity:
+            res = controller.query_graph(args.entity)
+            if res:
+                print(f"Graph query results for '{args.entity}':")
+                for item in res:
+                    print(f"  {item['source']} ({item['source_type']}) --[{item['relation']}]--> {item['target']} ({item['target_type']}) [weight: {item['weight']:.2f}]")
+            else:
+                print(f"No results found for '{args.entity}'")
+        else:
+            print("Usage: memory graph <entity> [--stats] [--validate] [--types] [--relations]")
     elif args.command == "reflect":
         controller.reflect_memory()
         print("Reflection complete.")
