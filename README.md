@@ -39,6 +39,9 @@ npm install
 ```json
 {
   "plugins": {
+    "load": {
+      "paths": ["~/.openclaw/extensions/openclaw-cortex-memory"]
+    },
     "slots": {
       "memory": "@openclaw/cortex-memory"
     },

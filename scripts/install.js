@@ -145,6 +145,13 @@ try {
       encoding: 'utf8'
     });
     console.log('  TypeScript build completed successfully');
+    
+    const srcManifest = path.join(pluginDir, 'openclaw.plugin.json');
+    const distManifest = path.join(pluginDir, 'dist', 'openclaw.plugin.json');
+    if (fs.existsSync(srcManifest) && !fs.existsSync(distManifest)) {
+      fs.copyFileSync(srcManifest, distManifest);
+      console.log('  Plugin manifest copied to dist/');
+    }
   } catch (error) {
     const stderr = error.stderr || '';
     if (stderr.includes('permission') || stderr.includes('EACCES')) {

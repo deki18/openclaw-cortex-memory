@@ -8,7 +8,7 @@
     "cortex-memory": "./scripts/cli.js"
   },
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && node -e \"require('fs').copyFileSync('openclaw.plugin.json', 'dist/openclaw.plugin.json')\"",
     "dev": "tsc --watch",
     "prepublishOnly": "npm run build",
     "postinstall": "node scripts/install.js"
