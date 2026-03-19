@@ -163,10 +163,10 @@ try {
   console.log('     {');
   console.log('       "plugins": {');
   console.log('         "slots": {');
-  console.log('           "memory": "openclaw-cortex-memory"');
+  console.log('           "memory": "@openclaw/cortex-memory"');
   console.log('         },');
   console.log('         "entries": {');
-  console.log('           "openclaw-cortex-memory": {');
+  console.log('           "@openclaw/cortex-memory": {');
   console.log('             "enabled": true,');
   console.log('             "config": {');
   console.log('               "embedding": {');

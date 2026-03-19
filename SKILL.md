@@ -53,9 +53,9 @@ npm install
 ```json
 {
   "plugins": {
-    "slots": { "memory": "openclaw-cortex-memory" },
+    "slots": { "memory": "@openclaw/cortex-memory" },
     "entries": {
-      "openclaw-cortex-memory": {
+      "@openclaw/cortex-memory": {
         "enabled": true,
         "config": {
           "embedding": {
@@ -336,7 +336,7 @@ cortex-memory doctor              # 运行诊断
 {
   "plugins": {
     "entries": {
-      "openclaw-cortex-memory": {
+      "@openclaw/cortex-memory": {
         "enabled": false
       }
     }
