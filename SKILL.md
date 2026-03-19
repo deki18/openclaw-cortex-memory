@@ -40,7 +40,7 @@ metadata:
 ```bash
 cd ~/.openclaw/extensions
 git clone https://github.com/deki18/openclaw-cortex-memory.git
-cd openclaw-cortex-memory/plugin
+cd openclaw-cortex-memory
 npm install
 ```
 
