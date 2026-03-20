@@ -69,7 +69,7 @@ interface OpenClawPluginApi {
     handler: (payload: unknown, context: ToolContext) => Promise<void>;
   }): void;
   unregisterHook?(event: string): void;
-  getLogger(): {
+  getLogger?: () => {
     debug: (message: string, ...args: unknown[]) => void;
     info: (message: string, ...args: unknown[]) => void;
     warn: (message: string, ...args: unknown[]) => void;
@@ -149,6 +149,15 @@ let registeredTools: string[] = [];
 let registeredHooks: string[] = [];
 let configWatchInterval: NodeJS.Timeout | null = null;
 let configPath: string | null = null;
+
+function createConsoleLogger(): ReturnType<OpenClawPluginApi["getLogger"]> {
+  return {
+    debug: (message: string, ...args: unknown[]) => console.debug(`[CortexMemory] ${message}`, ...args),
+    info: (message: string, ...args: unknown[]) => console.log(`[CortexMemory] ${message}`, ...args),
+    warn: (message: string, ...args: unknown[]) => console.warn(`[CortexMemory] ${message}`, ...args),
+    error: (message: string, ...args: unknown[]) => console.error(`[CortexMemory] ${message}`, ...args),
+  };
+}
 
 function sanitizeForLogging(obj: Record<string, unknown>): Record<string, unknown> {
   const sanitized: Record<string, unknown> = {};
@@ -1306,7 +1315,7 @@ export async function register(pluginApi: OpenClawPluginApi, userConfig?: Partia
     apiUrl: userConfig?.apiUrl ?? "http://127.0.0.1:8765",
   } as CortexMemoryConfig;
   
-  logger = api.getLogger();
+  logger = api.getLogger?.() || createConsoleLogger();
   logger.info("Registering Cortex Memory plugin...");
   
   if (api.getBuiltinMemory) {
