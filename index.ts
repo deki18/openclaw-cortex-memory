@@ -1146,9 +1146,9 @@ function registerHooks(): void {
   if (!api) return;
   
   const hooks = [
-    { event: "message", handler: onMessageHandler },
-    { event: "sessionEnd", handler: onSessionEndHandler },
-    { event: "timer", handler: onTimerHandler },
+    { event: "onMessage", handler: onMessageHandler },
+    { event: "onSessionEnd", handler: onSessionEndHandler },
+    { event: "onTimer", handler: onTimerHandler },
   ];
   
   for (const hook of hooks) {
@@ -1384,15 +1384,14 @@ export async function register(pluginApi: OpenClawPluginApi, userConfig?: Partia
         logger.error(`Failed to register tools: ${message}`);
         throw toolError;
       }
-      logger.info("Hooks registration temporarily disabled for debugging");
-      // try {
-      //   registerHooks();
-      //   logger.info("Hooks registered successfully");
-      // } catch (hookError) {
-      //   const message = hookError instanceof Error ? hookError.message : String(hookError);
-      //   logger.error(`Failed to register hooks: ${message}`);
-      //   throw hookError;
-      // }
+      try {
+        registerHooks();
+        logger.info("Hooks registered successfully");
+      } catch (hookError) {
+        const message = hookError instanceof Error ? hookError.message : String(hookError);
+        logger.error(`Failed to register hooks: ${message}`);
+        throw hookError;
+      }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       logger.error(`Failed to start Cortex Memory service: ${message}`);
