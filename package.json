@@ -37,6 +37,7 @@
   },
   "files": [
     "dist/",
+    "index.ts",
     "scripts/",
     "openclaw.plugin.json",
     "SKILL.md"
