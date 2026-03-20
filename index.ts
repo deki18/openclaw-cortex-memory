@@ -1333,8 +1333,13 @@ export async function register(pluginApi: OpenClawPluginApi, userConfig?: Partia
   } as CortexMemoryConfig;
   
   if (api.getBuiltinMemory) {
-    builtinMemory = api.getBuiltinMemory();
-    logger.info("OpenClaw builtin memory system available for fallback");
+    try {
+      builtinMemory = api.getBuiltinMemory();
+      logger.info("OpenClaw builtin memory system available for fallback");
+    } catch (e) {
+      logger.warn(`Failed to get builtin memory: ${e instanceof Error ? e.message : String(e)}`);
+      builtinMemory = null;
+    }
   }
   
   const safeConfig = sanitizeForLogging({
@@ -1364,8 +1369,22 @@ export async function register(pluginApi: OpenClawPluginApi, userConfig?: Partia
       await startPythonService();
       await waitForService();
       logger.info("Cortex Memory Python service started successfully");
-      registerTools();
-      registerHooks();
+      try {
+        registerTools();
+        logger.info("Tools registered successfully");
+      } catch (toolError) {
+        const message = toolError instanceof Error ? toolError.message : String(toolError);
+        logger.error(`Failed to register tools: ${message}`);
+        throw toolError;
+      }
+      try {
+        registerHooks();
+        logger.info("Hooks registered successfully");
+      } catch (hookError) {
+        const message = hookError instanceof Error ? hookError.message : String(hookError);
+        logger.error(`Failed to register hooks: ${message}`);
+        throw hookError;
+      }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       logger.error(`Failed to start Cortex Memory service: ${message}`);
