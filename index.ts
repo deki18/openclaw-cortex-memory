@@ -75,6 +75,8 @@ interface OpenClawPluginApi {
     event: string;
     handler: (payload: unknown, context: ToolContext) => Promise<void>;
   }): void;
+  on(event: string, handler: (payload: unknown, context: ToolContext) => Promise<void> | void, options?: { priority?: number }): void;
+  off?(event: string, handler: (payload: unknown, context: ToolContext) => Promise<void> | void): void;
   unregisterHook?(event: string): void;
   getLogger?(): Logger;
   getBuiltinMemory?(): BuiltinMemory;
@@ -1146,30 +1148,37 @@ function registerHooks(): void {
   if (!api) return;
   
   const hooks = [
-    { event: "onMessage", handler: onMessageHandler },
-    { event: "onSessionEnd", handler: onSessionEndHandler },
-    { event: "onTimer", handler: onTimerHandler },
+    { event: "message_received", handler: onMessageHandler },
+    { event: "session_end", handler: onSessionEndHandler },
+    { event: "timer", handler: onTimerHandler },
   ];
   
   for (const hook of hooks) {
     try {
-      logger.info(`Registering hook: ${JSON.stringify({ event: hook.event })}`);
-      api.registerHook(hook);
-      registeredHooks.push(hook.event);
-      logger.info(`Hook ${hook.event} registered successfully`);
+      logger.info(`Registering hook via api.on: event="${hook.event}"`);
+      if (typeof (api as any).on === 'function') {
+        (api as any).on(hook.event, hook.handler);
+        registeredHooks.push(hook.event);
+        logger.info(`Hook ${hook.event} registered successfully via api.on`);
+      } else {
+        logger.warn(`api.on is not available, skipping hook ${hook.event}`);
+      }
     } catch (e) {
       logger.error(`Failed to register hook ${hook.event}: ${e instanceof Error ? e.message : String(e)}`);
+      logger.error(`Stack: ${e instanceof Error ? e.stack : 'N/A'}`);
       throw e;
     }
   }
 }
 
 function unregisterHooks(): void {
-  if (!api || !api.unregisterHook) return;
+  if (!api) return;
   
   for (const event of registeredHooks) {
     try {
-      api.unregisterHook(event);
+      if ((api as any).off) {
+        logger.info(`Unregistering hook ${event} via api.off`);
+      }
     } catch (e) {
       logger.warn(`Failed to unregister hook ${event}: ${e}`);
     }

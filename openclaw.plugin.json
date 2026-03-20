@@ -16,9 +16,9 @@
     "channels": false
   },
   "hooks": [
-    "onMessage",
-    "onSessionEnd",
-    "onTimer"
+    "message_received",
+    "session_end",
+    "timer"
   ],
   "tools": [
     {
