@@ -7,7 +7,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/openclaw/openclaw-cortex-memory"
+    "url": "https://github.com/deki18/openclaw-cortex-memory"
   },
   "entrypoint": "./dist/index.js",
   "capabilities": {
@@ -215,22 +215,59 @@
       }
     }
   ],
-  "config": {
-    "apiUrl": {
-      "type": "string",
-      "description": "URL of the Cortex Memory Python API server",
-      "default": "http://127.0.0.1:8765"
+  "configSchema": {
+    "type": "object",
+    "properties": {
+      "apiUrl": {
+        "type": "string",
+        "description": "URL of the Cortex Memory Python API server",
+        "default": "http://127.0.0.1:8765"
+      },
+      "autoSync": {
+        "type": "boolean",
+        "description": "Automatically sync memory on session end",
+        "default": true
+      },
+      "autoReflect": {
+        "type": "boolean",
+        "description": "Automatically trigger reflection periodically",
+        "default": false
+      },
+      "embedding": {
+        "type": "object",
+        "description": "Embedding model configuration",
+        "properties": {
+          "provider": { "type": "string" },
+          "model": { "type": "string" },
+          "dimensions": { "type": "number" },
+          "apiKey": { "type": "string" },
+          "endpoint": { "type": "string" }
+        },
+        "required": ["provider", "model", "apiKey"]
+      },
+      "llm": {
+        "type": "object",
+        "description": "LLM configuration",
+        "properties": {
+          "provider": { "type": "string" },
+          "model": { "type": "string" },
+          "apiKey": { "type": "string" },
+          "endpoint": { "type": "string" }
+        },
+        "required": ["provider", "model", "apiKey"]
+      },
+      "reranker": {
+        "type": "object",
+        "description": "Reranker configuration",
+        "properties": {
+          "provider": { "type": "string" },
+          "model": { "type": "string" },
+          "apiKey": { "type": "string" },
+          "endpoint": { "type": "string" }
+        }
+      }
     },
-    "autoSync": {
-      "type": "boolean",
-      "description": "Automatically sync memory on session end",
-      "default": true
-    },
-    "autoReflect": {
-      "type": "boolean",
-      "description": "Automatically trigger reflection periodically",
-      "default": false
-    }
+    "required": ["embedding", "llm"]
   },
   "python": {
     "required": true,
