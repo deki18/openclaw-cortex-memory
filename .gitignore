@@ -1,6 +1,7 @@
 node_modules/
 dist/
 src/openclaw.plugin.json
+package-lock.json
 
 venv/
 

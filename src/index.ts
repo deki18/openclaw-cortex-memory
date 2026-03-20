@@ -56,6 +56,13 @@ interface BuiltinMemory {
   delete: (id: string) => Promise<boolean>;
 }
 
+interface Logger {
+  debug: (message: string, ...args: unknown[]) => void;
+  info: (message: string, ...args: unknown[]) => void;
+  warn: (message: string, ...args: unknown[]) => void;
+  error: (message: string, ...args: unknown[]) => void;
+}
+
 interface OpenClawPluginApi {
   registerTool(tool: {
     name: string;
@@ -69,12 +76,7 @@ interface OpenClawPluginApi {
     handler: (payload: unknown, context: ToolContext) => Promise<void>;
   }): void;
   unregisterHook?(event: string): void;
-  getLogger?: () => {
-    debug: (message: string, ...args: unknown[]) => void;
-    info: (message: string, ...args: unknown[]) => void;
-    warn: (message: string, ...args: unknown[]) => void;
-    error: (message: string, ...args: unknown[]) => void;
-  };
+  getLogger?(): Logger;
   getBuiltinMemory?(): BuiltinMemory;
 }
 
@@ -139,7 +141,7 @@ let autoSearchCache: CachedSearchResult | null = null;
 const AUTO_SEARCH_CACHE_TTL = 60000;
 
 let config: CortexMemoryConfig | null = null;
-let logger: ReturnType<OpenClawPluginApi["getLogger"]>;
+let logger: Logger;
 let pythonProcess: ChildProcess | null = null;
 let isShuttingDown = false;
 let isEnabled = true;
@@ -147,10 +149,10 @@ let api: OpenClawPluginApi | null = null;
 let builtinMemory: BuiltinMemory | null = null;
 let registeredTools: string[] = [];
 let registeredHooks: string[] = [];
-let configWatchInterval: NodeJS.Timeout | null = null;
+let configWatchInterval: ReturnType<typeof setInterval> | null = null;
 let configPath: string | null = null;
 
-function createConsoleLogger(): ReturnType<OpenClawPluginApi["getLogger"]> {
+function createConsoleLogger(): Logger {
   return {
     debug: (message: string, ...args: unknown[]) => console.debug(`[CortexMemory] ${message}`, ...args),
     info: (message: string, ...args: unknown[]) => console.log(`[CortexMemory] ${message}`, ...args),
