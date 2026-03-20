@@ -328,6 +328,14 @@ async def run_diagnostics():
         "Add 'llm.model' to openclaw.json (e.g., 'gpt-4')"
     )
     
+    reranker_model = cfg.get("reranker_api", {}).get("model")
+    add_check(
+        "Reranker Model",
+        bool(reranker_model),
+        f"Reranker model: {reranker_model or 'NOT SET'}",
+        "Add 'reranker.model' to openclaw.json (e.g., 'BAAI/bge-reranker-v2-m3')"
+    )
+    
     try:
         from memory_engine.config import get_openclaw_base_path
         base_path = get_openclaw_base_path()
@@ -553,8 +561,14 @@ async def sync_memory():
     if not controller:
         raise HTTPException(status_code=503, detail="Service not initialized")
     try:
+        from memory_engine.services.sync_service import MemorySyncService
+        sync_service = MemorySyncService(
+            write_pipeline=controller.write_pipeline if hasattr(controller, 'write_pipeline') else None
+        )
+        sync_service.import_legacy_data()
+        sync_service.sync_sessions()
         controller.run_maintenance()
-        return {"status": "ok"}
+        return {"status": "ok", "message": "Historical data imported successfully"}
     except Exception as e:
         logger.error(f"Sync error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -600,7 +614,10 @@ async def install_core_rules():
     if not controller:
         raise HTTPException(status_code=503, detail="Service not initialized")
     try:
-        return {"status": "ok", "message": "Core rules injection not available in enhanced mode"}
+        from memory_engine.services.sync_service import MemorySyncService
+        sync_service = MemorySyncService()
+        sync_service.inject_core_rule()
+        return {"status": "ok", "message": "Core rules injected successfully"}
     except Exception as e:
         logger.error(f"Install error: {e}")
         raise HTTPException(status_code=500, detail=str(e))

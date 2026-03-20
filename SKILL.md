@@ -96,6 +96,45 @@ openclaw gateway restart
 
 Python 后端服务随插件加载自动启动。
 
+### 首次启动配置
+
+本插件安装并首次启动 OpenClaw 后，请将以下内容发送给你的Agent：
+
+```
+请将以下内容写入 `~/.openclaw/workspace/MEMORY.md`：
+## Cortex Memory Integration Rules
+
+You are equipped with the Cortex Memory engine. You must proactively manage and utilize your memory using the provided skills.
+
+1. Proactive Retrieval: If a user asks about past interactions, projects, preferences, or technical context that is not in your immediate short-term memory, you MUST use the search_memory tool to retrieve semantic memory before answering. Do not guess or hallucinate past events.
+
+2. Auto Context: For proactive memory retrieval without explicit search, use get_auto_context to get automatically retrieved relevant memories based on recent user messages, plus hot context.
+
+3. Hot Context: When you need current session context including CORTEX_RULES.md and recent data, use get_hot_context to retrieve the hot memory layer.
+
+4. Relational Queries: If the user asks about the relationship between entities (e.g., "Who worked on Project X?", "What technologies does Person Y use?"), use the query_graph tool to query the memory graph. The graph supports 16 entity types (Person, Task, Project, Event, Document, Concept, Location, Organization, Credential, Preference, Goal, Note, Resource, Topic, Entity, Unknown) and 19 relation types with schema validation.
+
+5. Memory Consolidation: When you learn a new, important fact about the user, complete a significant milestone, or resolve a complex bug, you should summarize it and use store_event to record it. Include entity type and attributes for better graph integration.
+
+6. Self-Reflection: Periodically, or when asked to review past performance, use the reflect_memory tool to generate insights from your episodic memory.
+
+7. Historical Sync: To import historical session data from OpenClaw workspace, use sync_memory tool. This is incremental and won't reprocess already imported data.
+
+8. Graph Statistics: To check the memory graph status, use CLI command cortex-memory graph --stats to see total nodes, edges, and type distribution. Use cortex-memory graph --validate to check graph integrity.
+
+9. Schema Awareness: The graph memory enforces schema constraints including type validation, cardinality (one_to_one, many_to_one, many_to_many), and acyclic detection for dependency relations. Invalid relations will be rejected.
+
+10. Trust the Engine: The memory engine handles vector search, BM25 keyword matching, and time-decay automatically. Trust its top results.
+```
+
+### 导入历史记忆
+
+如需导入 OpenClaw 原有记忆数据，发送以下提示词：
+
+```
+使用 sync_memory 工具导入历史会话记忆
+```
+
 ## 可用工具
 
 ### search_memory

@@ -81,15 +81,21 @@ class WritePipeline:
             return
 
         if not new_items:
+            logger.info(f"No new items to process in {sessions_file}")
             return
 
+        logger.info(f"Processing {len(new_items)} new items from {sessions_file}")
         grouped = self._group_by_date(new_items)
+        logger.info(f"Grouped into {len(grouped)} dates")
+        
         for date_key, contents in grouped.items():
             combined = "\n".join(contents).strip()
+            logger.info(f"Summarizing {len(contents)} items for date {date_key}")
             summary = self.llm.summarize(combined)
             if summary:
                 self._write_daily_summary(daily_summary_dir, date_key, summary)
                 self._chunk_and_store(summary, f"daily-summary:{date_key}")
+                logger.info(f"Stored summary for {date_key}: {len(summary)} chars")
 
         self._archive_file(sessions_file, archive_dir)
         state[os.path.abspath(sessions_file)] = last_seen_idx
@@ -123,7 +129,32 @@ class WritePipeline:
         return grouped
 
     def _extract_content(self, session: Dict) -> str:
-        return session.get("content") or session.get("summary") or session.get("text") or session.get("message") or json.dumps(session)
+        content = (
+            session.get("content") or 
+            session.get("summary") or 
+            session.get("text") or 
+            session.get("message")
+        )
+        
+        if content:
+            return content
+        
+        messages = session.get("messages", [])
+        if messages and isinstance(messages, list):
+            parts = []
+            for msg in messages:
+                if isinstance(msg, dict):
+                    role = msg.get("role", "")
+                    text = msg.get("content", "")
+                    if text and isinstance(text, str):
+                        parts.append(f"[{role}]: {text}")
+            if parts:
+                return "\n".join(parts)
+        
+        if session:
+            return json.dumps(session, ensure_ascii=False)
+        
+        return ""
 
     def _extract_date(self, session: Dict) -> str:
         ts = session.get("timestamp") or session.get("date") or session.get("created_at")

@@ -41,7 +41,11 @@ class MemorySyncService:
             return
 
         daily_records_pattern = os.path.join(base_dir, "workspace", "memory", "*.md")
-        for file_path in glob.glob(daily_records_pattern):
+        daily_files = glob.glob(daily_records_pattern)
+        logger.info(f"Found {len(daily_files)} daily record files")
+        
+        imported_daily = 0
+        for file_path in daily_files:
             logger.info(f"Importing daily record: {file_path}")
             try:
                 with open(file_path, "r", encoding="utf-8") as f:
@@ -54,18 +58,26 @@ class MemorySyncService:
                             source_file=file_path
                         )
                         self.semantic.add_memory(content, meta)
+                        imported_daily += 1
             except Exception as e:
                 logger.error(f"Failed to import {file_path}: {e}")
+        
+        logger.info(f"Imported {imported_daily} daily records")
 
         sessions_pattern = os.path.join(base_dir, "agents", "main", "sessions", "*.jsonl")
-        for file_path in glob.glob(sessions_pattern):
+        session_files = glob.glob(sessions_pattern)
+        logger.info(f"Found {len(session_files)} session files")
+        
+        imported_sessions = 0
+        for file_path in session_files:
             logger.info(f"Importing session log: {file_path}")
             try:
                 self.write_pipeline.process_sessions(file_path)
+                imported_sessions += 1
             except Exception as e:
                 logger.error(f"Failed to import {file_path}: {e}")
             
-        logger.info("Import complete.")
+        logger.info(f"Import complete. Daily records: {imported_daily}, Sessions: {imported_sessions}")
 
     def inject_core_rule(self):
         base_path = get_openclaw_base_path()
