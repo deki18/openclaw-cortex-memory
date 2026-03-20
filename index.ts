@@ -1312,18 +1312,13 @@ export async function register(pluginApi: OpenClawPluginApi, userConfig?: Partia
   logger = api.getLogger?.() || createConsoleLogger();
   logger.info("Registering Cortex Memory plugin...");
   
-  const apiKeys = Object.keys(api).filter(k => !k.startsWith('_'));
-  logger.info(`API keys: ${apiKeys.join(', ')}`);
-  logger.info(`userConfig param: ${JSON.stringify(sanitizeForLogging(userConfig || {}))}`);
-  if ((api as any).config) {
-    logger.info(`api.config: ${JSON.stringify(sanitizeForLogging((api as any).config))}`);
-  }
-  if ((api as any).pluginConfig) {
-    logger.info(`api.pluginConfig: ${JSON.stringify(sanitizeForLogging((api as any).pluginConfig))}`);
-  }
+  const openclawConfig = (api as any).config || {};
+  const pluginEntry = openclawConfig?.plugins?.entries?.["@openclaw/cortex-memory"];
+  const pluginConfig = pluginEntry?.config || {};
   
-  const effectiveConfig = userConfig || (api as any).config || (api as any).pluginConfig || {};
-  logger.info(`Effective config: ${JSON.stringify(sanitizeForLogging(effectiveConfig))}`);
+  logger.info(`Plugin config from openclaw.json: ${JSON.stringify(sanitizeForLogging(pluginConfig))}`);
+  
+  const effectiveConfig = userConfig || pluginConfig || {};
   
   config = { 
     embedding: effectiveConfig.embedding || { provider: "openai-compatible", model: "" },
