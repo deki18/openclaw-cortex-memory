@@ -9,7 +9,6 @@
     "type": "git",
     "url": "https://github.com/deki18/openclaw-cortex-memory"
   },
-  "entrypoint": "./dist/index.js",
   "capabilities": {
     "tools": true,
     "hooks": true,
