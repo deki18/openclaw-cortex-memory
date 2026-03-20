@@ -3,6 +3,7 @@ import sys
 import os
 from memory_engine.enhanced_controller import get_controller
 from memory_engine.config import get_config, validate_config, load_openclaw_config, find_openclaw_config
+from memory_engine.services.sync_service import MemorySyncService
 
 def main():
     parser = argparse.ArgumentParser(description="OpenClaw Cortex Memory CLI")
@@ -133,9 +134,16 @@ def main():
         controller.reflect_memory()
         print("Reflection complete.")
     elif args.command == "import":
-        controller.import_legacy_data(args.path)
+        sync_service = MemorySyncService(
+            write_pipeline=controller.write_pipeline if hasattr(controller, 'write_pipeline') else None,
+            semantic_memory=controller.semantic if hasattr(controller, 'semantic') else None
+        )
+        sync_service.import_legacy_data(args.path)
+        print("Import complete.")
     elif args.command == "install":
-        controller.inject_core_rule()
+        sync_service = MemorySyncService()
+        sync_service.inject_core_rule()
+        print("Core rules installed.")
     elif args.command == "count":
         count = controller.semantic.count()
         print(f"Total memories: {count}")

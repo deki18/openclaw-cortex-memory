@@ -3,10 +3,10 @@ import logging
 import os
 from datetime import datetime, timezone
 
-from .config import get_config, get_openclaw_base_path
-from .metadata_schema import MemoryMetadata
-from .write_pipeline import WritePipeline
-from .semantic_memory import SemanticMemory
+from ..config import get_config, get_openclaw_base_path
+from ..metadata_schema import MemoryMetadata
+from ..write_pipeline import WritePipeline
+from ..semantic_memory import SemanticMemory
 
 logger = logging.getLogger(__name__)
 

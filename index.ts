@@ -612,6 +612,10 @@ async function apiCall<T>(
 }
 
 async function searchMemoryWithFallback(args: { query: string; top_k?: number }, context: ToolContext): Promise<ToolResult> {
+  if (!args || !args.query) {
+    return { success: false, error: ERROR_CODES.INVALID_INPUT.message + " Missing 'query' parameter.", errorCode: ERROR_CODES.INVALID_INPUT.code };
+  }
+  
   if (!isEnabled) {
     if (config?.fallbackToBuiltin && builtinMemory) {
       logger.info("Using builtin memory (plugin disabled)");
@@ -682,6 +686,10 @@ async function storeEventWithFallback(
 }
 
 async function queryGraph(args: { entity: string }, _context: ToolContext): Promise<ToolResult> {
+  if (!args || !args.entity) {
+    return { success: false, error: ERROR_CODES.INVALID_INPUT.message + " Missing 'entity' parameter.", errorCode: ERROR_CODES.INVALID_INPUT.code };
+  }
+  
   if (!isEnabled) {
     return { success: false, error: ERROR_CODES.PLUGIN_DISABLED.message, errorCode: ERROR_CODES.PLUGIN_DISABLED.code };
   }
@@ -996,8 +1004,8 @@ function registerTools(): void {
         },
         required: ["query"],
       },
-      execute: async ({ args, context }: { args: Record<string, unknown>; context: ToolContext }) => 
-        searchMemoryWithFallback(args as { query: string; top_k?: number }, context),
+      execute: async (params: { args?: Record<string, unknown>; context: ToolContext }) => 
+        searchMemoryWithFallback((params.args || {}) as { query: string; top_k?: number }, params.context),
     },
     {
       name: "store_event",
@@ -1012,8 +1020,8 @@ function registerTools(): void {
         },
         required: ["summary"],
       },
-      execute: async ({ args, context }: { args: Record<string, unknown>; context: ToolContext }) => 
-        storeEventWithFallback(args as Parameters<typeof storeEventWithFallback>[0], context),
+      execute: async (params: { args?: Record<string, unknown>; context: ToolContext }) => 
+        storeEventWithFallback((params.args || {}) as Parameters<typeof storeEventWithFallback>[0], params.context),
     },
     {
       name: "query_graph",
@@ -1023,8 +1031,8 @@ function registerTools(): void {
         properties: { entity: { type: "string", description: "Entity name" } },
         required: ["entity"],
       },
-      execute: async ({ args, context }: { args: Record<string, unknown>; context: ToolContext }) => 
-        queryGraph(args as { entity: string }, context),
+      execute: async (params: { args?: Record<string, unknown>; context: ToolContext }) => 
+        queryGraph((params.args || {}) as { entity: string }, params.context),
     },
     {
       name: "get_hot_context",
@@ -1033,8 +1041,8 @@ function registerTools(): void {
         type: "object",
         properties: { limit: { type: "number", description: "Max items", default: 20 } },
       },
-      execute: async ({ args, context }: { args: Record<string, unknown>; context: ToolContext }) => 
-        getHotContext(args as { limit?: number }, context),
+      execute: async (params: { args?: Record<string, unknown>; context: ToolContext }) => 
+        getHotContext((params.args || {}) as { limit?: number }, params.context),
     },
     {
       name: "get_auto_context",
@@ -1045,29 +1053,29 @@ function registerTools(): void {
           include_hot: { type: "boolean", description: "Include hot context (default: true)", default: true }
         },
       },
-      execute: async ({ args, context }: { args: Record<string, unknown>; context: ToolContext }) => 
-        getAutoContext(args as { include_hot?: boolean }, context),
+      execute: async (params: { args?: Record<string, unknown>; context: ToolContext }) => 
+        getAutoContext((params.args || {}) as { include_hot?: boolean }, params.context),
     },
     {
       name: "reflect_memory",
       description: "Trigger reflection to convert episodic events into semantic knowledge",
       parameters: { type: "object", properties: {} },
-      execute: async ({ args, context }: { args: Record<string, unknown>; context: ToolContext }) => 
-        reflectMemory(args, context),
+      execute: async (params: { args?: Record<string, unknown>; context: ToolContext }) => 
+        reflectMemory(params.args || {}, params.context),
     },
     {
       name: "sync_memory",
       description: "Import historical session data from OpenClaw workspace into memory system. Use this to import past conversations. Incremental processing - won't reprocess already imported data.",
       parameters: { type: "object", properties: {} },
-      execute: async ({ args, context }: { args: Record<string, unknown>; context: ToolContext }) => 
-        syncMemory(args, context),
+      execute: async (params: { args?: Record<string, unknown>; context: ToolContext }) => 
+        syncMemory(params.args || {}, params.context),
     },
     {
       name: "promote_memory",
       description: "Promote frequently accessed memories to core rules",
       parameters: { type: "object", properties: {} },
-      execute: async ({ args, context }: { args: Record<string, unknown>; context: ToolContext }) => 
-        promoteMemory(args, context),
+      execute: async (params: { args?: Record<string, unknown>; context: ToolContext }) => 
+        promoteMemory(params.args || {}, params.context),
     },
     {
       name: "delete_memory",
@@ -1077,8 +1085,8 @@ function registerTools(): void {
         properties: { memory_id: { type: "string", description: "Memory ID to delete" } },
         required: ["memory_id"],
       },
-      execute: async ({ args, context }: { args: Record<string, unknown>; context: ToolContext }) => 
-        deleteMemory(args as { memory_id: string }, context),
+      execute: async (params: { args?: Record<string, unknown>; context: ToolContext }) => 
+        deleteMemory((params.args || {}) as { memory_id: string }, params.context),
     },
     {
       name: "update_memory",
@@ -1093,8 +1101,8 @@ function registerTools(): void {
         },
         required: ["memory_id"],
       },
-      execute: async ({ args, context }: { args: Record<string, unknown>; context: ToolContext }) => 
-        updateMemory(args as { memory_id: string; text?: string; type?: string; weight?: number }, context),
+      execute: async (params: { args?: Record<string, unknown>; context: ToolContext }) => 
+        updateMemory((params.args || {}) as { memory_id: string; text?: string; type?: string; weight?: number }, params.context),
     },
     {
       name: "cleanup_memories",
@@ -1106,22 +1114,22 @@ function registerTools(): void {
           memory_type: { type: "string", description: "Only clean up memories of this type" },
         },
       },
-      execute: async ({ args, context }: { args: Record<string, unknown>; context: ToolContext }) => 
-        cleanupMemories(args as { days_old?: number; memory_type?: string }, context),
+      execute: async (params: { args?: Record<string, unknown>; context: ToolContext }) => 
+        cleanupMemories((params.args || {}) as { days_old?: number; memory_type?: string }, params.context),
     },
     {
       name: "diagnostics",
       description: "Run system diagnostics to check configuration and connectivity",
       parameters: { type: "object", properties: {} },
-      execute: async ({ args, context }: { args: Record<string, unknown>; context: ToolContext }) => 
-        runDiagnostics(args, context),
+      execute: async (params: { args?: Record<string, unknown>; context: ToolContext }) => 
+        runDiagnostics(params.args || {}, params.context),
     },
     {
       name: "cortex_memory_status",
       description: "Get the current status of the Cortex Memory plugin",
       parameters: { type: "object", properties: {} },
-      execute: async ({ args, context }: { args: Record<string, unknown>; context: ToolContext }) => 
-        getPluginStatus(args, context),
+      execute: async (params: { args?: Record<string, unknown>; context: ToolContext }) => 
+        getPluginStatus(params.args || {}, params.context),
     },
   ];
   
