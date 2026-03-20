@@ -1305,10 +1305,15 @@ export async function unregister(): Promise<void> {
 
 export async function register(pluginApi: OpenClawPluginApi, userConfig?: Partial<CortexMemoryConfig>): Promise<void> {
   api = pluginApi;
+  
+  logger = api.getLogger?.() || createConsoleLogger();
+  logger.info("Registering Cortex Memory plugin...");
+  logger.info(`Received userConfig: ${JSON.stringify(sanitizeForLogging(userConfig || {}))}`);
+  
   config = { 
-    embedding: userConfig?.embedding || { provider: "openai", model: "" },
+    embedding: userConfig?.embedding || { provider: "openai-compatible", model: "" },
     llm: userConfig?.llm || { provider: "openai", model: "" },
-    reranker: userConfig?.reranker || { model: "" },
+    reranker: userConfig?.reranker || { provider: "", model: "" },
     dbPath: userConfig?.dbPath,
     autoSync: userConfig?.autoSync ?? defaultConfig.autoSync,
     autoReflect: userConfig?.autoReflect ?? defaultConfig.autoReflect,
@@ -1316,9 +1321,6 @@ export async function register(pluginApi: OpenClawPluginApi, userConfig?: Partia
     fallbackToBuiltin: userConfig?.fallbackToBuiltin ?? defaultConfig.fallbackToBuiltin,
     apiUrl: userConfig?.apiUrl ?? "http://127.0.0.1:8765",
   } as CortexMemoryConfig;
-  
-  logger = api.getLogger?.() || createConsoleLogger();
-  logger.info("Registering Cortex Memory plugin...");
   
   if (api.getBuiltinMemory) {
     builtinMemory = api.getBuiltinMemory();
