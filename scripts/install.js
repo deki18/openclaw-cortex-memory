@@ -148,15 +148,9 @@ try {
     
     const srcManifest = path.join(pluginDir, 'openclaw.plugin.json');
     const distManifest = path.join(pluginDir, 'dist', 'openclaw.plugin.json');
-    const srcDirManifest = path.join(pluginDir, 'src', 'openclaw.plugin.json');
-    if (fs.existsSync(srcManifest)) {
-      if (!fs.existsSync(distManifest)) {
-        fs.copyFileSync(srcManifest, distManifest);
-      }
-      if (!fs.existsSync(srcDirManifest)) {
-        fs.copyFileSync(srcManifest, srcDirManifest);
-      }
-      console.log('  Plugin manifest copied');
+    if (fs.existsSync(srcManifest) && !fs.existsSync(distManifest)) {
+      fs.copyFileSync(srcManifest, distManifest);
+      console.log('  Plugin manifest copied to dist/');
     }
   } catch (error) {
     const stderr = error.stderr || '';
