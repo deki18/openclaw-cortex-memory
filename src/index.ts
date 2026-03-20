@@ -1308,18 +1308,30 @@ export async function register(pluginApi: OpenClawPluginApi, userConfig?: Partia
   
   logger = api.getLogger?.() || createConsoleLogger();
   logger.info("Registering Cortex Memory plugin...");
-  logger.info(`Received userConfig: ${JSON.stringify(sanitizeForLogging(userConfig || {}))}`);
+  
+  const apiKeys = Object.keys(api).filter(k => !k.startsWith('_'));
+  logger.info(`API keys: ${apiKeys.join(', ')}`);
+  logger.info(`userConfig param: ${JSON.stringify(sanitizeForLogging(userConfig || {}))}`);
+  if ((api as any).config) {
+    logger.info(`api.config: ${JSON.stringify(sanitizeForLogging((api as any).config))}`);
+  }
+  if ((api as any).pluginConfig) {
+    logger.info(`api.pluginConfig: ${JSON.stringify(sanitizeForLogging((api as any).pluginConfig))}`);
+  }
+  
+  const effectiveConfig = userConfig || (api as any).config || (api as any).pluginConfig || {};
+  logger.info(`Effective config: ${JSON.stringify(sanitizeForLogging(effectiveConfig))}`);
   
   config = { 
-    embedding: userConfig?.embedding || { provider: "openai-compatible", model: "" },
-    llm: userConfig?.llm || { provider: "openai", model: "" },
-    reranker: userConfig?.reranker || { provider: "", model: "" },
-    dbPath: userConfig?.dbPath,
-    autoSync: userConfig?.autoSync ?? defaultConfig.autoSync,
-    autoReflect: userConfig?.autoReflect ?? defaultConfig.autoReflect,
-    enabled: userConfig?.enabled ?? defaultConfig.enabled,
-    fallbackToBuiltin: userConfig?.fallbackToBuiltin ?? defaultConfig.fallbackToBuiltin,
-    apiUrl: userConfig?.apiUrl ?? "http://127.0.0.1:8765",
+    embedding: effectiveConfig.embedding || { provider: "openai-compatible", model: "" },
+    llm: effectiveConfig.llm || { provider: "openai", model: "" },
+    reranker: effectiveConfig.reranker || { provider: "", model: "" },
+    dbPath: effectiveConfig.dbPath,
+    autoSync: effectiveConfig.autoSync ?? defaultConfig.autoSync,
+    autoReflect: effectiveConfig.autoReflect ?? defaultConfig.autoReflect,
+    enabled: effectiveConfig.enabled ?? defaultConfig.enabled,
+    fallbackToBuiltin: effectiveConfig.fallbackToBuiltin ?? defaultConfig.fallbackToBuiltin,
+    apiUrl: effectiveConfig.apiUrl ?? "http://127.0.0.1:8765",
   } as CortexMemoryConfig;
   
   if (api.getBuiltinMemory) {
