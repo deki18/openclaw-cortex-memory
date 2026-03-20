@@ -209,7 +209,10 @@ async function checkOpenClawVersion(): Promise<void> {
 }
 
 function findProjectRoot(): string {
-  let current = __dirname;
+  if (api && (api as any).rootDir) {
+    return (api as any).rootDir;
+  }
+  let current = process.cwd();
   while (current !== path.dirname(current)) {
     if (fs.existsSync(path.join(current, "api")) && fs.existsSync(path.join(current, "memory_engine"))) {
       return current;
