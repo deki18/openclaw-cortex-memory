@@ -362,7 +362,7 @@ async function startPythonService(): Promise<void> {
   return new Promise((resolve, reject) => {
     pythonProcess = spawn(pythonCmd, ["-m", "api.server"], {
       cwd: projectRoot,
-      detached: false,
+      detached: true,
       windowsHide: true,
       env,
     });
@@ -414,14 +414,37 @@ async function startPythonService(): Promise<void> {
   });
 }
 
+async function shutdownPythonApi(): Promise<void> {
+  const apiUrl = getBaseUrl();
+  try {
+    await fetch(`${apiUrl}/shutdown`, { method: "POST", signal: AbortSignal.timeout(2000) });
+    await new Promise(resolve => setTimeout(resolve, 500));
+  } catch {
+    // ignore
+  }
+}
+
 function killPythonProcess(): void {
   if (!pythonProcess) return;
   
   try {
-    if (process.platform === "win32" && pythonProcess.pid) {
-      spawn("taskkill", ["/pid", String(pythonProcess.pid), "/f", "/t"]);
-    } else {
-      pythonProcess.kill("SIGTERM");
+    const pid = pythonProcess.pid;
+    
+    if (process.platform === "win32" && pid) {
+      spawn("taskkill", ["/pid", String(pid), "/f", "/t"]);
+    } else if (pid) {
+      try {
+        process.kill(-pid, "SIGTERM");
+      } catch {
+        // process might already be dead
+      }
+      setTimeout(() => {
+        try {
+          process.kill(-pid, "SIGKILL");
+        } catch {
+          // already dead
+        }
+      }, 2000);
     }
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
@@ -431,11 +454,15 @@ function killPythonProcess(): void {
   }
 }
 
-function stopPythonService(): void {
+async function stopPythonServiceAsync(): Promise<void> {
   if (pythonProcess) {
-    logger.info("Stopping Cortex Memory Python service...");
+    await shutdownPythonApi();
     killPythonProcess();
   }
+}
+
+function stopPythonService(): void {
+  stopPythonServiceAsync();
 }
 
 function getBaseUrl(): string {
@@ -1225,19 +1252,24 @@ function setupProcessHandlers(): void {
     isShuttingDown = true;
     logger.info(`Received ${signal}, shutting down...`);
     stopConfigWatcher();
-    stopPythonService();
-    process.exit(0);
+    shutdownPythonApi().then(() => {
+      killPythonProcess();
+      process.exit(0);
+    }).catch(() => {
+      killPythonProcess();
+      process.exit(0);
+    });
   };
 
   process.on("exit", () => {
-    stopPythonService();
+    killPythonProcess();
     stopConfigWatcher();
   });
   process.on("SIGINT", () => gracefulShutdown("SIGINT"));
   process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));
   process.on("uncaughtException", (err) => {
     logger.error("Uncaught exception:", err.message);
-    stopPythonService();
+    killPythonProcess();
     stopConfigWatcher();
     process.exit(1);
   });

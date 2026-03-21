@@ -264,6 +264,15 @@ async def readiness_check():
     return {"status": "ready", "timestamp": datetime.now().isoformat()}
 
 
+@app.post("/shutdown")
+async def shutdown_server():
+    import os
+    import signal
+    logger.info("Shutdown requested via API")
+    os.kill(os.getpid(), signal.SIGTERM)
+    return {"status": "shutting down"}
+
+
 @app.get("/config")
 async def get_config_route():
     return get_config()
