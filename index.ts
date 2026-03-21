@@ -300,9 +300,26 @@ function validateConfig(cfg: CortexMemoryConfig): string[] {
   return errors;
 }
 
+async function checkPortInUse(): Promise<boolean> {
+  const apiUrl = getBaseUrl();
+  try {
+    const response = await fetch(`${apiUrl}/health`, { signal: AbortSignal.timeout(1000) });
+    return response.ok;
+  } catch {
+    return false;
+  }
+}
+
 async function startPythonService(): Promise<void> {
   if (!config) {
     throw new Error("Configuration not loaded");
+  }
+
+  const alreadyRunning = await checkPortInUse();
+  if (alreadyRunning) {
+    logger.info("Python service already running, shutting down old instance...");
+    await shutdownPythonApi();
+    await new Promise(resolve => setTimeout(resolve, 1000));
   }
 
   const projectRoot = findProjectRoot();
