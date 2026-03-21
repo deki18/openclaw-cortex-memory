@@ -161,7 +161,7 @@ def handle_config_command(args):
         if config_path:
             print(f"\n[OK] Found openclaw.json at: {config_path}")
             openclaw_config = load_openclaw_config()
-            plugin_config = openclaw_config.get("plugins", {}).get("cortex-memory", {})
+            plugin_config = openclaw_config.get("plugins", {}).get("entries", {}).get("@openclaw/cortex-memory", {}).get("config", {})
             if plugin_config:
                 print(f"[OK] Cortex Memory plugin config found in openclaw.json")
             else:

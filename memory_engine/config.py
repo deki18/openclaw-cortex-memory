@@ -79,7 +79,9 @@ def load_openclaw_config() -> Dict[str, Any]:
 
 
 def extract_plugin_config(openclaw_config: Dict[str, Any]) -> Dict[str, Any]:
-    plugin_config = openclaw_config.get("plugins", {}).get("@openclaw/cortex-memory", {})
+    entries = openclaw_config.get("plugins", {}).get("entries", {})
+    plugin_entry = entries.get("@openclaw/cortex-memory", {})
+    plugin_config = plugin_entry.get("config", {})
     result = {}
     
     embedding = plugin_config.get("embedding", {})
@@ -114,10 +116,10 @@ def extract_plugin_config(openclaw_config: Dict[str, Any]) -> Dict[str, Any]:
             result["reranker_api"] = {"model": reranker["model"]}
         if reranker.get("apiKey"):
             result["reranker_api_key"] = reranker["apiKey"]
-        if reranker.get("endpoint"):
+        if reranker.get("baseURL"):
             if "reranker_api" not in result:
                 result["reranker_api"] = {}
-            result["reranker_api"]["url"] = reranker["endpoint"]
+            result["reranker_api"]["url"] = reranker["baseURL"]
     
     if plugin_config.get("dbPath"):
         result["lancedb_path"] = plugin_config["dbPath"]

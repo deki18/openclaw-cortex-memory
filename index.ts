@@ -1047,7 +1047,7 @@ function registerTools(): void {
         type: "object",
         properties: {
           query: { type: "string", description: "Search query" },
-          top_k: { type: "number", description: "Number of results to return" },
+          top_k: { type: "integer", description: "Number of results to return" },
         },
         required: ["query"],
       },
@@ -1063,9 +1063,17 @@ function registerTools(): void {
         type: "object",
         properties: {
           summary: { type: "string", description: "Event summary" },
-          entities: { type: "array", description: "Involved entities" },
+          entities: { 
+            type: "array", 
+            description: "Involved entities",
+            items: { type: "string" }
+          },
           outcome: { type: "string", description: "Event outcome" },
-          relations: { type: "array", description: "Entity relationships" },
+          relations: { 
+            type: "array", 
+            description: "Entity relationships",
+            items: { type: "string" }
+          },
         },
         required: ["summary"],
       },
@@ -1079,7 +1087,9 @@ function registerTools(): void {
       description: "Query memory graph for entity relationships",
       parameters: {
         type: "object",
-        properties: { entity: { type: "string", description: "Entity name" } },
+        properties: { 
+          entity: { type: "string", description: "Entity name" } 
+        },
         required: ["entity"],
       },
       execute: async (params: { args?: Record<string, unknown>; context: ToolContext }) => {
@@ -1095,6 +1105,7 @@ function registerTools(): void {
         properties: { 
           include_hot: { type: "boolean", description: "Include hot context" }
         },
+        required: [],
       },
       execute: async (params: { args?: Record<string, unknown>; context: ToolContext }) => {
         const args = params.args || params;
@@ -1104,7 +1115,11 @@ function registerTools(): void {
     {
       name: "reflect_memory",
       description: "Convert events into semantic knowledge",
-      parameters: { type: "object", properties: {} },
+      parameters: { 
+        type: "object", 
+        properties: {},
+        required: [],
+      },
       execute: async (params: { args?: Record<string, unknown>; context: ToolContext }) => {
         const args = params.args || params;
         return reflectMemory(args, params.context);
@@ -1113,7 +1128,11 @@ function registerTools(): void {
     {
       name: "sync_memory",
       description: "Import historical session data into memory",
-      parameters: { type: "object", properties: {} },
+      parameters: { 
+        type: "object", 
+        properties: {},
+        required: [],
+      },
       execute: async (params: { args?: Record<string, unknown>; context: ToolContext }) => {
         const args = params.args || params;
         return syncMemory(args, params.context);
@@ -1124,7 +1143,9 @@ function registerTools(): void {
       description: "Delete a memory by ID",
       parameters: {
         type: "object",
-        properties: { memory_id: { type: "string", description: "Memory ID" } },
+        properties: { 
+          memory_id: { type: "string", description: "Memory ID" } 
+        },
         required: ["memory_id"],
       },
       execute: async (params: { args?: Record<string, unknown>; context: ToolContext }) => {
@@ -1135,7 +1156,11 @@ function registerTools(): void {
     {
       name: "diagnostics",
       description: "Check memory system status",
-      parameters: { type: "object", properties: {} },
+      parameters: { 
+        type: "object", 
+        properties: {},
+        required: [],
+      },
       execute: async (params: { args?: Record<string, unknown>; context: ToolContext }) => {
         const args = params.args || params;
         return runDiagnostics(args, params.context);
@@ -1283,7 +1308,7 @@ function registerFallbackTools(): void {
       type: "object",
       properties: {
         query: { type: "string", description: "Search query" },
-        top_k: { type: "number", description: "Number of results", default: 3 },
+        top_k: { type: "integer", description: "Number of results" },
       },
       required: ["query"],
     },
@@ -1308,7 +1333,11 @@ function registerFallbackTools(): void {
   api.registerTool({
     name: "cortex_memory_status",
     description: "Get the current status of the Cortex Memory plugin",
-    parameters: { type: "object", properties: {} },
+    parameters: { 
+      type: "object", 
+      properties: {},
+      required: [],
+    },
     execute: async ({ args, context }: { args: Record<string, unknown>; context: ToolContext }) => 
       getPluginStatus(args, context),
   });

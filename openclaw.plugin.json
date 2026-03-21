@@ -25,18 +25,17 @@
   "tools": [
     {
       "name": "search_memory",
-      "description": "Search the long-term semantic memory for relevant information about past interactions, projects, preferences, or technical context",
+      "description": "Search long-term memory for relevant information",
       "parameters": {
         "type": "object",
         "properties": {
           "query": {
             "type": "string",
-            "description": "The search query to find relevant memories"
+            "description": "Search query"
           },
           "top_k": {
-            "type": "number",
-            "description": "Number of results to return (default: 3)",
-            "default": 3
+            "type": "integer",
+            "description": "Number of results to return"
           }
         },
         "required": ["query"]
@@ -44,40 +43,30 @@
     },
     {
       "name": "store_event",
-      "description": "Store a new episodic event or significant milestone in the memory system",
+      "description": "Store a new event in memory",
       "parameters": {
         "type": "object",
         "properties": {
           "summary": {
             "type": "string",
-            "description": "A brief summary of the event"
+            "description": "Event summary"
           },
           "entities": {
             "type": "array",
-            "description": "List of entities involved in the event",
+            "description": "Involved entities",
             "items": {
-              "type": "object",
-              "properties": {
-                "id": { "type": "string" },
-                "name": { "type": "string" },
-                "type": { "type": "string" }
-              }
+              "type": "string"
             }
           },
           "outcome": {
             "type": "string",
-            "description": "The outcome or result of the event"
+            "description": "Event outcome"
           },
           "relations": {
             "type": "array",
-            "description": "Relationships between entities",
+            "description": "Entity relationships",
             "items": {
-              "type": "object",
-              "properties": {
-                "source": { "type": "string" },
-                "target": { "type": "string" },
-                "type": { "type": "string" }
-              }
+              "type": "string"
             }
           }
         },
@@ -86,133 +75,71 @@
     },
     {
       "name": "query_graph",
-      "description": "Query the memory graph for relationships involving a specific entity (person, project, technology, etc.)",
+      "description": "Query memory graph for entity relationships",
       "parameters": {
         "type": "object",
         "properties": {
           "entity": {
             "type": "string",
-            "description": "The entity name to query relationships for"
+            "description": "Entity name"
           }
         },
         "required": ["entity"]
       }
     },
     {
-      "name": "get_hot_context",
-      "description": "Get the current hot context including CORTEX_RULES.md and recent session data",
-      "parameters": {
-        "type": "object",
-        "properties": {
-          "limit": {
-            "type": "number",
-            "description": "Maximum number of recent items to include (default: 20)",
-            "default": 20
-          }
-        }
-      }
-    },
-    {
       "name": "get_auto_context",
-      "description": "Get automatically retrieved relevant memories based on recent user messages, plus hot context. Use this for proactive memory retrieval without explicit search.",
+      "description": "Get relevant memories based on recent messages",
       "parameters": {
         "type": "object",
         "properties": {
           "include_hot": {
             "type": "boolean",
-            "description": "Include hot context (default: true)",
-            "default": true
+            "description": "Include hot context"
           }
-        }
+        },
+        "required": []
       }
     },
     {
       "name": "reflect_memory",
-      "description": "Trigger the reflection engine to process recent events into long-term semantic knowledge",
+      "description": "Convert events into semantic knowledge",
       "parameters": {
         "type": "object",
-        "properties": {}
+        "properties": {},
+        "required": []
       }
     },
     {
       "name": "sync_memory",
-      "description": "Import historical session data from OpenClaw workspace into memory system. Use this to import past conversations. Incremental processing - won't reprocess already imported data.",
+      "description": "Import historical session data into memory",
       "parameters": {
         "type": "object",
-        "properties": {}
-      }
-    },
-    {
-      "name": "promote_memory",
-      "description": "Promote frequently accessed memories to core rules",
-      "parameters": {
-        "type": "object",
-        "properties": {}
+        "properties": {},
+        "required": []
       }
     },
     {
       "name": "delete_memory",
-      "description": "Delete a specific memory by ID",
+      "description": "Delete a memory by ID",
       "parameters": {
         "type": "object",
         "properties": {
           "memory_id": {
             "type": "string",
-            "description": "Memory ID to delete"
+            "description": "Memory ID"
           }
         },
         "required": ["memory_id"]
-      }
-    },
-    {
-      "name": "update_memory",
-      "description": "Update a specific memory's content, type, or weight",
-      "parameters": {
-        "type": "object",
-        "properties": {
-          "memory_id": {
-            "type": "string",
-            "description": "Memory ID to update"
-          },
-          "text": {
-            "type": "string",
-            "description": "New text content"
-          },
-          "type": {
-            "type": "string",
-            "description": "New memory type"
-          },
-          "weight": {
-            "type": "number",
-            "description": "New weight value"
-          }
-        },
-        "required": ["memory_id"]
-      }
-    },
-    {
-      "name": "cleanup_memories",
-      "description": "Clean up old memories beyond specified days",
-      "parameters": {
-        "type": "object",
-        "properties": {
-          "days_old": {
-            "type": "number",
-            "description": "Delete memories older than this many days (default: 90)"
-          },
-          "memory_type": {
-            "type": "string",
-            "description": "Only clean up memories of this type"
-          }
-        }
       }
     },
     {
       "name": "diagnostics",
-      "description": "Run system diagnostics to check configuration and connectivity",
+      "description": "Check memory system status",
       "parameters": {
         "type": "object",
-        "properties": {}
+        "properties": {},
+        "required": []
       }
     }
   ],
