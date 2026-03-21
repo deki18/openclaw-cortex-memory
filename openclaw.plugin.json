@@ -13,7 +13,8 @@
     "tools": true,
     "hooks": true,
     "cli": true,
-    "channels": false
+    "channels": false,
+    "memory": true
   },
   "hooks": [
     "message_received",
