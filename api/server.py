@@ -13,6 +13,10 @@ from memory_engine.config import load_config, get_config, setup_logging, validat
 setup_logging()
 logger = logging.getLogger(__name__)
 
+logging.getLogger("uvicorn").setLevel(logging.WARNING)
+logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
+logging.getLogger("uvicorn.error").setLevel(logging.WARNING)
+
 controller: Optional[EnhancedMemoryController] = None
 
 

@@ -12,7 +12,7 @@ except Exception:
     yaml = None
 
 LOG_FORMAT = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-LOG_LEVEL = logging.INFO
+LOG_LEVEL = logging.WARNING
 
 logger = logging.getLogger(__name__)
 
@@ -46,7 +46,7 @@ DEFAULTS = {
     },
     "time_decay_halflife": 30,
     "promotion_hit_threshold": 3,
-    "log_level": "INFO"
+    "log_level": "WARNING"
 }
 
 _CONFIG: Optional[Dict[str, Any]] = None
