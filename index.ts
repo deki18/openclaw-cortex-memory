@@ -146,6 +146,7 @@ let config: CortexMemoryConfig | null = null;
 let logger: Logger;
 let pythonProcess: ChildProcess | null = null;
 let isShuttingDown = false;
+let isInitializing = false;
 let isEnabled = true;
 let api: OpenClawPluginApi | null = null;
 let builtinMemory: BuiltinMemory | null = null;
@@ -1394,6 +1395,7 @@ export async function unregister(): Promise<void> {
   stopPythonService();
   
   isEnabled = false;
+  isInitializing = false;
   api = null;
   config = null;
   builtinMemory = null;
@@ -1405,6 +1407,11 @@ export async function unregister(): Promise<void> {
 }
 
 export async function register(pluginApi: OpenClawPluginApi, userConfig?: Partial<CortexMemoryConfig>): Promise<void> {
+  if (isInitializing || isEnabled) {
+    return;
+  }
+  isInitializing = true;
+  
   api = pluginApi;
   
   logger = api.getLogger?.() || createConsoleLogger();
@@ -1464,8 +1471,10 @@ export async function register(pluginApi: OpenClawPluginApi, userConfig?: Partia
       await waitForService();
       registerTools();
       registerHooks();
+      isInitializing = false;
       logger.info("Cortex Memory plugin started successfully");
     } catch (error) {
+      isInitializing = false;
       const message = error instanceof Error ? error.message : String(error);
       logger.error(`Failed to start Cortex Memory: ${message}`);
       
@@ -1478,6 +1487,7 @@ export async function register(pluginApi: OpenClawPluginApi, userConfig?: Partia
       }
     }
   } else {
+    isInitializing = false;
     if (config.fallbackToBuiltin && builtinMemory) {
       registerFallbackTools();
     }
