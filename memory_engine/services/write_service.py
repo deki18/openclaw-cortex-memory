@@ -1,8 +1,8 @@
 import logging
 from datetime import datetime, timezone
 
-from .metadata_schema import MemoryMetadata
-from .semantic_memory import SemanticMemory
+from ..metadata_schema import MemoryMetadata
+from ..semantic_memory import SemanticMemory
 
 logger = logging.getLogger(__name__)
 
