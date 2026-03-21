@@ -12,7 +12,7 @@
   "capabilities": {
     "tools": true,
     "hooks": true,
-    "cli": false,
+    "cli": true,
     "channels": false
   },
   "hooks": [
