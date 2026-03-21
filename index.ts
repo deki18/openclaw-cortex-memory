@@ -381,7 +381,7 @@ async function startPythonService(): Promise<void> {
       cwd: projectRoot,
       detached: true,
       windowsHide: true,
-      env,
+      env: { ...env, PYTHONWARNINGS: "ignore::RuntimeWarning" },
     });
 
     let started = false;
