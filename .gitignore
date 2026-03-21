@@ -4,6 +4,9 @@ package-lock.json
 
 venv/
 
+# Trae rules
+.trae/
+
 # Python cache
 __pycache__/
 *.py[cod]

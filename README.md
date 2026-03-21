@@ -176,20 +176,30 @@ cortex-memory import --path ~/.openclaw
 
 ## CLI 命令
 
+CLI 命令需要在插件目录下运行：
+
 ```bash
-cortex-memory status              # 查看插件状态
-cortex-memory enable              # 启用插件
-cortex-memory disable             # 禁用插件（回退到内置记忆）
-cortex-memory uninstall           # 卸载插件
-cortex-memory uninstall --keep-data  # 卸载但保留数据
-cortex-memory config --validate   # 验证配置
-cortex-memory import --path PATH  # 导入历史数据
-cortex-memory doctor              # 系统诊断
-cortex-memory graph <entity>      # 查询实体关系
-cortex-memory graph --stats       # 显示图谱统计
-cortex-memory graph --validate    # 验证图谱完整性
-cortex-memory graph --types       # 列出 Schema 类型
-cortex-memory graph --relations   # 列出关系类型
+cd ~/.openclaw/extensions/openclaw-cortex-memory
+npx cortex-memory status              # 查看插件状态
+npx cortex-memory enable              # 启用插件
+npx cortex-memory disable             # 禁用插件（回退到内置记忆）
+npx cortex-memory uninstall           # 卸载插件
+npx cortex-memory uninstall --keep-data  # 卸载但保留数据
+npx cortex-memory config --validate   # 验证配置
+npx cortex-memory import --path PATH  # 导入历史数据
+npx cortex-memory doctor              # 系统诊断
+npx cortex-memory graph <entity>      # 查询实体关系
+npx cortex-memory graph --stats       # 显示图谱统计
+npx cortex-memory graph --validate    # 验证图谱完整性
+npx cortex-memory graph --types       # 列出 Schema 类型
+npx cortex-memory graph --relations   # 列出关系类型
+```
+
+或者直接运行脚本：
+
+```bash
+cd ~/.openclaw/extensions/openclaw-cortex-memory
+node scripts/cli.js status
 ```
 
 ## 数据存储

@@ -363,13 +363,16 @@ You are equipped with the Cortex Memory engine. You must proactively manage and 
 
 ### CLI 命令
 
+CLI 命令需要在插件目录下运行：
+
 ```bash
-cortex-memory enable              # 启用插件
-cortex-memory disable             # 禁用插件（回退到内置记忆）
-cortex-memory status              # 查看状态
-cortex-memory uninstall           # 完全卸载
-cortex-memory uninstall --keep-data  # 卸载但保留数据
-cortex-memory doctor              # 运行诊断
+cd ~/.openclaw/extensions/openclaw-cortex-memory
+npx cortex-memory enable              # 启用插件
+npx cortex-memory disable             # 禁用插件（回退到内置记忆）
+npx cortex-memory status              # 查看状态
+npx cortex-memory uninstall           # 完全卸载
+npx cortex-memory uninstall --keep-data  # 卸载但保留数据
+npx cortex-memory doctor              # 运行诊断
 ```
 
 ### 配置热插拔
