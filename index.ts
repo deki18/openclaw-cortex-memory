@@ -22,7 +22,7 @@ interface RerankerConfig {
   provider?: string;
   model: string;
   apiKey?: string;
-  endpoint?: string;
+  baseURL?: string;
 }
 
 interface CortexMemoryConfig {
@@ -373,8 +373,8 @@ async function startPythonService(): Promise<void> {
   if (config.reranker.apiKey) {
     env.CORTEX_MEMORY_RERANKER_API_KEY = config.reranker.apiKey;
   }
-  if (config.reranker.endpoint) {
-    env.CORTEX_MEMORY_RERANKER_ENDPOINT = config.reranker.endpoint;
+  if (config.reranker.baseURL) {
+    env.CORTEX_MEMORY_RERANKER_ENDPOINT = config.reranker.baseURL;
   }
 
   return new Promise((resolve, reject) => {

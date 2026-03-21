@@ -163,7 +163,7 @@ interface PluginApi {
             "provider": "openai-compatible",
             "model": "text-embedding-3-large",
             "apiKey": "${EMBEDDING_API_KEY}",
-            "endpoint": "https://api.example.com/v1"
+            "baseURL": "https://api.example.com/v1"
           },
           "llm": {
             "provider": "openai",

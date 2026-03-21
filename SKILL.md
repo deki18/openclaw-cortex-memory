@@ -76,7 +76,7 @@ npm install
             "provider": "siliconflow",
             "model": "BAAI/bge-reranker-v2-m3",
             "apiKey": "${SILICONFLOW_API_KEY}",
-            "endpoint": "https://api.siliconflow.cn/v1/rerank"
+            "baseURL": "https://api.siliconflow.cn/v1/rerank"
           },
           "autoSync": true,
           "autoReflect": false

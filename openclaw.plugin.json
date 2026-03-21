@@ -236,39 +236,17 @@
       },
       "embedding": {
         "type": "object",
-        "description": "Embedding model configuration",
-        "properties": {
-          "provider": { "type": "string" },
-          "model": { "type": "string" },
-          "dimensions": { "type": "number" },
-          "apiKey": { "type": "string" },
-          "endpoint": { "type": "string" }
-        },
-        "required": ["provider", "model", "apiKey"]
+        "description": "Embedding model configuration"
       },
       "llm": {
         "type": "object",
-        "description": "LLM configuration",
-        "properties": {
-          "provider": { "type": "string" },
-          "model": { "type": "string" },
-          "apiKey": { "type": "string" },
-          "endpoint": { "type": "string" }
-        },
-        "required": ["provider", "model", "apiKey"]
+        "description": "LLM configuration"
       },
       "reranker": {
         "type": "object",
-        "description": "Reranker configuration",
-        "properties": {
-          "provider": { "type": "string" },
-          "model": { "type": "string" },
-          "apiKey": { "type": "string" },
-          "endpoint": { "type": "string" }
-        }
+        "description": "Reranker configuration"
       }
-    },
-    "required": ["embedding", "llm"]
+    }
   },
   "python": {
     "required": true,
