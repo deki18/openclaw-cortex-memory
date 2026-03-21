@@ -1191,17 +1191,14 @@ function registerHooks(): void {
   
   for (const hook of hooks) {
     try {
-      logger.info(`Registering hook via api.on: event="${hook.event}"`);
       if (typeof (api as any).on === 'function') {
         (api as any).on(hook.event, hook.handler);
         registeredHooks.push(hook.event);
-        logger.info(`Hook ${hook.event} registered successfully via api.on`);
       } else {
         logger.warn(`api.on is not available, skipping hook ${hook.event}`);
       }
     } catch (e) {
       logger.error(`Failed to register hook ${hook.event}: ${e instanceof Error ? e.message : String(e)}`);
-      logger.error(`Stack: ${e instanceof Error ? e.stack : 'N/A'}`);
       throw e;
     }
   }
@@ -1213,10 +1210,10 @@ function unregisterHooks(): void {
   for (const event of registeredHooks) {
     try {
       if ((api as any).off) {
-        logger.info(`Unregistering hook ${event} via api.off`);
+        (api as any).off(event);
       }
     } catch (e) {
-      logger.warn(`Failed to unregister hook ${event}: ${e}`);
+      // ignore
     }
   }
   registeredHooks = [];
@@ -1362,13 +1359,10 @@ export async function register(pluginApi: OpenClawPluginApi, userConfig?: Partia
   api = pluginApi;
   
   logger = api.getLogger?.() || createConsoleLogger();
-  logger.info("Registering Cortex Memory plugin...");
   
   const openclawConfig = (api as any).config || {};
   const pluginEntry = openclawConfig?.plugins?.entries?.["@openclaw/cortex-memory"];
   const pluginConfig = pluginEntry?.config || {};
-  
-  logger.info(`Plugin config from openclaw.json: ${JSON.stringify(sanitizeForLogging(pluginConfig))}`);
   
   const effectiveConfig = userConfig || pluginConfig || {};
   
@@ -1401,7 +1395,6 @@ export async function register(pluginApi: OpenClawPluginApi, userConfig?: Partia
     enabled: config.enabled,
     fallbackToBuiltin: config.fallbackToBuiltin,
   });
-  logger.info(`Configuration: ${JSON.stringify(safeConfig)}`);
 
   await checkOpenClawVersion();
   
@@ -1420,42 +1413,24 @@ export async function register(pluginApi: OpenClawPluginApi, userConfig?: Partia
     try {
       await startPythonService();
       await waitForService();
-      logger.info("Cortex Memory Python service started successfully");
-      try {
-        registerTools();
-        logger.info("Tools registered successfully");
-      } catch (toolError) {
-        const message = toolError instanceof Error ? toolError.message : String(toolError);
-        logger.error(`Failed to register tools: ${message}`);
-        throw toolError;
-      }
-      try {
-        registerHooks();
-        logger.info("Hooks registered successfully");
-      } catch (hookError) {
-        const message = hookError instanceof Error ? hookError.message : String(hookError);
-        logger.error(`Failed to register hooks: ${message}`);
-        throw hookError;
-      }
+      registerTools();
+      registerHooks();
+      logger.info("Cortex Memory plugin started successfully");
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      logger.error(`Failed to start Cortex Memory service: ${message}`);
+      logger.error(`Failed to start Cortex Memory: ${message}`);
       
       if (config.fallbackToBuiltin && builtinMemory) {
-        logger.info("Falling back to builtin memory system");
+        logger.info("Falling back to builtin memory");
         isEnabled = false;
         registerFallbackTools();
       } else {
-        throw new Error(`Cortex Memory plugin initialization failed: ${message}`);
+        throw new Error(`Cortex Memory initialization failed: ${message}`);
       }
     }
   } else {
-    logger.info("Cortex Memory plugin is disabled in configuration");
     if (config.fallbackToBuiltin && builtinMemory) {
-      logger.info("Using builtin memory system");
       registerFallbackTools();
     }
   }
-
-  logger.info("Cortex Memory plugin registration complete");
 }
