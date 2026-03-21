@@ -1042,12 +1042,12 @@ function registerTools(): void {
  const tools = [
     {
       name: "search_memory",
-      description: "Search the long-term semantic memory for relevant information",
+      description: "Search long-term memory for relevant information",
       parameters: {
         type: "object",
         properties: {
           query: { type: "string", description: "Search query" },
-          top_k: { type: "number", description: "Number of results", default: 3 },
+          top_k: { type: "number", description: "Number of results to return" },
         },
         required: ["query"],
       },
@@ -1058,7 +1058,7 @@ function registerTools(): void {
     },
     {
       name: "store_event",
-      description: "Store a new episodic event in the memory system",
+      description: "Store a new event in memory",
       parameters: {
         type: "object",
         properties: {
@@ -1076,7 +1076,7 @@ function registerTools(): void {
     },
     {
       name: "query_graph",
-      description: "Query the memory graph for entity relationships",
+      description: "Query memory graph for entity relationships",
       parameters: {
         type: "object",
         properties: { entity: { type: "string", description: "Entity name" } },
@@ -1088,24 +1088,12 @@ function registerTools(): void {
       },
     },
     {
-      name: "get_hot_context",
-      description: "Get current hot context including CORTEX_RULES.md and recent data",
-      parameters: {
-        type: "object",
-        properties: { limit: { type: "number", description: "Max items", default: 20 } },
-      },
-      execute: async (params: { args?: Record<string, unknown>; context: ToolContext }) => {
-        const args = params.args || params;
-        return getHotContext(args as { limit?: number }, params.context);
-      },
-    },
-    {
       name: "get_auto_context",
-      description: "Get automatically retrieved relevant memories based on recent user messages, plus hot context. Use this for proactive memory retrieval without explicit search.",
+      description: "Get relevant memories based on recent messages",
       parameters: {
         type: "object",
         properties: { 
-          include_hot: { type: "boolean", description: "Include hot context (default: true)", default: true }
+          include_hot: { type: "boolean", description: "Include hot context" }
         },
       },
       execute: async (params: { args?: Record<string, unknown>; context: ToolContext }) => {
@@ -1115,7 +1103,7 @@ function registerTools(): void {
     },
     {
       name: "reflect_memory",
-      description: "Trigger reflection to convert episodic events into semantic knowledge",
+      description: "Convert events into semantic knowledge",
       parameters: { type: "object", properties: {} },
       execute: async (params: { args?: Record<string, unknown>; context: ToolContext }) => {
         const args = params.args || params;
@@ -1124,7 +1112,7 @@ function registerTools(): void {
     },
     {
       name: "sync_memory",
-      description: "Import historical session data from OpenClaw workspace into memory system. Use this to import past conversations. Incremental processing - won't reprocess already imported data.",
+      description: "Import historical session data into memory",
       parameters: { type: "object", properties: {} },
       execute: async (params: { args?: Record<string, unknown>; context: ToolContext }) => {
         const args = params.args || params;
@@ -1132,20 +1120,11 @@ function registerTools(): void {
       },
     },
     {
-      name: "promote_memory",
-      description: "Promote frequently accessed memories to core rules",
-      parameters: { type: "object", properties: {} },
-      execute: async (params: { args?: Record<string, unknown>; context: ToolContext }) => {
-        const args = params.args || params;
-        return promoteMemory(args, params.context);
-      },
-    },
-    {
       name: "delete_memory",
-      description: "Delete a specific memory by ID",
+      description: "Delete a memory by ID",
       parameters: {
         type: "object",
-        properties: { memory_id: { type: "string", description: "Memory ID to delete" } },
+        properties: { memory_id: { type: "string", description: "Memory ID" } },
         required: ["memory_id"],
       },
       execute: async (params: { args?: Record<string, unknown>; context: ToolContext }) => {
@@ -1154,54 +1133,12 @@ function registerTools(): void {
       },
     },
     {
-      name: "update_memory",
-      description: "Update a specific memory's content, type, or weight",
-      parameters: {
-        type: "object",
-        properties: {
-          memory_id: { type: "string", description: "Memory ID to update" },
-          text: { type: "string", description: "New text content" },
-          type: { type: "string", description: "New memory type" },
-          weight: { type: "number", description: "New weight value" },
-        },
-        required: ["memory_id"],
-      },
-      execute: async (params: { args?: Record<string, unknown>; context: ToolContext }) => {
-        const args = params.args || params;
-        return updateMemory(args as { memory_id: string; text?: string; type?: string; weight?: number }, params.context);
-      },
-    },
-    {
-      name: "cleanup_memories",
-      description: "Clean up old memories beyond specified days",
-      parameters: {
-        type: "object",
-        properties: {
-          days_old: { type: "number", description: "Delete memories older than this many days (default: 90)" },
-          memory_type: { type: "string", description: "Only clean up memories of this type" },
-        },
-      },
-      execute: async (params: { args?: Record<string, unknown>; context: ToolContext }) => {
-        const args = params.args || params;
-        return cleanupMemories(args as { days_old?: number; memory_type?: string }, params.context);
-      },
-    },
-    {
       name: "diagnostics",
-      description: "Run system diagnostics to check configuration and connectivity",
+      description: "Check memory system status",
       parameters: { type: "object", properties: {} },
       execute: async (params: { args?: Record<string, unknown>; context: ToolContext }) => {
         const args = params.args || params;
         return runDiagnostics(args, params.context);
-      },
-    },
-    {
-      name: "cortex_memory_status",
-      description: "Get the current status of the Cortex Memory plugin",
-      parameters: { type: "object", properties: {} },
-      execute: async (params: { args?: Record<string, unknown>; context: ToolContext }) => {
-        const args = params.args || params;
-        return getPluginStatus(args, params.context);
       },
     },
   ];
