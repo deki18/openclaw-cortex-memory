@@ -1372,7 +1372,7 @@ export async function unregister(): Promise<void> {
   logger.info("Cortex Memory plugin unregistered successfully");
 }
 
-export async function register(pluginApi: OpenClawPluginApi, userConfig?: Partial<CortexMemoryConfig>): Promise<void> {
+export function register(pluginApi: OpenClawPluginApi, userConfig?: Partial<CortexMemoryConfig>): void {
   if (isInitializing || isEnabled) {
     return;
   }
@@ -1418,7 +1418,7 @@ export async function register(pluginApi: OpenClawPluginApi, userConfig?: Partia
     fallbackToBuiltin: config.fallbackToBuiltin,
   });
 
-  await checkOpenClawVersion();
+  checkOpenClawVersion().catch(e => logger.warn(`Version check failed: ${e}`));
   
   configPath = findOpenClawConfig();
   if (configPath) {
@@ -1431,31 +1431,32 @@ export async function register(pluginApi: OpenClawPluginApi, userConfig?: Partia
   const initialEnabled = loadPluginEnabledState();
   isEnabled = config.enabled !== false && initialEnabled;
 
+  registerTools();
+  registerHooks();
+  isInitializing = false;
+  logger.info("Cortex Memory plugin registered successfully");
+
   if (isEnabled) {
-    try {
-      await startPythonService();
-      await waitForService();
-      registerTools();
-      registerHooks();
-      isInitializing = false;
-      logger.info("Cortex Memory plugin started successfully");
-    } catch (error) {
-      isInitializing = false;
+    initializeAsync().catch(error => {
       const message = error instanceof Error ? error.message : String(error);
-      logger.error(`Failed to start Cortex Memory: ${message}`);
+      logger.error(`Failed to initialize Cortex Memory: ${message}`);
       
-      if (config.fallbackToBuiltin && builtinMemory) {
+      if (config?.fallbackToBuiltin && builtinMemory) {
         logger.info("Falling back to builtin memory");
         isEnabled = false;
-        registerFallbackTools();
-      } else {
-        throw new Error(`Cortex Memory initialization failed: ${message}`);
       }
-    }
-  } else {
-    isInitializing = false;
-    if (config.fallbackToBuiltin && builtinMemory) {
-      registerFallbackTools();
-    }
+    });
+  } else if (config?.fallbackToBuiltin && builtinMemory) {
+    registerFallbackTools();
+  }
+}
+
+async function initializeAsync(): Promise<void> {
+  try {
+    await startPythonService();
+    await waitForService();
+    logger.info("Cortex Memory Python service started successfully");
+  } catch (error) {
+    throw error;
   }
 }
