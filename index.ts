@@ -1050,6 +1050,7 @@ function registerTools(): void {
           top_k: { type: "integer", description: "Number of results to return" },
         },
         required: ["query"],
+        additionalProperties: false,
       },
       execute: async (params: { args?: Record<string, unknown>; context: ToolContext }) => {
         const args = params.args || params;
@@ -1076,6 +1077,7 @@ function registerTools(): void {
           },
         },
         required: ["summary"],
+        additionalProperties: false,
       },
       execute: async (params: { args?: Record<string, unknown>; context: ToolContext }) => {
         const args = params.args || params;
@@ -1091,6 +1093,7 @@ function registerTools(): void {
           entity: { type: "string", description: "Entity name" } 
         },
         required: ["entity"],
+        additionalProperties: false,
       },
       execute: async (params: { args?: Record<string, unknown>; context: ToolContext }) => {
         const args = params.args || params;
@@ -1106,6 +1109,7 @@ function registerTools(): void {
           include_hot: { type: "boolean", description: "Include hot context" }
         },
         required: [],
+        additionalProperties: false,
       },
       execute: async (params: { args?: Record<string, unknown>; context: ToolContext }) => {
         const args = params.args || params;
@@ -1119,6 +1123,7 @@ function registerTools(): void {
         type: "object", 
         properties: {},
         required: [],
+        additionalProperties: false,
       },
       execute: async (params: { args?: Record<string, unknown>; context: ToolContext }) => {
         const args = params.args || params;
@@ -1132,6 +1137,7 @@ function registerTools(): void {
         type: "object", 
         properties: {},
         required: [],
+        additionalProperties: false,
       },
       execute: async (params: { args?: Record<string, unknown>; context: ToolContext }) => {
         const args = params.args || params;
@@ -1147,6 +1153,7 @@ function registerTools(): void {
           memory_id: { type: "string", description: "Memory ID" } 
         },
         required: ["memory_id"],
+        additionalProperties: false,
       },
       execute: async (params: { args?: Record<string, unknown>; context: ToolContext }) => {
         const args = params.args || params;
@@ -1160,6 +1167,7 @@ function registerTools(): void {
         type: "object", 
         properties: {},
         required: [],
+        additionalProperties: false,
       },
       execute: async (params: { args?: Record<string, unknown>; context: ToolContext }) => {
         const args = params.args || params;
@@ -1311,6 +1319,7 @@ function registerFallbackTools(): void {
         top_k: { type: "integer", description: "Number of results" },
       },
       required: ["query"],
+      additionalProperties: false,
     },
     execute: async ({ args, context }: { args: Record<string, unknown>; context: ToolContext }) => 
       searchMemoryWithFallback(args as { query: string; top_k?: number }, context),
@@ -1325,6 +1334,7 @@ function registerFallbackTools(): void {
         summary: { type: "string", description: "Event summary" },
       },
       required: ["summary"],
+      additionalProperties: false,
     },
     execute: async ({ args, context }: { args: Record<string, unknown>; context: ToolContext }) => 
       storeEventWithFallback(args as { summary: string }, context),
@@ -1337,6 +1347,7 @@ function registerFallbackTools(): void {
       type: "object", 
       properties: {},
       required: [],
+      additionalProperties: false,
     },
     execute: async ({ args, context }: { args: Record<string, unknown>; context: ToolContext }) => 
       getPluginStatus(args, context),

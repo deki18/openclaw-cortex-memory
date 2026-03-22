@@ -38,7 +38,8 @@
             "description": "Number of results to return"
           }
         },
-        "required": ["query"]
+        "required": ["query"],
+        "additionalProperties": false
       }
     },
     {
@@ -70,7 +71,8 @@
             }
           }
         },
-        "required": ["summary"]
+        "required": ["summary"],
+        "additionalProperties": false
       }
     },
     {
@@ -84,7 +86,8 @@
             "description": "Entity name"
           }
         },
-        "required": ["entity"]
+        "required": ["entity"],
+        "additionalProperties": false
       }
     },
     {
@@ -98,7 +101,8 @@
             "description": "Include hot context"
           }
         },
-        "required": []
+        "required": [],
+        "additionalProperties": false
       }
     },
     {
@@ -107,7 +111,8 @@
       "parameters": {
         "type": "object",
         "properties": {},
-        "required": []
+        "required": [],
+        "additionalProperties": false
       }
     },
     {
@@ -116,7 +121,8 @@
       "parameters": {
         "type": "object",
         "properties": {},
-        "required": []
+        "required": [],
+        "additionalProperties": false
       }
     },
     {
@@ -130,7 +136,8 @@
             "description": "Memory ID"
           }
         },
-        "required": ["memory_id"]
+        "required": ["memory_id"],
+        "additionalProperties": false
       }
     },
     {
@@ -139,7 +146,8 @@
       "parameters": {
         "type": "object",
         "properties": {},
-        "required": []
+        "required": [],
+        "additionalProperties": false
       }
     }
   ],
