@@ -1383,7 +1383,7 @@ export async function register(pluginApi: OpenClawPluginApi, userConfig?: Partia
   logger = api.getLogger?.() || createConsoleLogger();
   
   const openclawConfig = (api as any).config || {};
-  const pluginEntry = openclawConfig?.plugins?.entries?.["@openclaw/cortex-memory"];
+  const pluginEntry = openclawConfig?.plugins?.entries?.["openclaw-cortex-memory"];
   const pluginConfig = pluginEntry?.config || {};
   
   const effectiveConfig = userConfig || pluginConfig || {};

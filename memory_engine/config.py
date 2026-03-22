@@ -80,7 +80,7 @@ def load_openclaw_config() -> Dict[str, Any]:
 
 def extract_plugin_config(openclaw_config: Dict[str, Any]) -> Dict[str, Any]:
     entries = openclaw_config.get("plugins", {}).get("entries", {})
-    plugin_entry = entries.get("@openclaw/cortex-memory", {})
+    plugin_entry = entries.get("openclaw-cortex-memory", {})
     plugin_config = plugin_entry.get("config", {})
     result = {}
     

@@ -43,10 +43,10 @@ npm install
       "paths": ["~/.openclaw/extensions/openclaw-cortex-memory"]
     },
     "slots": {
-      "memory": "@openclaw/cortex-memory"
+      "memory": "openclaw-cortex-memory"
     },
     "entries": {
-      "@openclaw/cortex-memory": {
+      "openclaw-cortex-memory": {
         "enabled": true,
         "config": {
           "embedding": {

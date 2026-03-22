@@ -4,7 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const { execSync, spawn } = require('child_process');
 
-const PLUGIN_NAME = '@openclaw/cortex-memory';
+const PLUGIN_NAME = 'openclaw-cortex-memory';
 
 function findProjectRoot() {
   let current = __dirname;
