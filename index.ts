@@ -8,6 +8,7 @@ interface EmbeddingConfig {
   model: string;
   apiKey?: string;
   baseURL?: string;
+  baseUrl?: string;
   dimensions?: number;
 }
 
@@ -16,6 +17,7 @@ interface LLMConfig {
   model: string;
   apiKey?: string;
   baseURL?: string;
+  baseUrl?: string;
 }
 
 interface RerankerConfig {
@@ -23,6 +25,7 @@ interface RerankerConfig {
   model: string;
   apiKey?: string;
   baseURL?: string;
+  baseUrl?: string;
 }
 
 interface CortexMemoryConfig {
@@ -1500,11 +1503,26 @@ export function register(pluginApi: OpenClawPluginApi, userConfig?: Partial<Cort
   const pluginConfig = Object.keys(apiPluginConfig).length > 0 ? apiPluginConfig : (pluginEntry?.config || {});
   
   const effectiveConfig = userConfig || pluginConfig || {};
+  const embeddingConfigRaw = (effectiveConfig.embedding || { provider: "openai-compatible", model: "" }) as EmbeddingConfig;
+  const llmConfigRaw = (effectiveConfig.llm || { provider: "openai", model: "" }) as LLMConfig;
+  const rerankerConfigRaw = (effectiveConfig.reranker || { provider: "", model: "" }) as RerankerConfig;
+  const embeddingConfig: EmbeddingConfig = {
+    ...embeddingConfigRaw,
+    baseURL: embeddingConfigRaw.baseURL ?? embeddingConfigRaw.baseUrl,
+  };
+  const llmConfig: LLMConfig = {
+    ...llmConfigRaw,
+    baseURL: llmConfigRaw.baseURL ?? llmConfigRaw.baseUrl,
+  };
+  const rerankerConfig: RerankerConfig = {
+    ...rerankerConfigRaw,
+    baseURL: rerankerConfigRaw.baseURL ?? rerankerConfigRaw.baseUrl,
+  };
   
   config = { 
-    embedding: effectiveConfig.embedding || { provider: "openai-compatible", model: "" },
-    llm: effectiveConfig.llm || { provider: "openai", model: "" },
-    reranker: effectiveConfig.reranker || { provider: "", model: "" },
+    embedding: embeddingConfig,
+    llm: llmConfig,
+    reranker: rerankerConfig,
     dbPath: effectiveConfig.dbPath,
     autoSync: effectiveConfig.autoSync ?? defaultConfig.autoSync,
     autoReflect: effectiveConfig.autoReflect ?? defaultConfig.autoReflect,
