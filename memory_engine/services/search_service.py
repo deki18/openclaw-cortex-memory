@@ -1,8 +1,8 @@
 import logging
 from typing import List, Dict, Any, Optional
 
-from .retrieval_pipeline import RetrievalPipeline
-from .semantic_memory import SemanticMemory
+from ..retrieval_pipeline import RetrievalPipeline
+from ..semantic_memory import SemanticMemory
 
 logger = logging.getLogger(__name__)
 
@@ -50,7 +50,7 @@ class MemorySearchService:
 
     def get_hot_context(self, limit: int = 20) -> List[Dict[str, Any]]:
         try:
-            from .hot_memory import HotMemory
+            from ..hot_memory import HotMemory
             hot = HotMemory()
             return hot.build_hot_context(limit=limit)
         except Exception as e:

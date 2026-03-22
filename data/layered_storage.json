@@ -1,0 +1,581 @@
+{
+  "hierarchy": {
+    "L0-1db77dcd": {
+      "level": "L0",
+      "parent": null,
+      "children": [],
+      "metadata": {
+        "source": "message",
+        "agent": "openclaw",
+        "batch_id": "",
+        "created_at": 1773998395.539063,
+        "updated_at": 1773998395.539082,
+        "last_accessed": 0.0,
+        "quality_level": "medium",
+        "access_count": 0,
+        "storage_tier": "warm",
+        "status": "active",
+        "version": 1
+      },
+      "structured_summary": null,
+      "chunk_ids": []
+    },
+    "L0-de738e1b": {
+      "level": "L0",
+      "parent": null,
+      "children": [],
+      "metadata": {
+        "source": "message",
+        "agent": "openclaw",
+        "batch_id": "",
+        "created_at": 1773998622.286979,
+        "updated_at": 1773998622.286998,
+        "last_accessed": 0.0,
+        "quality_level": "medium",
+        "access_count": 0,
+        "storage_tier": "warm",
+        "status": "active",
+        "version": 1
+      },
+      "structured_summary": null,
+      "chunk_ids": []
+    },
+    "L0-399b82da": {
+      "level": "L0",
+      "parent": null,
+      "children": [],
+      "metadata": {
+        "source": "message",
+        "agent": "openclaw",
+        "batch_id": "",
+        "created_at": 1773998910.663785,
+        "updated_at": 1773998910.663801,
+        "last_accessed": 0.0,
+        "quality_level": "medium",
+        "access_count": 0,
+        "storage_tier": "warm",
+        "status": "active",
+        "version": 1
+      },
+      "structured_summary": null,
+      "chunk_ids": []
+    },
+    "L1-8f1b3eee": {
+      "level": "L1",
+      "parent": null,
+      "children": [],
+      "metadata": {
+        "source": "message",
+        "agent": "openclaw",
+        "batch_id": "",
+        "created_at": 1773999043.992366,
+        "updated_at": 1773999043.992381,
+        "last_accessed": 0.0,
+        "quality_level": "medium",
+        "access_count": 0,
+        "storage_tier": "warm",
+        "status": "active",
+        "version": 1
+      },
+      "structured_summary": {
+        "summary_text": "在openclaw",
+        "main_topic": "",
+        "keywords": [],
+        "entities": [],
+        "sentiment": "neutral",
+        "category": "instruction",
+        "importance_score": 0.5,
+        "key_facts": [],
+        "action_items": [],
+        "related_concepts": []
+      },
+      "chunk_ids": []
+    },
+    "L1-be177c82": {
+      "level": "L1",
+      "parent": null,
+      "children": [],
+      "metadata": {
+        "source": "message",
+        "agent": "openclaw",
+        "batch_id": "",
+        "created_at": 1774000654.377099,
+        "updated_at": 1774000654.377115,
+        "last_accessed": 0.0,
+        "quality_level": "medium",
+        "access_count": 0,
+        "storage_tier": "warm",
+        "status": "active",
+        "version": 1
+      },
+      "structured_summary": {
+        "summary_text": "你的长期记忆里面MEMORY",
+        "main_topic": "",
+        "keywords": [],
+        "entities": [],
+        "sentiment": "neutral",
+        "category": "other",
+        "importance_score": 0.5,
+        "key_facts": [],
+        "action_items": [],
+        "related_concepts": []
+      },
+      "chunk_ids": []
+    },
+    "L2-8e938a0d": {
+      "level": "L2",
+      "parent": null,
+      "children": [
+        "L1-e33a7f0d"
+      ],
+      "metadata": {
+        "source": "message",
+        "agent": "openclaw",
+        "batch_id": "",
+        "created_at": 1774000816.981408,
+        "updated_at": 1774000816.981424,
+        "last_accessed": 0.0,
+        "quality_level": "high",
+        "access_count": 0,
+        "storage_tier": "warm",
+        "status": "active",
+        "version": 1
+      },
+      "structured_summary": null,
+      "chunk_ids": []
+    },
+    "L2-d3641daf": {
+      "level": "L2",
+      "parent": null,
+      "children": [
+        "L1-80813c22"
+      ],
+      "metadata": {
+        "source": "message",
+        "agent": "openclaw",
+        "batch_id": "",
+        "created_at": 1774001193.308768,
+        "updated_at": 1774001193.308782,
+        "last_accessed": 0.0,
+        "quality_level": "medium",
+        "access_count": 0,
+        "storage_tier": "warm",
+        "status": "active",
+        "version": 1
+      },
+      "structured_summary": null,
+      "chunk_ids": []
+    },
+    "L0-639a8d0c": {
+      "level": "L0",
+      "parent": null,
+      "children": [],
+      "metadata": {
+        "source": "message",
+        "agent": "openclaw",
+        "batch_id": "",
+        "created_at": 1774004706.151839,
+        "updated_at": 1774004706.151855,
+        "last_accessed": 0.0,
+        "quality_level": "medium",
+        "access_count": 0,
+        "storage_tier": "warm",
+        "status": "active",
+        "version": 1
+      },
+      "structured_summary": null,
+      "chunk_ids": []
+    },
+    "L0-6ea61e60": {
+      "level": "L0",
+      "parent": null,
+      "children": [],
+      "metadata": {
+        "source": "message",
+        "agent": "openclaw",
+        "batch_id": "",
+        "created_at": 1774004769.347895,
+        "updated_at": 1774004769.347911,
+        "last_accessed": 0.0,
+        "quality_level": "medium",
+        "access_count": 0,
+        "storage_tier": "warm",
+        "status": "active",
+        "version": 1
+      },
+      "structured_summary": null,
+      "chunk_ids": []
+    },
+    "L0-6ee80c50": {
+      "level": "L0",
+      "parent": null,
+      "children": [],
+      "metadata": {
+        "source": "message",
+        "agent": "openclaw",
+        "batch_id": "",
+        "created_at": 1774004902.868062,
+        "updated_at": 1774004902.868078,
+        "last_accessed": 0.0,
+        "quality_level": "medium",
+        "access_count": 0,
+        "storage_tier": "warm",
+        "status": "active",
+        "version": 1
+      },
+      "structured_summary": null,
+      "chunk_ids": []
+    },
+    "L0-71f25a2a": {
+      "level": "L0",
+      "parent": null,
+      "children": [],
+      "metadata": {
+        "source": "message",
+        "agent": "openclaw",
+        "batch_id": "",
+        "created_at": 1774005077.774892,
+        "updated_at": 1774005077.7749,
+        "last_accessed": 0.0,
+        "quality_level": "medium",
+        "access_count": 0,
+        "storage_tier": "warm",
+        "status": "active",
+        "version": 1
+      },
+      "structured_summary": null,
+      "chunk_ids": []
+    },
+    "L0-de5153da": {
+      "level": "L0",
+      "parent": null,
+      "children": [],
+      "metadata": {
+        "source": "message",
+        "agent": "openclaw",
+        "batch_id": "",
+        "created_at": 1774014791.619495,
+        "updated_at": 1774014791.619508,
+        "last_accessed": 0.0,
+        "quality_level": "medium",
+        "access_count": 0,
+        "storage_tier": "warm",
+        "status": "active",
+        "version": 1
+      },
+      "structured_summary": null,
+      "chunk_ids": []
+    },
+    "L0-b5cd5f9b": {
+      "level": "L0",
+      "parent": null,
+      "children": [],
+      "metadata": {
+        "source": "message",
+        "agent": "openclaw",
+        "batch_id": "",
+        "created_at": 1774014874.541546,
+        "updated_at": 1774014874.541564,
+        "last_accessed": 0.0,
+        "quality_level": "medium",
+        "access_count": 0,
+        "storage_tier": "warm",
+        "status": "active",
+        "version": 1
+      },
+      "structured_summary": null,
+      "chunk_ids": []
+    },
+    "L0-b07d2360": {
+      "level": "L0",
+      "parent": null,
+      "children": [],
+      "metadata": {
+        "source": "message",
+        "agent": "openclaw",
+        "batch_id": "",
+        "created_at": 1774015001.378076,
+        "updated_at": 1774015001.378091,
+        "last_accessed": 0.0,
+        "quality_level": "medium",
+        "access_count": 0,
+        "storage_tier": "warm",
+        "status": "active",
+        "version": 1
+      },
+      "structured_summary": null,
+      "chunk_ids": []
+    },
+    "L0-4c8dcbae": {
+      "level": "L0",
+      "parent": null,
+      "children": [],
+      "metadata": {
+        "source": "message",
+        "agent": "openclaw",
+        "batch_id": "",
+        "created_at": 1774015781.029043,
+        "updated_at": 1774015781.029049,
+        "last_accessed": 0.0,
+        "quality_level": "medium",
+        "access_count": 0,
+        "storage_tier": "warm",
+        "status": "active",
+        "version": 1
+      },
+      "structured_summary": null,
+      "chunk_ids": []
+    },
+    "L0-35acaa4b": {
+      "level": "L0",
+      "parent": null,
+      "children": [],
+      "metadata": {
+        "source": "message",
+        "agent": "openclaw",
+        "batch_id": "",
+        "created_at": 1774015938.721031,
+        "updated_at": 1774015938.721049,
+        "last_accessed": 0.0,
+        "quality_level": "medium",
+        "access_count": 0,
+        "storage_tier": "warm",
+        "status": "active",
+        "version": 1
+      },
+      "structured_summary": null,
+      "chunk_ids": []
+    },
+    "L0-f44bfaf1": {
+      "level": "L0",
+      "parent": null,
+      "children": [],
+      "metadata": {
+        "source": "message",
+        "agent": "openclaw",
+        "batch_id": "",
+        "created_at": 1774016684.59883,
+        "updated_at": 1774016684.598846,
+        "last_accessed": 0.0,
+        "quality_level": "medium",
+        "access_count": 0,
+        "storage_tier": "warm",
+        "status": "active",
+        "version": 1
+      },
+      "structured_summary": null,
+      "chunk_ids": []
+    },
+    "L1-cbc2082d": {
+      "level": "L1",
+      "parent": null,
+      "children": [],
+      "metadata": {
+        "source": "message",
+        "agent": "openclaw",
+        "batch_id": "",
+        "created_at": 1774017011.505004,
+        "updated_at": 1774017011.505022,
+        "last_accessed": 0.0,
+        "quality_level": "medium",
+        "access_count": 0,
+        "storage_tier": "warm",
+        "status": "active",
+        "version": 1
+      },
+      "structured_summary": {
+        "summary_text": "cortex-memory import --path ~/",
+        "main_topic": "cortex",
+        "keywords": [
+          "cortex",
+          "memory",
+          "import",
+          "path",
+          "openclaw"
+        ],
+        "entities": [],
+        "sentiment": "neutral",
+        "category": "other",
+        "importance_score": 0.5,
+        "key_facts": [],
+        "action_items": [],
+        "related_concepts": []
+      },
+      "chunk_ids": []
+    },
+    "L0-f8c09307": {
+      "level": "L0",
+      "parent": null,
+      "children": [],
+      "metadata": {
+        "source": "message",
+        "agent": "openclaw",
+        "batch_id": "",
+        "created_at": 1774017223.170622,
+        "updated_at": 1774017223.170638,
+        "last_accessed": 0.0,
+        "quality_level": "medium",
+        "access_count": 0,
+        "storage_tier": "warm",
+        "status": "active",
+        "version": 1
+      },
+      "structured_summary": null,
+      "chunk_ids": []
+    },
+    "L1-714d1aa8": {
+      "level": "L1",
+      "parent": null,
+      "children": [],
+      "metadata": {
+        "source": "message",
+        "agent": "openclaw",
+        "batch_id": "",
+        "created_at": 1774017287.296882,
+        "updated_at": 1774017287.296898,
+        "last_accessed": 0.0,
+        "quality_level": "medium",
+        "access_count": 0,
+        "storage_tier": "warm",
+        "status": "active",
+        "version": 1
+      },
+      "structured_summary": {
+        "summary_text": "ok,我来修复这些问题",
+        "main_topic": "",
+        "keywords": [],
+        "entities": [],
+        "sentiment": "neutral",
+        "category": "problem",
+        "importance_score": 0.5,
+        "key_facts": [],
+        "action_items": [],
+        "related_concepts": []
+      },
+      "chunk_ids": []
+    },
+    "L1-dee0fe1c": {
+      "level": "L1",
+      "parent": null,
+      "children": [],
+      "metadata": {
+        "source": "message",
+        "agent": "openclaw",
+        "batch_id": "",
+        "created_at": 1774057363.955765,
+        "updated_at": 1774057363.95578,
+        "last_accessed": 0.0,
+        "quality_level": "high",
+        "access_count": 0,
+        "storage_tier": "warm",
+        "status": "active",
+        "version": 1
+      },
+      "structured_summary": {
+        "summary_text": "Joe 我已经进行了修复并更新了本地版本,请你检查下:\n1、search_memory 和 query_graph 的报错解决了吗\n2、sync_memory tool是否正常,是否还有模块缺失的问题\n3、API 接口未正确注册 - query 和 entity 接口返回 undefined,这个问题解决了吗",
+        "main_topic": "joe",
+        "keywords": [
+          "joe",
+          "api",
+          "query",
+          "entity",
+          "undefined"
+        ],
+        "entities": [
+          "3",
+          "2",
+          "1",
+          "Joe"
+        ],
+        "sentiment": "neutral",
+        "category": "problem",
+        "importance_score": 0.5,
+        "key_facts": [],
+        "action_items": [],
+        "related_concepts": []
+      },
+      "chunk_ids": []
+    },
+    "L0-7ad0a88d": {
+      "level": "L0",
+      "parent": null,
+      "children": [],
+      "metadata": {
+        "source": "message",
+        "agent": "openclaw",
+        "batch_id": "",
+        "created_at": 1774058669.184302,
+        "updated_at": 1774058669.18432,
+        "last_accessed": 0.0,
+        "quality_level": "medium",
+        "access_count": 0,
+        "storage_tier": "warm",
+        "status": "active",
+        "version": 1
+      },
+      "structured_summary": null,
+      "chunk_ids": []
+    },
+    "L0-cd211bd3": {
+      "level": "L0",
+      "parent": null,
+      "children": [],
+      "metadata": {
+        "source": "message",
+        "agent": "openclaw",
+        "batch_id": "",
+        "created_at": 1774059027.481283,
+        "updated_at": 1774059027.481298,
+        "last_accessed": 0.0,
+        "quality_level": "medium",
+        "access_count": 0,
+        "storage_tier": "warm",
+        "status": "active",
+        "version": 1
+      },
+      "structured_summary": null,
+      "chunk_ids": []
+    },
+    "L0-8a61fe82": {
+      "level": "L0",
+      "parent": null,
+      "children": [],
+      "metadata": {
+        "source": "message",
+        "agent": "openclaw",
+        "batch_id": "",
+        "created_at": 1774066633.650525,
+        "updated_at": 1774066633.650543,
+        "last_accessed": 0.0,
+        "quality_level": "medium",
+        "access_count": 0,
+        "storage_tier": "warm",
+        "status": "active",
+        "version": 1
+      },
+      "structured_summary": null,
+      "chunk_ids": []
+    },
+    "L0-b73bf0dc": {
+      "level": "L0",
+      "parent": null,
+      "children": [],
+      "metadata": {
+        "source": "message",
+        "agent": "openclaw",
+        "batch_id": "",
+        "created_at": 1774069907.050789,
+        "updated_at": 1774069907.050806,
+        "last_accessed": 0.0,
+        "quality_level": "medium",
+        "access_count": 0,
+        "storage_tier": "warm",
+        "status": "active",
+        "version": 1
+      },
+      "structured_summary": null,
+      "chunk_ids": []
+    }
+  },
+  "chunk_index": {}
+}
