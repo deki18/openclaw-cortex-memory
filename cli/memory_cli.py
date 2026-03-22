@@ -262,7 +262,7 @@ def run_doctor():
         "Embedding Service",
         bool(embedding_provider and embedding_model),
         f"Provider: {embedding_provider or 'NOT SET'}, Model: {embedding_model or 'NOT SET'}",
-        "Add embedding config to openclaw.json plugins.cortex-memory"
+        "Add embedding config to openclaw.json plugins.entries.openclaw-cortex-memory.config.embedding"
     )
     
     llm_provider = config.get("llm_provider")
@@ -271,7 +271,7 @@ def run_doctor():
         "LLM Service",
         bool(llm_provider and llm_model),
         f"Provider: {llm_provider or 'NOT SET'}, Model: {llm_model or 'NOT SET'}",
-        "Add llm config to openclaw.json plugins.cortex-memory"
+        "Add llm config to openclaw.json plugins.entries.openclaw-cortex-memory.config.llm"
     )
     
     try:

@@ -3,6 +3,7 @@
   "name": "Cortex Memory",
   "version": "0.1.0-Alpha.1",
   "description": "Long-term memory system with semantic, episodic, and procedural memory for AI Agents",
+  "main": "dist/index.js",
   "author": "OpenClaw Community",
   "license": "MIT",
   "type": "memory",
@@ -154,10 +155,19 @@
   "configSchema": {
     "type": "object",
     "properties": {
+      "enabled": {
+        "type": "boolean",
+        "description": "Enable or disable Cortex Memory plugin",
+        "default": true
+      },
       "apiUrl": {
         "type": "string",
         "description": "URL of the Cortex Memory Python API server",
         "default": "http://127.0.0.1:8765"
+      },
+      "dbPath": {
+        "type": "string",
+        "description": "Path to the memory database directory"
       },
       "autoSync": {
         "type": "boolean",
@@ -171,17 +181,84 @@
       },
       "embedding": {
         "type": "object",
-        "description": "Embedding model configuration"
+        "description": "Embedding model configuration",
+        "properties": {
+          "provider": {
+            "type": "string",
+            "description": "Embedding provider name"
+          },
+          "model": {
+            "type": "string",
+            "description": "Embedding model name"
+          },
+          "apiKey": {
+            "type": "string",
+            "description": "Embedding API key"
+          },
+          "baseURL": {
+            "type": "string",
+            "description": "Embedding API base URL"
+          },
+          "dimensions": {
+            "type": "integer",
+            "description": "Embedding dimensions"
+          }
+        },
+        "additionalProperties": false
       },
       "llm": {
         "type": "object",
-        "description": "LLM configuration"
+        "description": "LLM configuration",
+        "properties": {
+          "provider": {
+            "type": "string",
+            "description": "LLM provider name"
+          },
+          "model": {
+            "type": "string",
+            "description": "LLM model name"
+          },
+          "apiKey": {
+            "type": "string",
+            "description": "LLM API key"
+          },
+          "baseURL": {
+            "type": "string",
+            "description": "LLM API base URL"
+          }
+        },
+        "additionalProperties": false
       },
       "reranker": {
         "type": "object",
-        "description": "Reranker configuration"
+        "description": "Reranker configuration",
+        "properties": {
+          "provider": {
+            "type": "string",
+            "description": "Reranker provider name"
+          },
+          "model": {
+            "type": "string",
+            "description": "Reranker model name"
+          },
+          "apiKey": {
+            "type": "string",
+            "description": "Reranker API key"
+          },
+          "baseURL": {
+            "type": "string",
+            "description": "Reranker API base URL"
+          }
+        },
+        "additionalProperties": false
+      },
+      "fallbackToBuiltin": {
+        "type": "boolean",
+        "description": "Fallback to OpenClaw builtin memory when Cortex Memory fails",
+        "default": true
       }
-    }
+    },
+    "additionalProperties": false
   },
   "python": {
     "required": true,

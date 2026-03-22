@@ -54,6 +54,7 @@ function enablePlugin() {
     
     const config = {
       plugins: {
+        allow: [PLUGIN_NAME],
         slots: {
           memory: PLUGIN_NAME
         },
@@ -73,6 +74,12 @@ function enablePlugin() {
   
   if (!config.plugins) {
     config.plugins = {};
+  }
+  if (!Array.isArray(config.plugins.allow)) {
+    config.plugins.allow = [];
+  }
+  if (!config.plugins.allow.includes(PLUGIN_NAME)) {
+    config.plugins.allow.push(PLUGIN_NAME);
   }
   if (!config.plugins.entries) {
     config.plugins.entries = {};
@@ -204,8 +211,11 @@ Configuration:
   The plugin state is stored in openclaw.json under:
   {
     "plugins": {
-      "cortex-memory": {
-        "enabled": true/false
+      "allow": ["openclaw-cortex-memory"],
+      "entries": {
+        "openclaw-cortex-memory": {
+          "enabled": true/false
+        }
       }
     }
   }

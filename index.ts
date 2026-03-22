@@ -122,6 +122,7 @@ const ERROR_CODES: Record<string, UserFriendlyError> = {
 };
 
 const SENSITIVE_KEYS = ["API_KEY", "SECRET", "TOKEN", "PASSWORD", "APIKEY"];
+const PLUGIN_ID = "openclaw-cortex-memory";
 
 const MIN_OPENCLAW_VERSION = "2026.3.8";
 const MAX_OPENCLAW_VERSION = "2027.0.0";
@@ -147,11 +148,13 @@ let logger: Logger;
 let pythonProcess: ChildProcess | null = null;
 let isShuttingDown = false;
 let isInitializing = false;
-let isEnabled = true;
+let isEnabled = false;
 let api: OpenClawPluginApi | null = null;
 let builtinMemory: BuiltinMemory | null = null;
 let registeredTools: string[] = [];
 let registeredHooks: string[] = [];
+let registeredFallbackTools: string[] = [];
+const registeredHookHandlers = new Map<string, (payload: unknown, context: ToolContext) => Promise<void>>();
 let configWatchInterval: ReturnType<typeof setInterval> | null = null;
 let configPath: string | null = null;
 
@@ -177,6 +180,79 @@ function sanitizeForLogging(obj: Record<string, unknown>): Record<string, unknow
     }
   }
   return sanitized;
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  if (typeof value === "object" && value !== null) {
+    return value as Record<string, unknown>;
+  }
+  return null;
+}
+
+function firstString(values: unknown[]): string | undefined {
+  for (const value of values) {
+    if (typeof value === "string" && value.trim()) {
+      return value.trim();
+    }
+  }
+  return undefined;
+}
+
+function normalizeIncomingMessage(payload: unknown): { text: string; role: string; source: string } | null {
+  const data = asRecord(payload);
+  if (!data) {
+    return null;
+  }
+  const message = asRecord(data.message);
+  const eventData = asRecord(data.data);
+  const update = asRecord(data.update);
+  const updateMessage = update ? asRecord(update.message) : null;
+  const role = firstString([
+    data.role,
+    data.fromRole,
+    data.senderRole,
+    message?.role,
+    eventData?.role,
+    updateMessage?.role,
+  ]) || "user";
+  const source = firstString([
+    data.source,
+    data.platform,
+    data.channel,
+    data.provider,
+    message?.source,
+    eventData?.source,
+  ]) || "message";
+  let text = firstString([
+    data.content,
+    data.text,
+    data.body,
+    data.prompt,
+    data.message,
+    message?.content,
+    message?.text,
+    message?.body,
+    eventData?.content,
+    eventData?.text,
+    updateMessage?.text,
+    updateMessage?.caption,
+  ]);
+  if (!text && Array.isArray(data.messages)) {
+    const merged = data.messages
+      .map(item => {
+        if (typeof item === "string") return item;
+        const msgObj = asRecord(item);
+        if (!msgObj) return "";
+        return firstString([msgObj.content, msgObj.text, msgObj.body]) || "";
+      })
+      .filter(Boolean)
+      .join("\n");
+    text = merged.trim() || undefined;
+  }
+  if (!text) {
+    return null;
+  }
+  return { text, role, source };
 }
 
 function compareVersions(a: string, b: string): number {
@@ -248,8 +324,12 @@ function loadPluginEnabledState(): boolean {
   try {
     const content = fs.readFileSync(configPath, "utf-8");
     const openclawConfig = JSON.parse(content);
-    const pluginConfig = openclawConfig?.plugins?.["cortex-memory"];
-    return pluginConfig?.enabled !== false;
+    const pluginEntry = openclawConfig?.plugins?.entries?.[PLUGIN_ID];
+    if (pluginEntry && typeof pluginEntry === "object") {
+      return pluginEntry.enabled !== false;
+    }
+    const legacyPluginConfig = openclawConfig?.plugins?.["cortex-memory"];
+    return legacyPluginConfig?.enabled !== false;
   } catch (e) {
     logger.warn(`Failed to load config state: ${e}`);
     return true;
@@ -957,22 +1037,14 @@ async function getPluginStatus(_args: Record<string, unknown>, _context: ToolCon
 
 async function onMessageHandler(payload: unknown, context: ToolContext): Promise<void> {
   if (!isEnabled) return;
-  
-  const data = payload as { 
-    content?: string; 
-    text?: string; 
-    source?: string;
-    role?: string;
-  };
-  const text = data.content || data.text;
-  if (!text) return;
-  
-  const role = data.role || "user";
+  const normalized = normalizeIncomingMessage(payload);
+  if (!normalized) return;
+  const { text, role, source } = normalized;
   
   try {
     await apiCall("/write", "POST", { 
       text, 
-      source: data.source || "message",
+      source,
       role
     });
     logger.info(`Stored ${role} message for session ${context.sessionId}`);
@@ -1209,8 +1281,13 @@ function registerHooks(): void {
       if (typeof (api as any).on === 'function') {
         (api as any).on(hook.event, hook.handler);
         registeredHooks.push(hook.event);
+        registeredHookHandlers.set(hook.event, hook.handler);
+      } else if (typeof (api as any).registerHook === "function") {
+        (api as any).registerHook({ event: hook.event, handler: hook.handler });
+        registeredHooks.push(hook.event);
+        registeredHookHandlers.set(hook.event, hook.handler);
       } else {
-        logger.warn(`api.on is not available, skipping hook ${hook.event}`);
+        logger.warn(`No supported hook registration API found, skipping ${hook.event}`);
       }
     } catch (e) {
       logger.error(`Failed to register hook ${hook.event}: ${e instanceof Error ? e.message : String(e)}`);
@@ -1224,14 +1301,18 @@ function unregisterHooks(): void {
   
   for (const event of registeredHooks) {
     try {
-      if ((api as any).off) {
-        (api as any).off(event);
+      const handler = registeredHookHandlers.get(event);
+      if ((api as any).off && handler) {
+        (api as any).off(event, handler);
+      } else if ((api as any).unregisterHook) {
+        (api as any).unregisterHook(event);
       }
     } catch (e) {
       // ignore
     }
   }
   registeredHooks = [];
+  registeredHookHandlers.clear();
 }
 
 function setupProcessHandlers(): void {
@@ -1272,6 +1353,7 @@ export async function enable(): Promise<void> {
   logger.info("Enabling Cortex Memory plugin...");
   
   try {
+    unregisterFallbackTools();
     await startPythonService();
     await waitForService();
     isEnabled = true;
@@ -1295,6 +1377,7 @@ export async function disable(): Promise<void> {
   
   unregisterHooks();
   unregisterTools();
+  unregisterFallbackTools();
   stopPythonService();
   isEnabled = false;
   
@@ -1324,6 +1407,7 @@ function registerFallbackTools(): void {
     execute: async ({ args, context }: { args: Record<string, unknown>; context: ToolContext }) => 
       searchMemoryWithFallback(args as { query: string; top_k?: number }, context),
   });
+  registeredFallbackTools.push("search_memory");
   
   api.registerTool({
     name: "store_event",
@@ -1339,6 +1423,7 @@ function registerFallbackTools(): void {
     execute: async ({ args, context }: { args: Record<string, unknown>; context: ToolContext }) => 
       storeEventWithFallback(args as { summary: string }, context),
   });
+  registeredFallbackTools.push("store_event");
   
   api.registerTool({
     name: "cortex_memory_status",
@@ -1352,6 +1437,19 @@ function registerFallbackTools(): void {
     execute: async ({ args, context }: { args: Record<string, unknown>; context: ToolContext }) => 
       getPluginStatus(args, context),
   });
+  registeredFallbackTools.push("cortex_memory_status");
+}
+
+function unregisterFallbackTools(): void {
+  if (!api || !api.unregisterTool) return;
+  for (const name of registeredFallbackTools) {
+    try {
+      api.unregisterTool(name);
+    } catch (e) {
+      logger.warn(`Failed to unregister fallback tool ${name}: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+  registeredFallbackTools = [];
 }
 
 export function getStatus(): { enabled: boolean; serviceRunning: boolean } {
@@ -1368,6 +1466,7 @@ export async function unregister(): Promise<void> {
   
   unregisterHooks();
   unregisterTools();
+  unregisterFallbackTools();
   
   stopPythonService();
   
@@ -1378,13 +1477,15 @@ export async function unregister(): Promise<void> {
   builtinMemory = null;
   registeredTools = [];
   registeredHooks = [];
+  registeredFallbackTools = [];
+  registeredHookHandlers.clear();
   configPath = null;
   
   logger.info("Cortex Memory plugin unregistered successfully");
 }
 
 export function register(pluginApi: OpenClawPluginApi, userConfig?: Partial<CortexMemoryConfig>): void {
-  if (isInitializing || isEnabled) {
+  if (isInitializing) {
     return;
   }
   isInitializing = true;
@@ -1393,9 +1494,10 @@ export function register(pluginApi: OpenClawPluginApi, userConfig?: Partial<Cort
   
   logger = api.getLogger?.() || createConsoleLogger();
   
+  const apiPluginConfig = (api as any).pluginConfig || {};
   const openclawConfig = (api as any).config || {};
-  const pluginEntry = openclawConfig?.plugins?.entries?.["openclaw-cortex-memory"];
-  const pluginConfig = pluginEntry?.config || {};
+  const pluginEntry = openclawConfig?.plugins?.entries?.[PLUGIN_ID];
+  const pluginConfig = Object.keys(apiPluginConfig).length > 0 ? apiPluginConfig : (pluginEntry?.config || {});
   
   const effectiveConfig = userConfig || pluginConfig || {};
   
@@ -1442,19 +1544,22 @@ export function register(pluginApi: OpenClawPluginApi, userConfig?: Partial<Cort
   const initialEnabled = loadPluginEnabledState();
   isEnabled = config.enabled !== false && initialEnabled;
 
-  registerTools();
-  registerHooks();
   isInitializing = false;
   logger.info("Cortex Memory plugin registered successfully");
 
   if (isEnabled) {
+    registerTools();
+    registerHooks();
     initializeAsync().catch(error => {
       const message = error instanceof Error ? error.message : String(error);
       logger.error(`Failed to initialize Cortex Memory: ${message}`);
       
       if (config?.fallbackToBuiltin && builtinMemory) {
+        unregisterHooks();
+        unregisterTools();
         logger.info("Falling back to builtin memory");
         isEnabled = false;
+        registerFallbackTools();
       }
     });
   } else if (config?.fallbackToBuiltin && builtinMemory) {
