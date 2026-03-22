@@ -234,39 +234,6 @@ def load_config(config_path: str = "config.yaml") -> Dict[str, Any]:
     else:
         logger.warning("PyYAML not installed, skipping config file loading")
     
-    if os.environ.get("CORTEX_MEMORY_EMBEDDING_PROVIDER"):
-        config["embedding_provider"] = os.environ["CORTEX_MEMORY_EMBEDDING_PROVIDER"]
-    if os.environ.get("CORTEX_MEMORY_EMBEDDING_MODEL"):
-        config["embedding_model"] = os.environ["CORTEX_MEMORY_EMBEDDING_MODEL"]
-    
-    if os.environ.get("CORTEX_MEMORY_LLM_PROVIDER"):
-        config["llm_provider"] = os.environ["CORTEX_MEMORY_LLM_PROVIDER"]
-    if os.environ.get("CORTEX_MEMORY_LLM_MODEL"):
-        config["llm_model"] = os.environ["CORTEX_MEMORY_LLM_MODEL"]
-    
-    if os.environ.get("CORTEX_MEMORY_RERANKER_PROVIDER"):
-        config["reranker_provider"] = os.environ["CORTEX_MEMORY_RERANKER_PROVIDER"]
-    if os.environ.get("CORTEX_MEMORY_RERANKER_MODEL"):
-        config["reranker_api"]["model"] = os.environ["CORTEX_MEMORY_RERANKER_MODEL"]
-    
-    if os.environ.get("CORTEX_MEMORY_DB_PATH"):
-        config["lancedb_path"] = os.environ["CORTEX_MEMORY_DB_PATH"]
-    
-    if os.environ.get("CORTEX_MEMORY_EMBEDDING_API_KEY"):
-        config["embedding_api_key"] = os.environ["CORTEX_MEMORY_EMBEDDING_API_KEY"]
-    if os.environ.get("CORTEX_MEMORY_EMBEDDING_BASE_URL"):
-        config["embedding_base_url"] = os.environ["CORTEX_MEMORY_EMBEDDING_BASE_URL"]
-    if os.environ.get("CORTEX_MEMORY_EMBEDDING_DIMENSIONS"):
-        config["embedding_dimensions"] = int(os.environ["CORTEX_MEMORY_EMBEDDING_DIMENSIONS"])
-    if os.environ.get("CORTEX_MEMORY_LLM_API_KEY"):
-        config["llm_api_key"] = os.environ["CORTEX_MEMORY_LLM_API_KEY"]
-    if os.environ.get("CORTEX_MEMORY_LLM_BASE_URL"):
-        config["llm_base_url"] = os.environ["CORTEX_MEMORY_LLM_BASE_URL"]
-    if os.environ.get("CORTEX_MEMORY_RERANKER_API_KEY"):
-        config["reranker_api_key"] = os.environ["CORTEX_MEMORY_RERANKER_API_KEY"]
-    if os.environ.get("CORTEX_MEMORY_RERANKER_ENDPOINT"):
-        config["reranker_api"]["url"] = os.environ["CORTEX_MEMORY_RERANKER_ENDPOINT"]
-    
     if config.get("lancedb_path"):
         config["lancedb_path"] = os.path.expanduser(config["lancedb_path"])
     if config.get("openclaw_base_path"):
