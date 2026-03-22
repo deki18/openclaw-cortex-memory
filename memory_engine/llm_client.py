@@ -26,13 +26,15 @@ class LLMClient:
         config = get_config()
         self.provider = config.get("llm_provider")
         self.model = config.get("llm_model")
-        self.api_key = config.get("llm_api_key") or os.environ.get("OPENAI_API_KEY")
-        self.base_url = config.get("llm_base_url") or os.environ.get("OPENAI_BASE_URL")
+        self.api_key = config.get("llm_api_key")
+        self.base_url = config.get("llm_base_url")
         self._client: Optional["OpenAI"] = None
         self._consecutive_failures = 0
         self._last_failure_time = 0
         self._circuit_breaker_threshold = 5
         self._circuit_breaker_recovery = 60
+        
+        logger.info(f"LLM config - provider: {self.provider}, model: {self.model}, base_url: {self.base_url}")
         
         if not self.provider or not self.model:
             logger.warning("llm provider and model not configured, LLM features will use fallback")

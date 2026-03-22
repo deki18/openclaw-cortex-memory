@@ -37,13 +37,21 @@ def _get_client() -> Optional["OpenAI"]:
             return None
         
         config = get_config()
-        api_key = config.get("embedding_api_key") or os.environ.get("OPENAI_API_KEY")
+        api_key = config.get("embedding_api_key")
+        base_url = config.get("embedding_base_url")
+        
+        logger.info(f"Embedding config - base_url: {base_url}, api_key: {'***' if api_key else 'None'}")
+        
         if not api_key:
-            logger.warning("API key not set, embedding will return zero vectors")
+            logger.warning("API key not set in config, embedding will return zero vectors")
             return None
         
-        base_url = config.get("embedding_base_url") or os.environ.get("OPENAI_BASE_URL")
-        _client = OpenAI(api_key=api_key, base_url=base_url) if base_url else OpenAI(api_key=api_key)
+        if base_url:
+            logger.info(f"Using custom embedding endpoint: {base_url}")
+            _client = OpenAI(api_key=api_key, base_url=base_url)
+        else:
+            logger.warning("No base_url configured, using default OpenAI endpoint")
+            _client = OpenAI(api_key=api_key)
         return _client
 
 

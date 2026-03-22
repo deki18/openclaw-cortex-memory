@@ -92,7 +92,9 @@ def extract_plugin_config(openclaw_config: Dict[str, Any]) -> Dict[str, Any]:
             result["embedding_model"] = embedding["model"]
         if embedding.get("apiKey"):
             result["embedding_api_key"] = embedding["apiKey"]
-        if embedding.get("baseURL"):
+        if embedding.get("baseUrl"):
+            result["embedding_base_url"] = embedding["baseUrl"]
+        elif embedding.get("baseURL"):
             result["embedding_base_url"] = embedding["baseURL"]
         if embedding.get("dimensions"):
             result["embedding_dimensions"] = embedding["dimensions"]
@@ -105,7 +107,9 @@ def extract_plugin_config(openclaw_config: Dict[str, Any]) -> Dict[str, Any]:
             result["llm_model"] = llm["model"]
         if llm.get("apiKey"):
             result["llm_api_key"] = llm["apiKey"]
-        if llm.get("baseURL"):
+        if llm.get("baseUrl"):
+            result["llm_base_url"] = llm["baseUrl"]
+        elif llm.get("baseURL"):
             result["llm_base_url"] = llm["baseURL"]
     
     reranker = plugin_config.get("reranker", {})
@@ -116,7 +120,11 @@ def extract_plugin_config(openclaw_config: Dict[str, Any]) -> Dict[str, Any]:
             result["reranker_api"] = {"model": reranker["model"]}
         if reranker.get("apiKey"):
             result["reranker_api_key"] = reranker["apiKey"]
-        if reranker.get("baseURL"):
+        if reranker.get("baseUrl"):
+            if "reranker_api" not in result:
+                result["reranker_api"] = {}
+            result["reranker_api"]["url"] = reranker["baseUrl"]
+        elif reranker.get("baseURL"):
             if "reranker_api" not in result:
                 result["reranker_api"] = {}
             result["reranker_api"]["url"] = reranker["baseURL"]

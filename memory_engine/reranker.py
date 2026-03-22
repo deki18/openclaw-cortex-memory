@@ -16,7 +16,9 @@ class Reranker:
         self.provider = config.get("reranker_provider")
         self.model = reranker_config.get("model", "")
         self.url = reranker_config.get("url")
-        self.api_key = config.get("reranker_api_key") or os.environ.get("RERANKER_API_KEY")
+        self.api_key = config.get("reranker_api_key")
+        
+        logger.info(f"Reranker config - provider: {self.provider}, model: {self.model}, url: {self.url}")
 
     def is_available(self) -> bool:
         return bool(self.api_key and self.model)
