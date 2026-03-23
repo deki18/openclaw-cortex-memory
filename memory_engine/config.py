@@ -32,6 +32,8 @@ DEFAULTS = {
         "url": None,
         "model": None
     },
+    "auto_sync": True,
+    "auto_reflect": False,
     "openclaw_base_path": None,
     "lancedb_path": None,
     "chunk": {
@@ -131,6 +133,10 @@ def extract_plugin_config(openclaw_config: Dict[str, Any]) -> Dict[str, Any]:
     
     if plugin_config.get("dbPath"):
         result["lancedb_path"] = plugin_config["dbPath"]
+    if "autoSync" in plugin_config:
+        result["auto_sync"] = bool(plugin_config["autoSync"])
+    if "autoReflect" in plugin_config:
+        result["auto_reflect"] = bool(plugin_config["autoReflect"])
     
     return result
 

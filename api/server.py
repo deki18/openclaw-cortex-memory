@@ -192,6 +192,7 @@ class SearchRequest(BaseModel):
     final_k: int = 3
     query_type: str = "hybrid"
     memory_type: Optional[str] = None
+    session_id: Optional[str] = None
 
 
 class StoreEventRequest(BaseModel):
@@ -205,6 +206,7 @@ class WriteMemoryRequest(BaseModel):
     text: str
     source: str = "api"
     role: str = "user"
+    session_id: Optional[str] = None
 
 
 class QueryGraphRequest(BaseModel):
@@ -212,7 +214,8 @@ class QueryGraphRequest(BaseModel):
 
 
 class SessionEndRequest(BaseModel):
-    pass
+    session_id: Optional[str] = None
+    sync_records: Optional[bool] = None
 
 
 class ImportRequest(BaseModel):
@@ -464,7 +467,8 @@ async def write_memory(request: WriteMemoryRequest):
         result = controller.write_memory(
             request.text, 
             source=request.source,
-            role=request.role
+            role=request.role,
+            session_id=request.session_id
         )
         if result.success:
             return {"status": "ok", "memory_id": result.memory_id}
@@ -501,11 +505,15 @@ async def write_memory(request: WriteMemoryRequest):
 
 
 @app.post("/session-end")
-async def end_session():
+async def end_session(request: Optional[SessionEndRequest] = None):
     if not controller:
         raise HTTPException(status_code=503, detail="Service not initialized")
     try:
-        events = controller.end_session()
+        payload = request or SessionEndRequest()
+        events = controller.end_session(
+            session_id=payload.session_id,
+            sync_records=payload.sync_records
+        )
         return {
             "status": "ok",
             "events_generated": len(events),

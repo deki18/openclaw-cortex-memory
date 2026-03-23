@@ -214,6 +214,7 @@ class EnhancedMemoryController:
         
         self._lock = threading.RLock()
         self._started = False
+        self._session_end_sync_enabled: Optional[bool] = None
 
     def start(self):
         if self._started:
@@ -245,7 +246,8 @@ class EnhancedMemoryController:
         source: str = "manual",
         metadata: dict = None,
         async_write: bool = False,
-        role: str = "user"
+        role: str = "user",
+        session_id: str = None
     ) -> WriteResult:
         if not text or not text.strip():
             return WriteResult(
@@ -253,7 +255,7 @@ class EnhancedMemoryController:
                 error="Empty text provided"
             )
         
-        self._session_manager.add_message(role, text, None)
+        self._session_manager.add_message(role, text, None, session_id=session_id)
         
         preprocessed = self.preprocessor.preprocess(text)
         if not preprocessed:
@@ -327,6 +329,8 @@ class EnhancedMemoryController:
             )
         
         result = self._write_sync(preprocessed, structured_summary, system_metadata, vector, chunks, quality)
+        if result.success and result.memory_id:
+            self._session_manager.set_last_message_memory_id(result.memory_id, session_id=session_id)
         return result
 
     def _create_chunks(self, text: str) -> List[Chunk]:
@@ -750,15 +754,17 @@ class EnhancedMemoryController:
         self.write_queue.clear_completed()
         logger.debug("Maintenance completed")
     
-    def end_session(self) -> List[EpisodicEvent]:
+    def end_session(self, session_id: str = None, sync_records: bool = None) -> List[EpisodicEvent]:
         if not self._session_manager:
             return []
         
-        events = self._session_manager.end_session()
+        self._session_end_sync_enabled = sync_records
+        events = self._session_manager.end_session(session_id=session_id)
         
         for event in events:
             self._update_graph_from_event(event)
         
+        self._session_end_sync_enabled = None
         logger.info(f"Session ended, {len(events)} events generated")
         return events
     
@@ -1004,6 +1010,12 @@ class EnhancedMemoryController:
             return {"status": "error", "message": str(e)}
     
     def _on_session_end(self, session_id: str):
+        sync_enabled = self._session_end_sync_enabled
+        if sync_enabled is None:
+            sync_enabled = bool(self.config.get("auto_sync", True))
+        if not sync_enabled:
+            logger.info(f"Session {session_id} ended, auto sync disabled")
+            return {"status": "ok", "skipped": True}
         logger.info(f"Session {session_id} ended, triggering batch memory write")
         return self.process_session_records()
     

@@ -1,7 +1,8 @@
 /// <reference types="node" />
-import { spawn, ChildProcess } from "child_process";
+import { spawn, ChildProcess, execSync } from "child_process";
 import * as path from "path";
 import * as fs from "fs";
+import * as net from "net";
 
 interface EmbeddingConfig {
   provider: string;
@@ -166,6 +167,7 @@ let autoReflectInterval: ReturnType<typeof setInterval> | null = null;
 let configPath: string | null = null;
 let pythonStartPromise: Promise<void> | null = null;
 let processHandlersRegistered = false;
+let pythonPidFilePath: string | null = null;
 
 function clearStaleAutoSearchCache(now: number = Date.now()): void {
   for (const [sessionId, cache] of autoSearchCacheBySession.entries()) {
@@ -436,6 +438,122 @@ function validateConfig(cfg: CortexMemoryConfig): string[] {
   return errors;
 }
 
+function getApiHostAndPort(): { host: string; port: number } {
+  const parsed = new URL(getBaseUrl());
+  const host = parsed.hostname || "127.0.0.1";
+  const port = Number(parsed.port || (parsed.protocol === "https:" ? 443 : 80));
+  return { host, port };
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function isPortListening(host: string, port: number, timeoutMs = 700): Promise<boolean> {
+  return new Promise(resolve => {
+    const socket = new net.Socket();
+    let settled = false;
+    const finalize = (value: boolean) => {
+      if (settled) return;
+      settled = true;
+      socket.destroy();
+      resolve(value);
+    };
+    socket.setTimeout(timeoutMs);
+    socket.once("connect", () => finalize(true));
+    socket.once("timeout", () => finalize(false));
+    socket.once("error", () => finalize(false));
+    socket.connect(port, host);
+  });
+}
+
+function writePythonPid(pid: number): void {
+  if (!pythonPidFilePath) return;
+  try {
+    fs.writeFileSync(pythonPidFilePath, String(pid), "utf-8");
+  } catch (e) {
+    logger.warn(`Failed to write Python pid file: ${e instanceof Error ? e.message : String(e)}`);
+  }
+}
+
+function clearPythonPidFile(): void {
+  if (!pythonPidFilePath) return;
+  try {
+    if (fs.existsSync(pythonPidFilePath)) {
+      fs.unlinkSync(pythonPidFilePath);
+    }
+  } catch (e) {
+    logger.warn(`Failed to clear Python pid file: ${e instanceof Error ? e.message : String(e)}`);
+  }
+}
+
+function readPythonPid(): number | null {
+  if (!pythonPidFilePath || !fs.existsSync(pythonPidFilePath)) return null;
+  try {
+    const raw = fs.readFileSync(pythonPidFilePath, "utf-8").trim();
+    const pid = Number(raw);
+    return Number.isInteger(pid) && pid > 0 ? pid : null;
+  } catch {
+    return null;
+  }
+}
+
+function killProcessByPid(pid: number): void {
+  if (!pid) return;
+  try {
+    if (process.platform === "win32") {
+      execSync(`taskkill /pid ${pid} /f /t`, { stdio: "ignore" });
+      return;
+    }
+    try {
+      process.kill(pid, "SIGTERM");
+    } catch {}
+    try {
+      process.kill(-pid, "SIGTERM");
+    } catch {}
+    setTimeout(() => {
+      try {
+        process.kill(pid, "SIGKILL");
+      } catch {}
+      try {
+        process.kill(-pid, "SIGKILL");
+      } catch {}
+    }, 2000);
+  } catch (e) {
+    logger.warn(`Failed to kill process ${pid}: ${e instanceof Error ? e.message : String(e)}`);
+  }
+}
+
+function freePortWithSystemTools(port: number): void {
+  try {
+    if (process.platform === "win32") {
+      const output = execSync(`netstat -ano | findstr :${port}`, { encoding: "utf-8", stdio: ["pipe", "pipe", "ignore"] });
+      const pids = output
+        .split(/\r?\n/)
+        .filter(line => line.includes("LISTENING"))
+        .map(line => {
+          const parts = line.trim().split(/\s+/);
+          return Number(parts[parts.length - 1]);
+        })
+        .filter(pid => Number.isInteger(pid) && pid > 0);
+      for (const pid of pids) {
+        killProcessByPid(pid);
+      }
+      return;
+    }
+    const output = execSync(`sh -lc "lsof -ti tcp:${port} 2>/dev/null || true"`, { encoding: "utf-8", stdio: ["pipe", "pipe", "ignore"] });
+    const pids = output
+      .split(/\r?\n/)
+      .map(line => Number(line.trim()))
+      .filter(pid => Number.isInteger(pid) && pid > 0);
+    for (const pid of pids) {
+      killProcessByPid(pid);
+    }
+  } catch {
+    // ignore
+  }
+}
+
 async function checkPortInUse(): Promise<boolean> {
   const apiUrl = getBaseUrl();
   try {
@@ -460,15 +578,35 @@ async function startPythonServiceInternal(): Promise<void> {
   if (!config) {
     throw new Error("Configuration not loaded");
   }
+  const projectRoot = findProjectRoot();
+  pythonPidFilePath = path.join(projectRoot, ".cortex-memory-python.pid");
+  const { host, port } = getApiHostAndPort();
 
-  const alreadyRunning = await checkPortInUse();
-  if (alreadyRunning) {
-    logger.info("Python service already running, shutting down old instance...");
-    await shutdownPythonApi();
-    await new Promise(resolve => setTimeout(resolve, 1000));
+  const stalePid = readPythonPid();
+  if (stalePid && (!pythonProcess || pythonProcess.pid !== stalePid)) {
+    logger.info(`Found stale Python pid ${stalePid}, trying to stop it...`);
+    killProcessByPid(stalePid);
+    await sleep(800);
+    clearPythonPidFile();
   }
 
-  const projectRoot = findProjectRoot();
+  const healthyRunning = await checkPortInUse();
+  if (healthyRunning) {
+    logger.info("Python service already running, shutting down old instance...");
+    await shutdownPythonApi();
+    await sleep(1000);
+  }
+
+  const occupied = await isPortListening(host, port);
+  if (occupied) {
+    logger.warn(`Port ${port} is still occupied after graceful shutdown, forcing cleanup...`);
+    freePortWithSystemTools(port);
+    await sleep(1000);
+  }
+  if (await isPortListening(host, port)) {
+    throw new Error(`Port ${port} is already in use by another process. Please stop that process and retry.`);
+  }
+
   const venvDir = path.join(projectRoot, "venv");
   
   const pythonCmd = process.platform === "win32"
@@ -525,10 +663,13 @@ async function startPythonServiceInternal(): Promise<void> {
   return new Promise((resolve, reject) => {
     pythonProcess = spawn(pythonCmd, ["-m", "api.server"], {
       cwd: projectRoot,
-      detached: true,
+      detached: false,
       windowsHide: true,
       env: { ...env, PYTHONWARNINGS: "ignore::RuntimeWarning" },
     });
+    if (pythonProcess.pid) {
+      writePythonPid(pythonProcess.pid);
+    }
 
     let started = false;
     let stderrBuffer = "";
@@ -562,6 +703,8 @@ async function startPythonServiceInternal(): Promise<void> {
     });
 
     pythonProcess.on("exit", (code: number | null) => {
+      clearPythonPidFile();
+      pythonProcess = null;
       if (!started && code !== 0 && !isShuttingDown) {
         reject(new Error(`Python service exited with code ${code}. Stderr: ${stderrBuffer.slice(-500)}`));
       }
@@ -588,32 +731,18 @@ async function shutdownPythonApi(): Promise<void> {
 }
 
 function killPythonProcess(): void {
-  if (!pythonProcess) return;
-  
+  const directPid = pythonProcess?.pid ?? null;
+  const pidFromFile = readPythonPid();
+  const pid = directPid || pidFromFile;
+  if (!pid) return;
   try {
-    const pid = pythonProcess.pid;
-    
-    if (process.platform === "win32" && pid) {
-      spawn("taskkill", ["/pid", String(pid), "/f", "/t"]);
-    } else if (pid) {
-      try {
-        process.kill(-pid, "SIGTERM");
-      } catch {
-        // process might already be dead
-      }
-      setTimeout(() => {
-        try {
-          process.kill(-pid, "SIGKILL");
-        } catch {
-          // already dead
-        }
-      }, 2000);
-    }
+    killProcessByPid(pid);
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
     logger.warn(`Failed to kill Python process: ${message}`);
   } finally {
     pythonProcess = null;
+    clearPythonPidFile();
   }
 }
 
@@ -625,10 +754,8 @@ async function stopPythonServiceAsync(): Promise<void> {
       // ignore
     }
   }
-  if (pythonProcess) {
-    await shutdownPythonApi();
-    killPythonProcess();
-  }
+  await shutdownPythonApi();
+  killPythonProcess();
 }
 
 function stopPythonService(): void {
@@ -1120,7 +1247,8 @@ async function onMessageHandler(payload: unknown, context: ToolContext): Promise
     const writeResult = await apiCallWithRetry<{ status?: string; memory_id?: string; reason?: string; error_code?: string }>("/write", "POST", { 
       text, 
       source,
-      role
+      role,
+      session_id: context.sessionId
     });
     if (writeResult.status === "ok") {
       logger.info(`Stored ${role} message for session ${context.sessionId}`);
@@ -1136,6 +1264,7 @@ async function onMessageHandler(payload: unknown, context: ToolContext): Promise
       const searchResult = await apiCallWithRetry<{ results: unknown[]; skipped?: boolean; reason?: string }>("/search", "POST", {
         query: text,
         top_k: 3,
+        session_id: context.sessionId,
       });
       
       if (searchResult.results && searchResult.results.length > 0) {
@@ -1154,9 +1283,13 @@ async function onSessionEndHandler(payload: unknown, context: ToolContext): Prom
   if (!isEnabled) return;
   
   try {
-    const endResult = await apiCall<{ events_generated: number }>(
+    const endResult = await apiCallWithRetry<{ events_generated: number }>(
       "/session-end", 
-      "POST"
+      "POST",
+      {
+        session_id: context.sessionId,
+        sync_records: config?.autoSync ?? true,
+      }
     );
     logger.info(`Session ${context.sessionId} ended, generated ${endResult.events_generated} events`);
   } catch (error) {
@@ -1476,7 +1609,7 @@ export async function disable(): Promise<void> {
   unregisterTools();
   unregisterFallbackTools();
   stopAutoReflectScheduler();
-  stopPythonService();
+  await stopPythonServiceAsync();
   isEnabled = false;
   
   if (config?.fallbackToBuiltin && builtinMemory) {
@@ -1567,7 +1700,7 @@ export async function unregister(): Promise<void> {
   unregisterTools();
   unregisterFallbackTools();
   
-  stopPythonService();
+  await stopPythonServiceAsync();
   
   isEnabled = false;
   isInitializing = false;
