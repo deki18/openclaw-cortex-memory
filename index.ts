@@ -295,8 +295,11 @@ function resolveSessionId(context: ToolContext, payload?: unknown): string {
   const fromContext = typeof context.sessionId === "string" ? context.sessionId.trim() : "";
   if (fromContext) return fromContext;
   const data = asRecord(payload);
+  const dataChat = data ? asRecord(data.chat) : null;
   const message = data ? asRecord(data.message) : null;
+  const messageChat = message ? asRecord(message.chat) : null;
   const eventData = data ? asRecord(data.data) : null;
+  const eventChat = eventData ? asRecord(eventData.chat) : null;
   const update = data ? asRecord(data.update) : null;
   const updateMessage = update ? asRecord(update.message) : null;
   const updateChat = updateMessage ? asRecord(updateMessage.chat) : null;
@@ -314,6 +317,9 @@ function resolveSessionId(context: ToolContext, payload?: unknown): string {
   const chatId = firstString([
     data?.chatId,
     data?.chat_id,
+    dataChat?.id,
+    messageChat?.id,
+    eventChat?.id,
     updateChat?.id,
   ]);
   if (chatId) return `chat:${chatId}`;

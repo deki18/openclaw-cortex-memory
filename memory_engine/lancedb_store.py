@@ -127,6 +127,7 @@ class LanceDBStore:
         self.db = lancedb.connect(self.db_path)
         self.table_name = "memories"
         self._fts_indexed = False
+        self._fts_available = False
         self._ensure_table()
 
     def _ensure_table(self):
@@ -187,8 +188,11 @@ class LanceDBStore:
         table = self._get_table()
         try:
             table.create_fts_index("text", replace=True)
+            self._fts_available = True
+            logger.info("FTS index created successfully")
         except Exception as e:
-            logger.warning(f"FTS index creation skipped: {e}")
+            self._fts_available = False
+            logger.info(f"FTS index unavailable, fallback to vector search: {e}")
 
     def search(
         self,
@@ -201,20 +205,24 @@ class LanceDBStore:
     ) -> List:
         MemoryModel = get_memory_model()
         table = self._get_table()
+        where_conditions: List[str] = []
+
+        effective_query_type = query_type
+        if query_type in ("hybrid", "fts") and not self._fts_available:
+            effective_query_type = "vector"
+
         try:
-            if query_type == "hybrid":
+            if effective_query_type == "hybrid":
                 query_builder = (
                     table.search(query_type="hybrid")
                     .vector(query_vector)
                     .text(query_text)
                     .limit(limit)
                 )
-            elif query_type == "vector":
+            elif effective_query_type == "vector":
                 query_builder = table.search(query_vector, query_type="vector").limit(limit)
             else:
                 query_builder = table.search(query_text, query_type="fts").limit(limit)
-            
-            where_conditions = []
             
             if category:
                 if not _validate_category(category):
@@ -255,6 +263,19 @@ class LanceDBStore:
             
             return query_builder.to_pydantic(MemoryModel)
         except Exception as e:
+            if (
+                query_type in ("hybrid", "fts")
+                and "Cannot perform full text search unless an INVERTED index has been created" in str(e)
+            ):
+                self._fts_available = False
+                try:
+                    fallback = table.search(query_vector, query_type="vector").limit(limit)
+                    if where_conditions:
+                        fallback = fallback.where(" AND ".join(where_conditions))
+                    return fallback.to_pydantic(MemoryModel)
+                except Exception as fallback_error:
+                    logger.error(f"Search fallback failed: {fallback_error}")
+                    return []
             logger.error(f"Search failed: {e}")
             return []
 

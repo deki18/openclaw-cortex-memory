@@ -17,8 +17,19 @@ class Reranker:
         self.model = reranker_config.get("model", "")
         self.url = reranker_config.get("url")
         self.api_key = config.get("reranker_api_key")
+        self.url = self._normalize_url(self.url)
         
         logger.info(f"Reranker config - provider: {self.provider}, model: {self.model}, url: {self.url}")
+
+    def _normalize_url(self, url: str) -> str:
+        if not url:
+            return url
+        normalized = str(url).strip().rstrip("/")
+        if normalized.endswith("/v1"):
+            return f"{normalized}/rerank"
+        if normalized.endswith("/v1/rerank") or normalized.endswith("/rerank"):
+            return normalized
+        return normalized
 
     def is_available(self) -> bool:
         return bool(self.api_key and self.model)
