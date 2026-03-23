@@ -138,19 +138,22 @@ const defaultConfig: Partial<CortexMemoryConfig> = {
 };
 
 interface CachedSearchResult {
+  sessionId: string;
   query: string;
   results: unknown[];
   timestamp: number;
 }
 
-let autoSearchCache: CachedSearchResult | null = null;
+let autoSearchCacheBySession = new Map<string, CachedSearchResult>();
 const AUTO_SEARCH_CACHE_TTL = 60000;
+const MAX_AUTO_SEARCH_CACHE_SESSIONS = 200;
 
 let config: CortexMemoryConfig | null = null;
 let logger: Logger;
 let pythonProcess: ChildProcess | null = null;
 let isShuttingDown = false;
 let isInitializing = false;
+let isRegistered = false;
 let isEnabled = false;
 let api: OpenClawPluginApi | null = null;
 let builtinMemory: BuiltinMemory | null = null;
@@ -159,7 +162,35 @@ let registeredHooks: string[] = [];
 let registeredFallbackTools: string[] = [];
 const registeredHookHandlers = new Map<string, (payload: unknown, context: ToolContext) => Promise<void>>();
 let configWatchInterval: ReturnType<typeof setInterval> | null = null;
+let autoReflectInterval: ReturnType<typeof setInterval> | null = null;
 let configPath: string | null = null;
+let pythonStartPromise: Promise<void> | null = null;
+let processHandlersRegistered = false;
+
+function clearStaleAutoSearchCache(now: number = Date.now()): void {
+  for (const [sessionId, cache] of autoSearchCacheBySession.entries()) {
+    if ((now - cache.timestamp) >= AUTO_SEARCH_CACHE_TTL) {
+      autoSearchCacheBySession.delete(sessionId);
+    }
+  }
+}
+
+function setSessionAutoSearchCache(sessionId: string, query: string, results: unknown[]): void {
+  const now = Date.now();
+  clearStaleAutoSearchCache(now);
+  autoSearchCacheBySession.set(sessionId, {
+    sessionId,
+    query,
+    results,
+    timestamp: now,
+  });
+  if (autoSearchCacheBySession.size > MAX_AUTO_SEARCH_CACHE_SESSIONS) {
+    const oldest = [...autoSearchCacheBySession.values()].sort((a, b) => a.timestamp - b.timestamp)[0];
+    if (oldest) {
+      autoSearchCacheBySession.delete(oldest.sessionId);
+    }
+  }
+}
 
 function createConsoleLogger(): Logger {
   return {
@@ -368,6 +399,27 @@ function stopConfigWatcher(): void {
   }
 }
 
+function startAutoReflectScheduler(): void {
+  if (!config?.autoReflect || autoReflectInterval) {
+    return;
+  }
+  autoReflectInterval = setInterval(() => {
+    if (!isEnabled) {
+      return;
+    }
+    apiCallWithRetry("/reflect", "POST")
+      .then(() => logger.info("Scheduled reflection complete"))
+      .catch(error => logger.warn(`Auto-reflect failed: ${formatApiError(error)}`));
+  }, 5 * 60 * 1000);
+}
+
+function stopAutoReflectScheduler(): void {
+  if (autoReflectInterval) {
+    clearInterval(autoReflectInterval);
+    autoReflectInterval = null;
+  }
+}
+
 function validateConfig(cfg: CortexMemoryConfig): string[] {
   const errors: string[] = [];
   
@@ -395,6 +447,16 @@ async function checkPortInUse(): Promise<boolean> {
 }
 
 async function startPythonService(): Promise<void> {
+  if (pythonStartPromise) {
+    return pythonStartPromise;
+  }
+  pythonStartPromise = startPythonServiceInternal().finally(() => {
+    pythonStartPromise = null;
+  });
+  return pythonStartPromise;
+}
+
+async function startPythonServiceInternal(): Promise<void> {
   if (!config) {
     throw new Error("Configuration not loaded");
   }
@@ -556,6 +618,13 @@ function killPythonProcess(): void {
 }
 
 async function stopPythonServiceAsync(): Promise<void> {
+  if (pythonStartPromise) {
+    try {
+      await pythonStartPromise;
+    } catch {
+      // ignore
+    }
+  }
   if (pythonProcess) {
     await shutdownPythonApi();
     killPythonProcess();
@@ -840,7 +909,8 @@ async function getHotContext(args: { limit?: number }, _context: ToolContext): P
   }
   
   try {
-    const result = await apiCallWithRetry<{ context: unknown[] }>("/hot-context", "GET");
+    const limit = typeof args.limit === "number" && args.limit > 0 ? Math.floor(args.limit) : 20;
+    const result = await apiCallWithRetry<{ context: unknown[] }>(`/hot-context?limit=${limit}`, "GET");
     return { success: true, data: result.context };
   } catch (error) {
     const message = formatApiError(error);
@@ -849,7 +919,7 @@ async function getHotContext(args: { limit?: number }, _context: ToolContext): P
   }
 }
 
-async function getAutoContext(args: { include_hot?: boolean }, _context: ToolContext): Promise<ToolResult> {
+async function getAutoContext(args: { include_hot?: boolean }, context: ToolContext): Promise<ToolResult> {
   if (!isEnabled) {
     return { success: false, error: ERROR_CODES.PLUGIN_DISABLED.message, errorCode: ERROR_CODES.PLUGIN_DISABLED.code };
   }
@@ -864,11 +934,13 @@ async function getAutoContext(args: { include_hot?: boolean }, _context: ToolCon
     hot_context?: unknown[];
   } = {};
   
-  if (autoSearchCache && (now - autoSearchCache.timestamp) < AUTO_SEARCH_CACHE_TTL) {
+  clearStaleAutoSearchCache(now);
+  const sessionCache = autoSearchCacheBySession.get(context.sessionId);
+  if (sessionCache) {
     result.auto_search = {
-      query: autoSearchCache.query,
-      results: autoSearchCache.results,
-      age_seconds: Math.floor((now - autoSearchCache.timestamp) / 1000),
+      query: sessionCache.query,
+      results: sessionCache.results,
+      age_seconds: Math.floor((now - sessionCache.timestamp) / 1000),
     };
   }
   
@@ -885,8 +957,8 @@ async function getAutoContext(args: { include_hot?: boolean }, _context: ToolCon
     return { 
       success: true, 
       data: { 
-        message: "No auto-search results cached and hot context unavailable",
-        suggestion: "User messages will trigger auto-search. Try get_hot_context separately."
+        message: "No session-scoped auto-search results cached and hot context unavailable",
+        suggestion: "Send a user message in this session or call get_hot_context."
       } 
     };
   }
@@ -1045,30 +1117,32 @@ async function onMessageHandler(payload: unknown, context: ToolContext): Promise
   const { text, role, source } = normalized;
   
   try {
-    await apiCall("/write", "POST", { 
+    const writeResult = await apiCallWithRetry<{ status?: string; memory_id?: string; reason?: string; error_code?: string }>("/write", "POST", { 
       text, 
       source,
       role
     });
-    logger.info(`Stored ${role} message for session ${context.sessionId}`);
+    if (writeResult.status === "ok") {
+      logger.info(`Stored ${role} message for session ${context.sessionId}`);
+    } else {
+      logger.debug(`Write skipped for session ${context.sessionId}: ${writeResult.reason || writeResult.status || "unknown"}`);
+    }
   } catch (error) {
     logger.warn(`Failed to store message: ${formatApiError(error)}`);
   }
   
   if (role === "user" && text.length > 5) {
     try {
-      const searchResult = await apiCall<{ results: unknown[] }>("/search", "POST", {
+      const searchResult = await apiCallWithRetry<{ results: unknown[]; skipped?: boolean; reason?: string }>("/search", "POST", {
         query: text,
         top_k: 3,
       });
       
       if (searchResult.results && searchResult.results.length > 0) {
-        autoSearchCache = {
-          query: text,
-          results: searchResult.results,
-          timestamp: Date.now(),
-        };
+        setSessionAutoSearchCache(context.sessionId, text, searchResult.results);
         logger.info(`Auto-search cached ${searchResult.results.length} results for context`);
+      } else if (searchResult.skipped) {
+        logger.debug(`Auto-search skipped for session ${context.sessionId}: ${searchResult.reason || "query filtered"}`);
       }
     } catch (error) {
       logger.debug(`Auto-search skipped: ${formatApiError(error)}`);
@@ -1176,6 +1250,22 @@ function registerTools(): void {
       },
     },
     {
+      name: "get_hot_context",
+      description: "Get hot memory context for current session",
+      parameters: {
+        type: "object",
+        properties: {
+          limit: { type: "integer", description: "Maximum number of hot context items" }
+        },
+        required: [],
+        additionalProperties: false,
+      },
+      execute: async (params: { args?: Record<string, unknown>; context: ToolContext }) => {
+        const args = params.args || params;
+        return getHotContext(args as { limit?: number }, params.context);
+      },
+    },
+    {
       name: "get_auto_context",
       description: "Get relevant memories based on recent messages",
       parameters: {
@@ -1276,7 +1366,6 @@ function registerHooks(): void {
   const hooks = [
     { event: "message_received", handler: onMessageHandler },
     { event: "session_end", handler: onSessionEndHandler },
-    { event: "timer", handler: onTimerHandler },
   ];
   
   for (const hook of hooks) {
@@ -1319,6 +1408,10 @@ function unregisterHooks(): void {
 }
 
 function setupProcessHandlers(): void {
+  if (processHandlersRegistered) {
+    return;
+  }
+  processHandlersRegistered = true;
   const gracefulShutdown = (signal: string) => {
     if (isShuttingDown) return;
     isShuttingDown = true;
@@ -1362,6 +1455,7 @@ export async function enable(): Promise<void> {
     isEnabled = true;
     registerTools();
     registerHooks();
+    startAutoReflectScheduler();
     logger.info("Cortex Memory plugin enabled successfully");
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -1381,6 +1475,7 @@ export async function disable(): Promise<void> {
   unregisterHooks();
   unregisterTools();
   unregisterFallbackTools();
+  stopAutoReflectScheduler();
   stopPythonService();
   isEnabled = false;
   
@@ -1466,6 +1561,7 @@ export async function unregister(): Promise<void> {
   logger.info("Unregistering Cortex Memory plugin...");
   
   stopConfigWatcher();
+  stopAutoReflectScheduler();
   
   unregisterHooks();
   unregisterTools();
@@ -1475,20 +1571,23 @@ export async function unregister(): Promise<void> {
   
   isEnabled = false;
   isInitializing = false;
+  isRegistered = false;
   api = null;
   config = null;
+  autoSearchCacheBySession.clear();
   builtinMemory = null;
   registeredTools = [];
   registeredHooks = [];
   registeredFallbackTools = [];
   registeredHookHandlers.clear();
+  stopAutoReflectScheduler();
   configPath = null;
   
   logger.info("Cortex Memory plugin unregistered successfully");
 }
 
 export function register(pluginApi: OpenClawPluginApi, userConfig?: Partial<CortexMemoryConfig>): void {
-  if (isInitializing) {
+  if (isInitializing || isRegistered) {
     return;
   }
   isInitializing = true;
@@ -1563,11 +1662,13 @@ export function register(pluginApi: OpenClawPluginApi, userConfig?: Partial<Cort
   isEnabled = config.enabled !== false && initialEnabled;
 
   isInitializing = false;
+  isRegistered = true;
   logger.info("Cortex Memory plugin registered successfully");
 
   if (isEnabled) {
     registerTools();
     registerHooks();
+    startAutoReflectScheduler();
     initializeAsync().catch(error => {
       const message = error instanceof Error ? error.message : String(error);
       logger.error(`Failed to initialize Cortex Memory: ${message}`);

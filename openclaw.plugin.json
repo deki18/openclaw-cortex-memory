@@ -20,8 +20,7 @@
   },
   "hooks": [
     "message_received",
-    "session_end",
-    "timer"
+    "session_end"
   ],
   "tools": [
     {
@@ -88,6 +87,21 @@
           }
         },
         "required": ["entity"],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "get_hot_context",
+      "description": "Get hot memory context for current session",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "limit": {
+            "type": "integer",
+            "description": "Maximum number of hot context items"
+          }
+        },
+        "required": [],
         "additionalProperties": false
       }
     },
