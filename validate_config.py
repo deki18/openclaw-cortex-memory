@@ -302,7 +302,7 @@ def run_diagnostics(config: Dict[str, Any], verbose: bool = False) -> bool:
     
     print_header("Python Dependencies")
     dep_errors = check_python_dependencies()
-    for package in ["lancedb", "openai", "fastapi", "uvicorn", "pydantic", "networkx"]:
+    for package in ["lancedb", "openai", "fastapi", "uvicorn", "pydantic", "networkx", "tantivy"]:
         try:
             __import__(package)
             print_check(f"Package: {package}", True)

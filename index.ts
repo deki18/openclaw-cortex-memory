@@ -43,7 +43,7 @@ interface CortexMemoryConfig {
 
 interface ToolContext {
   agentId: string;
-  sessionId: string;
+  sessionId?: string;
   workspaceId: string;
 }
 
@@ -289,6 +289,35 @@ function normalizeIncomingMessage(payload: unknown): { text: string; role: strin
     return null;
   }
   return { text, role, source };
+}
+
+function resolveSessionId(context: ToolContext, payload?: unknown): string {
+  const fromContext = typeof context.sessionId === "string" ? context.sessionId.trim() : "";
+  if (fromContext) return fromContext;
+  const data = asRecord(payload);
+  const message = data ? asRecord(data.message) : null;
+  const eventData = data ? asRecord(data.data) : null;
+  const update = data ? asRecord(data.update) : null;
+  const updateMessage = update ? asRecord(update.message) : null;
+  const updateChat = updateMessage ? asRecord(updateMessage.chat) : null;
+  const direct = firstString([
+    data?.sessionId,
+    data?.session_id,
+    data?.conversationId,
+    data?.conversation_id,
+    data?.threadId,
+    data?.thread_id,
+    message?.sessionId,
+    eventData?.sessionId,
+  ]);
+  if (direct) return direct;
+  const chatId = firstString([
+    data?.chatId,
+    data?.chat_id,
+    updateChat?.id,
+  ]);
+  if (chatId) return `chat:${chatId}`;
+  return `fallback:${context.workspaceId || "default"}:${context.agentId || "agent"}`;
 }
 
 function compareVersions(a: string, b: string): number {
@@ -1060,9 +1089,10 @@ async function getAutoContext(args: { include_hot?: boolean }, context: ToolCont
     };
     hot_context?: unknown[];
   } = {};
+  const sessionId = resolveSessionId(context);
   
   clearStaleAutoSearchCache(now);
-  const sessionCache = autoSearchCacheBySession.get(context.sessionId);
+  const sessionCache = autoSearchCacheBySession.get(sessionId);
   if (sessionCache) {
     result.auto_search = {
       query: sessionCache.query,
@@ -1242,18 +1272,19 @@ async function onMessageHandler(payload: unknown, context: ToolContext): Promise
   const normalized = normalizeIncomingMessage(payload);
   if (!normalized) return;
   const { text, role, source } = normalized;
+  const sessionId = resolveSessionId(context, payload);
   
   try {
     const writeResult = await apiCallWithRetry<{ status?: string; memory_id?: string; reason?: string; error_code?: string }>("/write", "POST", { 
       text, 
       source,
       role,
-      session_id: context.sessionId
+      session_id: sessionId
     });
     if (writeResult.status === "ok") {
-      logger.info(`Stored ${role} message for session ${context.sessionId}`);
+      logger.info(`Stored ${role} message for session ${sessionId}`);
     } else {
-      logger.debug(`Write skipped for session ${context.sessionId}: ${writeResult.reason || writeResult.status || "unknown"}`);
+      logger.debug(`Write skipped for session ${sessionId}: ${writeResult.reason || writeResult.status || "unknown"}`);
     }
   } catch (error) {
     logger.warn(`Failed to store message: ${formatApiError(error)}`);
@@ -1264,14 +1295,14 @@ async function onMessageHandler(payload: unknown, context: ToolContext): Promise
       const searchResult = await apiCallWithRetry<{ results: unknown[]; skipped?: boolean; reason?: string }>("/search", "POST", {
         query: text,
         top_k: 3,
-        session_id: context.sessionId,
+        session_id: sessionId,
       });
       
       if (searchResult.results && searchResult.results.length > 0) {
-        setSessionAutoSearchCache(context.sessionId, text, searchResult.results);
+        setSessionAutoSearchCache(sessionId, text, searchResult.results);
         logger.info(`Auto-search cached ${searchResult.results.length} results for context`);
       } else if (searchResult.skipped) {
-        logger.debug(`Auto-search skipped for session ${context.sessionId}: ${searchResult.reason || "query filtered"}`);
+        logger.debug(`Auto-search skipped for session ${sessionId}: ${searchResult.reason || "query filtered"}`);
       }
     } catch (error) {
       logger.debug(`Auto-search skipped: ${formatApiError(error)}`);
@@ -1281,17 +1312,18 @@ async function onMessageHandler(payload: unknown, context: ToolContext): Promise
 
 async function onSessionEndHandler(payload: unknown, context: ToolContext): Promise<void> {
   if (!isEnabled) return;
+  const sessionId = resolveSessionId(context, payload);
   
   try {
     const endResult = await apiCallWithRetry<{ events_generated: number }>(
       "/session-end", 
       "POST",
       {
-        session_id: context.sessionId,
+        session_id: sessionId,
         sync_records: config?.autoSync ?? true,
       }
     );
-    logger.info(`Session ${context.sessionId} ended, generated ${endResult.events_generated} events`);
+    logger.info(`Session ${sessionId} ended, generated ${endResult.events_generated} events`);
   } catch (error) {
     logger.warn(`Failed to end session: ${formatApiError(error)}`);
   }
