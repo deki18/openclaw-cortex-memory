@@ -3,6 +3,15 @@ import { spawn, ChildProcess, execSync } from "child_process";
 import * as path from "path";
 import * as fs from "fs";
 import * as net from "net";
+import type { MemoryEngine } from "./src/engine/memory_engine";
+import { createTsEngine } from "./src/engine/ts_engine";
+import { createReadStore } from "./src/store/read_store";
+import { createWriteStore } from "./src/store/write_store";
+import { createSessionSync } from "./src/sync/session_sync";
+import { createSessionEnd } from "./src/session/session_end";
+import { createRuleStore } from "./src/rules/rule_store";
+import { createReflector } from "./src/reflect/reflector";
+import type { EngineMode } from "./src/engine/types";
 
 interface EmbeddingConfig {
   provider: string;
@@ -39,6 +48,7 @@ interface CortexMemoryConfig {
   autoReflect?: boolean;
   fallbackToBuiltin?: boolean;
   apiUrl?: string;
+  engineMode?: EngineMode;
 }
 
 interface ToolContext {
@@ -136,6 +146,7 @@ const defaultConfig: Partial<CortexMemoryConfig> = {
   autoReflect: false,
   enabled: true,
   fallbackToBuiltin: true,
+  engineMode: "ts",
 };
 
 interface CachedSearchResult {
@@ -168,6 +179,90 @@ let configPath: string | null = null;
 let pythonStartPromise: Promise<void> | null = null;
 let processHandlersRegistered = false;
 let pythonPidFilePath: string | null = null;
+let memoryEngine: MemoryEngine | null = null;
+
+function shouldUsePythonRuntime(): boolean {
+  return false;
+}
+
+function getMemoryRoot(): string {
+  const projectRoot = findProjectRoot();
+  return config?.dbPath ? path.resolve(config.dbPath) : path.join(projectRoot, "data", "memory");
+}
+
+function getSessionCachedAutoSearch(sessionId: string): { query: string; results: unknown[]; ageSeconds: number } | null {
+  clearStaleAutoSearchCache();
+  const cache = autoSearchCacheBySession.get(sessionId);
+  if (!cache) {
+    return null;
+  }
+  return {
+    query: cache.query,
+    results: cache.results,
+    ageSeconds: Math.floor((Date.now() - cache.timestamp) / 1000),
+  };
+}
+
+function resolveEngine(): MemoryEngine {
+  if (!config) {
+    throw new Error("Configuration not loaded");
+  }
+  const selectedMode: EngineMode = "ts";
+  if (memoryEngine && memoryEngine.mode === "ts") {
+    return memoryEngine;
+  }
+  const projectRoot = findProjectRoot();
+  const memoryRoot = getMemoryRoot();
+  const readStore = createReadStore({
+    projectRoot,
+    dbPath: config.dbPath,
+    logger,
+  });
+  const writeStore = createWriteStore({
+    projectRoot,
+    dbPath: config.dbPath,
+    logger,
+  });
+  const sessionSync = createSessionSync({
+    projectRoot,
+    dbPath: config.dbPath,
+    logger,
+    writeStore,
+  });
+  const sessionEnd = createSessionEnd({
+    projectRoot,
+    dbPath: config.dbPath,
+    logger,
+    syncMemory: sessionSync.syncMemory,
+  });
+  const ruleStore = createRuleStore({
+    projectRoot,
+    dbPath: config.dbPath,
+    logger,
+  });
+  const reflector = createReflector({
+    projectRoot,
+    dbPath: config.dbPath,
+    logger,
+    ruleStore,
+  });
+  memoryEngine = createTsEngine({
+    readStore,
+    writeStore,
+    sessionSync,
+    sessionEnd,
+    reflector,
+    memoryRoot,
+    getCachedAutoSearch: getSessionCachedAutoSearch,
+    resolveSessionId: (context, payload) => resolveSessionId(context, payload),
+    normalizeIncomingMessage,
+    setSessionAutoSearchCache,
+    defaultAutoSync: config.autoSync ?? true,
+    autoReflect: config.autoReflect ?? false,
+    logger,
+  });
+  return memoryEngine;
+}
 
 function clearStaleAutoSearchCache(now: number = Date.now()): void {
   for (const [sessionId, cache] of autoSearchCacheBySession.entries()) {
@@ -1287,12 +1382,13 @@ async function getPluginStatus(_args: Record<string, unknown>, _context: ToolCon
       enabled: isEnabled,
       service_running: pythonProcess !== null,
       fallback_enabled: config?.fallbackToBuiltin ?? true,
-      builtin_memory_available: builtinMemory !== null
+      builtin_memory_available: builtinMemory !== null,
+      engine_mode: config?.engineMode ?? "python",
     }
   };
 }
 
-async function onMessageHandler(payload: unknown, context: ToolContext): Promise<void> {
+async function onMessagePythonHandler(payload: unknown, context: ToolContext): Promise<void> {
   if (!isEnabled) return;
   const normalized = normalizeIncomingMessage(payload);
   if (!normalized) return;
@@ -1335,7 +1431,7 @@ async function onMessageHandler(payload: unknown, context: ToolContext): Promise
   }
 }
 
-async function onSessionEndHandler(payload: unknown, context: ToolContext): Promise<void> {
+async function onSessionEndPythonHandler(payload: unknown, context: ToolContext): Promise<void> {
   if (!isEnabled) return;
   const sessionId = resolveSessionId(context, payload);
   
@@ -1354,7 +1450,7 @@ async function onSessionEndHandler(payload: unknown, context: ToolContext): Prom
   }
 }
 
-async function onTimerHandler(payload: unknown, _context: ToolContext): Promise<void> {
+async function onTimerPythonHandler(payload: unknown, _context: ToolContext): Promise<void> {
   if (!isEnabled) return;
   
   const data = payload as { action?: string };
@@ -1384,6 +1480,18 @@ async function onTimerHandler(payload: unknown, _context: ToolContext): Promise<
   }
 }
 
+async function onMessageHandler(payload: unknown, context: ToolContext): Promise<void> {
+  await resolveEngine().onMessage(payload, context);
+}
+
+async function onSessionEndHandler(payload: unknown, context: ToolContext): Promise<void> {
+  await resolveEngine().onSessionEnd(payload, context);
+}
+
+async function onTimerHandler(payload: unknown, context: ToolContext): Promise<void> {
+  await resolveEngine().onTimer(payload, context);
+}
+
 function registerTools(): void {
   if (!api) return;
   
@@ -1402,7 +1510,7 @@ function registerTools(): void {
       },
       execute: async (params: { args?: Record<string, unknown>; context: ToolContext }) => {
         const args = params.args || params;
-        return searchMemoryWithFallback(args as { query: string; top_k?: number }, params.context);
+        return resolveEngine().searchMemory(args as { query: string; top_k?: number }, params.context);
       },
     },
     {
@@ -1429,7 +1537,7 @@ function registerTools(): void {
       },
       execute: async (params: { args?: Record<string, unknown>; context: ToolContext }) => {
         const args = params.args || params;
-        return storeEventWithFallback(args as Parameters<typeof storeEventWithFallback>[0], params.context);
+        return resolveEngine().storeEvent(args as Parameters<typeof storeEventWithFallback>[0], params.context);
       },
     },
     {
@@ -1445,7 +1553,7 @@ function registerTools(): void {
       },
       execute: async (params: { args?: Record<string, unknown>; context: ToolContext }) => {
         const args = params.args || params;
-        return queryGraph(args as { entity: string }, params.context);
+        return resolveEngine().queryGraph(args as { entity: string }, params.context);
       },
     },
     {
@@ -1461,7 +1569,7 @@ function registerTools(): void {
       },
       execute: async (params: { args?: Record<string, unknown>; context: ToolContext }) => {
         const args = params.args || params;
-        return getHotContext(args as { limit?: number }, params.context);
+        return resolveEngine().getHotContext(args as { limit?: number }, params.context);
       },
     },
     {
@@ -1477,7 +1585,7 @@ function registerTools(): void {
       },
       execute: async (params: { args?: Record<string, unknown>; context: ToolContext }) => {
         const args = params.args || params;
-        return getAutoContext(args as { include_hot?: boolean }, params.context);
+        return resolveEngine().getAutoContext(args as { include_hot?: boolean }, params.context);
       },
     },
     {
@@ -1491,7 +1599,7 @@ function registerTools(): void {
       },
       execute: async (params: { args?: Record<string, unknown>; context: ToolContext }) => {
         const args = params.args || params;
-        return reflectMemory(args, params.context);
+        return resolveEngine().reflectMemory(args, params.context);
       },
     },
     {
@@ -1505,7 +1613,7 @@ function registerTools(): void {
       },
       execute: async (params: { args?: Record<string, unknown>; context: ToolContext }) => {
         const args = params.args || params;
-        return syncMemory(args, params.context);
+        return resolveEngine().syncMemory(args, params.context);
       },
     },
     {
@@ -1521,7 +1629,7 @@ function registerTools(): void {
       },
       execute: async (params: { args?: Record<string, unknown>; context: ToolContext }) => {
         const args = params.args || params;
-        return deleteMemory(args as { memory_id: string }, params.context);
+        return resolveEngine().deleteMemory(args as { memory_id: string }, params.context);
       },
     },
     {
@@ -1535,7 +1643,7 @@ function registerTools(): void {
       },
       execute: async (params: { args?: Record<string, unknown>; context: ToolContext }) => {
         const args = params.args || params;
-        return runDiagnostics(args, params.context);
+        return resolveEngine().runDiagnostics(args, params.context);
       },
     },
   ];
@@ -1616,6 +1724,10 @@ function setupProcessHandlers(): void {
     isShuttingDown = true;
     logger.info(`Received ${signal}, shutting down...`);
     stopConfigWatcher();
+    if (!shouldUsePythonRuntime()) {
+      process.exit(0);
+      return;
+    }
     shutdownPythonApi().then(() => {
       killPythonProcess();
       process.exit(0);
@@ -1649,8 +1761,12 @@ export async function enable(): Promise<void> {
   
   try {
     unregisterFallbackTools();
-    await startPythonService();
-    await waitForService();
+    if (shouldUsePythonRuntime()) {
+      await startPythonService();
+      await waitForService();
+    } else {
+      logger.info("TS engine mode active, skip Python runtime startup");
+    }
     isEnabled = true;
     registerTools();
     registerHooks();
@@ -1675,8 +1791,11 @@ export async function disable(): Promise<void> {
   unregisterTools();
   unregisterFallbackTools();
   stopAutoReflectScheduler();
-  await stopPythonServiceAsync();
+  if (shouldUsePythonRuntime()) {
+    await stopPythonServiceAsync();
+  }
   isEnabled = false;
+  memoryEngine = null;
   
   if (config?.fallbackToBuiltin && builtinMemory) {
     logger.info("Falling back to OpenClaw builtin memory system");
@@ -1766,7 +1885,11 @@ export async function unregister(): Promise<void> {
   unregisterTools();
   unregisterFallbackTools();
   
-  await stopPythonServiceAsync();
+  if (shouldUsePythonRuntime()) {
+    await stopPythonServiceAsync();
+  } else {
+    killPythonProcess();
+  }
   
   isEnabled = false;
   isInitializing = false;
@@ -1775,6 +1898,7 @@ export async function unregister(): Promise<void> {
   config = null;
   autoSearchCacheBySession.clear();
   builtinMemory = null;
+  memoryEngine = null;
   registeredTools = [];
   registeredHooks = [];
   registeredFallbackTools = [];
@@ -1827,7 +1951,9 @@ export function register(pluginApi: OpenClawPluginApi, userConfig?: Partial<Cort
     enabled: effectiveConfig.enabled ?? defaultConfig.enabled,
     fallbackToBuiltin: effectiveConfig.fallbackToBuiltin ?? defaultConfig.fallbackToBuiltin,
     apiUrl: effectiveConfig.apiUrl ?? "http://127.0.0.1:8765",
+    engineMode: "ts",
   } as CortexMemoryConfig;
+  memoryEngine = null;
   
   if (api.getBuiltinMemory) {
     try {
@@ -1845,6 +1971,7 @@ export function register(pluginApi: OpenClawPluginApi, userConfig?: Partial<Cort
     reranker: { model: config.reranker.model },
     enabled: config.enabled,
     fallbackToBuiltin: config.fallbackToBuiltin,
+    engineMode: config.engineMode,
   });
 
   checkOpenClawVersion().catch(e => logger.warn(`Version check failed: ${e}`));
@@ -1863,6 +1990,7 @@ export function register(pluginApi: OpenClawPluginApi, userConfig?: Partial<Cort
   isInitializing = false;
   isRegistered = true;
   logger.info("Cortex Memory plugin registered successfully");
+  logger.info(`Cortex Memory engine mode: ${resolveEngine().mode}`);
 
   if (isEnabled) {
     registerTools();
@@ -1886,11 +2014,11 @@ export function register(pluginApi: OpenClawPluginApi, userConfig?: Partial<Cort
 }
 
 async function initializeAsync(): Promise<void> {
-  try {
-    await startPythonService();
-    await waitForService();
-    logger.info("Cortex Memory Python service started successfully");
-  } catch (error) {
-    throw error;
+  if (!shouldUsePythonRuntime()) {
+    logger.info("TS engine mode active, initializeAsync skipped Python runtime");
+    return;
   }
+  await startPythonService();
+  await waitForService();
+  logger.info("Cortex Memory Python service started successfully");
 }

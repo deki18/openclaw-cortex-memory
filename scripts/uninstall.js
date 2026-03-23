@@ -2,14 +2,13 @@
 
 const fs = require('fs');
 const path = require('path');
-const { execSync, spawn } = require('child_process');
 
 const PLUGIN_NAME = 'openclaw-cortex-memory';
 
 function findProjectRoot() {
   let current = __dirname;
   while (current !== path.dirname(current)) {
-    if (fs.existsSync(path.join(current, 'api')) && fs.existsSync(path.join(current, 'memory_engine'))) {
+    if (fs.existsSync(path.join(current, 'package.json')) && fs.existsSync(path.join(current, 'openclaw.plugin.json'))) {
       return current;
     }
     current = path.dirname(current);
@@ -32,31 +31,6 @@ function findOpenClawConfig() {
   return null;
 }
 
-function stopPythonService(projectRoot) {
-  console.log('Stopping Python service...');
-  
-  try {
-    if (process.platform === 'win32') {
-      execSync('taskkill /f /im python.exe /fi "WINDOWTITLE eq cortex-memory*" 2>nul', { stdio: 'ignore' });
-      const result = execSync('netstat -ano | findstr :8765', { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'ignore'] });
-      const lines = result.trim().split('\n').filter(l => l.includes('LISTENING'));
-      for (const line of lines) {
-        const match = line.match(/(\d+)\s*$/);
-        if (match) {
-          try {
-            execSync(`taskkill /f /pid ${match[1]}`, { stdio: 'ignore' });
-          } catch {}
-        }
-      }
-    } else {
-      execSync('pkill -f "api.server" 2>/dev/null || true', { stdio: 'ignore' });
-    }
-    console.log('Python service stopped.');
-  } catch (e) {
-    console.log('No running Python service found or failed to stop.');
-  }
-}
-
 function removeVenv(projectRoot) {
   const venvPath = path.join(projectRoot, 'venv');
   if (fs.existsSync(venvPath)) {
@@ -73,9 +47,8 @@ function removeVenv(projectRoot) {
 }
 
 function removeBuildArtifacts(projectRoot) {
-  const pluginPath = path.join(projectRoot, 'plugin');
-  const distPath = path.join(pluginPath, 'dist');
-  const nodeModulesPath = path.join(pluginPath, 'node_modules');
+  const distPath = path.join(projectRoot, 'dist');
+  const nodeModulesPath = path.join(projectRoot, 'node_modules');
   
   if (fs.existsSync(distPath)) {
     console.log(`Removing dist: ${distPath}`);
@@ -174,11 +147,10 @@ Examples:
   cortex-memory uninstall --keep-data  # Keep memory data files
 
 This will:
-  1. Stop the Python backend service
-  2. Remove the Python virtual environment
-  3. Remove node_modules and build artifacts
-  4. Remove memory data files (unless --keep-data)
-  5. Remove plugin from openclaw.json (unless --keep-config)
+  1. Remove local virtual environment folder (if exists)
+  2. Remove node_modules and build artifacts
+  3. Remove memory data files (unless --keep-data)
+  4. Remove plugin from openclaw.json (unless --keep-config)
 `);
 }
 
@@ -194,8 +166,6 @@ function uninstall(args) {
   const projectRoot = findProjectRoot();
   console.log(`Project root: ${projectRoot}`);
   console.log('');
-  
-  stopPythonService(projectRoot);
   
   removeVenv(projectRoot);
   

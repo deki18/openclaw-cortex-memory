@@ -1,73 +1,63 @@
 # OpenClaw Cortex Memory
 
-OpenClaw 长期记忆插件，提供语义搜索、事件追踪、知识图谱和规则管理功能。
+OpenClaw 长期记忆插件（纯 TypeScript 实现），提供跨会话检索、事件存储、规则反思与增量同步能力。
 
 ## 功能特性
 
 | 特性 | 说明 |
 |------|------|
-| 语义记忆 | 基于 LanceDB 的向量检索，支持混合搜索（向量+BM25）和重排序 |
-| 情景记忆 | 事件时间线追踪，记录里程碑和重要节点，支持实体和关系 |
-| 知识图谱 | 实体关系网络，支持 Schema 验证、关系约束、无环检测 |
-| 规则记忆 | CORTEX_RULES.md 存储核心规则，通过反思和晋升机制自动更新 |
-| 热上下文 | 当前会话上下文 + 近期数据实时注入，优先级最高 |
-| 记忆生命周期 | 自动衰减（半衰期30天）、反思、晋升机制，确保记忆质量 |
+| 语义检索 | `search_memory` 支持 query + top_k |
+| 事件存储 | `store_event` 将摘要写入归档 |
+| 上下文注入 | `get_hot_context` / `get_auto_context` |
+| 增量同步 | `sync_memory` 按状态文件增量导入 |
+| 规则演进 | `reflect_memory` 更新 `CORTEX_RULES.md` |
+| 运行诊断 | `diagnostics` 检查本地存储状态 |
 
 ## 安装
 
 ### 前置要求
 
-- Python 3.10+
 - Node.js 22+
 - OpenAI API Key（或其他兼容 API）
 
 ### 安装步骤
 
 ```bash
-cd ~/.openclaw/extensions
-git clone https://github.com/deki18/openclaw-cortex-memory.git
-cd openclaw-cortex-memory
+cd <plugin-dir>
 npm install
 ```
 
-`npm install` 会自动创建 Python 虚拟环境并安装依赖。
+`npm install` 会自动执行 TypeScript 构建并生成 `dist/`。
 
 ## 配置
 
-在 `~/.openclaw/openclaw.json` 中添加：
+在 `openclaw.json` 中添加：
 
 ```json
 {
   "plugins": {
-    "load": {
-      "paths": ["~/.openclaw/extensions/openclaw-cortex-memory"]
-    },
-    "slots": {
-      "memory": "openclaw-cortex-memory"
-    },
+    "slots": { "memory": "openclaw-cortex-memory" },
     "entries": {
       "openclaw-cortex-memory": {
         "enabled": true,
         "config": {
+          "engineMode": "ts",
+          "dbPath": "<optional-memory-dir>",
+          "autoSync": true,
+          "autoReflect": false,
           "embedding": {
             "provider": "openai-compatible",
             "model": "text-embedding-3-large",
-            "dimensions": 3072,
-            "apiKey": "${OPENAI_API_KEY}"
+            "dimensions": 3072
           },
           "llm": {
             "provider": "openai",
-            "model": "gpt-4",
-            "apiKey": "${OPENAI_API_KEY}"
+            "model": "gpt-4"
           },
           "reranker": {
             "provider": "siliconflow",
-            "model": "BAAI/bge-reranker-v2-m3",
-            "apiKey": "${SILICONFLOW_API_KEY}",
-            "baseURL": "https://api.siliconflow.cn/v1/rerank"
-          },
-          "autoSync": true,
-          "autoReflect": false
+            "model": "BAAI/bge-reranker-v2-m3"
+          }
         }
       }
     }
@@ -81,10 +71,12 @@ npm install
 |--------|------|------|
 | `embedding.provider` | 是 | 嵌入模型提供商：`openai`、`openai-compatible`、`ollama` |
 | `embedding.model` | 是 | 嵌入模型名称 |
-| `embedding.dimensions` | 是 | 向量维度，需与模型匹配 |
+| `embedding.dimensions` | 否 | 向量维度，需与模型匹配 |
 | `llm.provider` | 是 | LLM 提供商，用于记忆提取和反思 |
 | `llm.model` | 是 | LLM 模型名称 |
 | `reranker` | 否 | 重排序模型配置，推荐配置以提升检索精度 |
+| `engineMode` | 否 | 固定 `ts` |
+| `dbPath` | 否 | 数据目录，默认 `<plugin-dir>/data/memory` |
 | `autoSync` | 否 | 会话结束时自动同步历史记录，默认 `true` |
 | `autoReflect` | 否 | 自动触发记忆反思，默认 `false` |
 
@@ -94,68 +86,6 @@ npm install
 openclaw config validate
 openclaw gateway restart
 ```
-
-Python 后端服务会在插件加载时自动启动。
-
-### 首次启动配置
-
-本插件安装并首次启动 OpenClaw 后，请将以下内容发送给你的Agent：
-
-```
-请将以下内容写入 `~/.openclaw/workspace/MEMORY.md`：
-## Cortex Memory Integration Rules
-
-You are equipped with the Cortex Memory engine. You must proactively manage and utilize your memory using the provided skills.
-
-1. Proactive Retrieval: If a user asks about past interactions, projects, preferences, or technical context that is not in your immediate short-term memory, you MUST use the search_memory tool to retrieve semantic memory before answering. Do not guess or hallucinate past events.
-
-2. Auto Context: For proactive memory retrieval without explicit search, use get_auto_context to get automatically retrieved relevant memories based on recent user messages, plus hot context.
-
-3. Hot Context: When you need current session context including CORTEX_RULES.md and recent data, use get_hot_context to retrieve the hot memory layer.
-
-4. Relational Queries: If the user asks about the relationship between entities (e.g., "Who worked on Project X?", "What technologies does Person Y use?"), use the query_graph tool to query the memory graph. The graph supports 16 entity types (Person, Task, Project, Event, Document, Concept, Location, Organization, Credential, Preference, Goal, Note, Resource, Topic, Entity, Unknown) and 19 relation types with schema validation.
-
-5. Memory Consolidation: When you learn a new, important fact about the user, complete a significant milestone, or resolve a complex bug, you should summarize it and use store_event to record it. Include entity type and attributes for better graph integration.
-
-6. Self-Reflection: Periodically, or when asked to review past performance, use the reflect_memory tool to generate insights from your episodic memory.
-
-7. Historical Sync: To import historical session data from OpenClaw workspace, use sync_memory tool. This is incremental and won't reprocess already imported data.
-
-8. Graph Statistics: To check the memory graph status, use CLI command cortex-memory graph --stats to see total nodes, edges, and type distribution. Use cortex-memory graph --validate to check graph integrity.
-
-9. Schema Awareness: The graph memory enforces schema constraints including type validation, cardinality (one_to_one, many_to_one, many_to_many), and acyclic detection for dependency relations. Invalid relations will be rejected.
-
-10. Trust the Engine: The memory engine handles vector search, BM25 keyword matching, and time-decay automatically. Trust its top results.
-```
-
-## 数据迁移
-
-首次安装后，可从 OpenClaw 原有记忆文件导入历史数据。
-
-### 导入数据源
-
-| 来源路径 | 说明 |
-|----------|------|
-| `~/.openclaw/workspace/memory/*.md` | 每日总结文件 |
-| `~/.openclaw/agents/main/sessions/*.jsonl` | 会话记录 |
-
-### 导入方式
-
-**方式一：CLI 命令**
-
-```bash
-cortex-memory import --path ~/.openclaw
-```
-
-**方式二：工具调用**
-
-在对话中让 Agent 调用 `sync_memory` 工具：
-
-```
-请帮我同步历史会话数据到记忆系统
-```
-
-导入过程为增量处理，已导入的数据不会重复处理。
 
 ## 可用工具
 
@@ -168,65 +98,40 @@ cortex-memory import --path ~/.openclaw
 | `get_auto_context` | 自动检索相关记忆 + 热上下文 |
 | `reflect_memory` | 触发记忆反思，将事件转化为规则 |
 | `sync_memory` | 同步 OpenClaw 历史会话（增量） |
-| `promote_memory` | 晋升热记忆为规则 |
 | `delete_memory` | 删除指定记忆 |
-| `update_memory` | 更新记忆内容、类型或权重 |
-| `cleanup_memories` | 清理指定天数前的记忆 |
 | `diagnostics` | 系统诊断 |
 
 ## CLI 命令
 
-CLI 命令需要在插件目录下运行：
+CLI 命令需在插件目录运行：
 
 ```bash
-cd ~/.openclaw/extensions/openclaw-cortex-memory
 npx cortex-memory status              # 查看插件状态
 npx cortex-memory enable              # 启用插件
 npx cortex-memory disable             # 禁用插件（回退到内置记忆）
 npx cortex-memory uninstall           # 卸载插件
 npx cortex-memory uninstall --keep-data  # 卸载但保留数据
-npx cortex-memory config --validate   # 验证配置
-npx cortex-memory import --path PATH  # 导入历史数据
-npx cortex-memory doctor              # 系统诊断
-npx cortex-memory graph <entity>      # 查询实体关系
-npx cortex-memory graph --stats       # 显示图谱统计
-npx cortex-memory graph --validate    # 验证图谱完整性
-npx cortex-memory graph --types       # 列出 Schema 类型
-npx cortex-memory graph --relations   # 列出关系类型
-```
-
-或者直接运行脚本：
-
-```bash
-cd ~/.openclaw/extensions/openclaw-cortex-memory
-node scripts/cli.js status
+npx cortex-memory help                # 查看命令帮助
 ```
 
 ## 数据存储
 
 | 路径 | 说明 |
 |------|------|
-| `~/.openclaw/workspace/cortex_memory/` | 记忆数据库（LanceDB） |
-| `~/.openclaw/workspace/cortex_memory/episodic.jsonl` | 情景记忆 |
-| `~/.openclaw/workspace/cortex_memory/graph.jsonl` | 知识图谱（JSONL append-only） |
-| `~/.openclaw/workspace/CORTEX_RULES.md` | 核心规则文件 |
-
-## 记忆写入触发
-
-| 触发方式 | 说明 |
-|----------|------|
-| 消息钩子 | 用户消息自动触发实时写入（需插件启用） |
-| 会话结束 | 批量处理会话记录和每日总结 |
-| 工具调用 | `store_event`、`sync_memory` 手动触发 |
+| `<dbPath>/MEMORY.md` | 记忆说明 |
+| `<dbPath>/CORTEX_RULES.md` | 规则文件 |
+| `<dbPath>/sessions/active/sessions.jsonl` | 活跃会话 |
+| `<dbPath>/sessions/archive/sessions.jsonl` | 归档事件 |
+| `<dbPath>/.sync_state.json` | 同步增量状态 |
+| `<dbPath>/.session_end_state.json` | session_end 幂等状态 |
+| `<dbPath>/.rule_store_state.json` | 规则去重状态 |
 
 ## 注意事项
 
 1. **API Key 安全**：使用环境变量 `${OPENAI_API_KEY}` 而非硬编码
 2. **向量维度**：必须与嵌入模型匹配，如 `text-embedding-3-large` 为 3072
-3. **重排序**：推荐配置 reranker 以提升检索精度
-4. **热插拔**：支持启用/禁用插件而无需重启 OpenClaw
-5. **数据迁移**：卸载时使用 `--keep-data` 保留记忆数据
-6. **首次使用**：安装后运行 `cortex-memory import` 导入历史数据
+3. **重排序**：可选配置 `reranker` 以提升检索精度
+4. **单栈运行**：当前版本为纯 TS，无 Python 运行时依赖
 
 ## 许可证
 

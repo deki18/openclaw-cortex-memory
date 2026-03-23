@@ -44,7 +44,7 @@
   ],
   "openclaw": {
     "plugin": true,
-    "requiresPython": true,
+    "requiresPython": false,
     "cli": "cortex-memory"
   }
 }

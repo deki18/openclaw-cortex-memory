@@ -176,8 +176,14 @@
       },
       "apiUrl": {
         "type": "string",
-        "description": "URL of the Cortex Memory Python API server",
+        "description": "URL of the memory service API",
         "default": "http://127.0.0.1:8765"
+      },
+      "engineMode": {
+        "type": "string",
+        "description": "Memory engine mode",
+        "enum": ["ts"],
+        "default": "ts"
       },
       "dbPath": {
         "type": "string",
@@ -285,19 +291,5 @@
       }
     },
     "additionalProperties": false
-  },
-  "python": {
-    "required": true,
-    "version": ">=3.10",
-    "dependencies": [
-      "fastapi",
-      "lancedb",
-      "networkx",
-      "openai",
-      "pydantic",
-      "pyyaml",
-      "requests",
-      "uvicorn"
-    ]
   }
 }
