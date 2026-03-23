@@ -16,6 +16,34 @@ class MemoryEventService:
         self.episodic = episodic_memory or EpisodicMemory()
         self.graph = graph or EnhancedMemoryGraph()
 
+    @staticmethod
+    def _normalize_graph_node_type(raw_type: Optional[str]) -> str:
+        if not raw_type:
+            return "Concept"
+        normalized = str(raw_type).strip().lower()
+        type_mapping = {
+            "person": "Person",
+            "organization": "Organization",
+            "project": "Project",
+            "task": "Task",
+            "goal": "Goal",
+            "event": "Event",
+            "location": "Location",
+            "document": "Document",
+            "message": "Message",
+            "thread": "Thread",
+            "note": "Note",
+            "account": "Account",
+            "device": "Device",
+            "credential": "Credential",
+            "concept": "Concept",
+            "technology": "Technology",
+            "topic": "Topic",
+            "entity": "Concept",
+            "other": "Concept",
+        }
+        return type_mapping.get(normalized, "Concept")
+
     def store_event(
         self, 
         summary: str, 
@@ -36,7 +64,7 @@ class MemoryEventService:
                     if isinstance(entity, dict):
                         node_id = entity.get("id") or entity.get("name")
                         node_name = entity.get("name", node_id)
-                        node_type = entity.get("type") or "Entity"
+                        node_type = self._normalize_graph_node_type(entity.get("type"))
                         attributes = entity.get("attributes")
                         
                         if node_id:
@@ -52,7 +80,7 @@ class MemoryEventService:
                         entity_name = str(entity)
                         self.graph.add_node(
                             node_id=entity_name,
-                            node_type="Entity",
+                            node_type="Concept",
                             name=entity_name,
                             memory_id=memory_id
                         )

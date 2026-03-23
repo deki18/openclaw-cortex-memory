@@ -72,6 +72,8 @@ def extract_plugin_config(openclaw_config: Dict[str, Any]) -> Dict[str, Any]:
             result["embedding_api_key"] = embedding["apiKey"]
         if embedding.get("baseURL"):
             result["embedding_base_url"] = embedding["baseURL"]
+        elif embedding.get("baseUrl"):
+            result["embedding_base_url"] = embedding["baseUrl"]
         if embedding.get("dimensions"):
             result["embedding_dimensions"] = embedding["dimensions"]
     
@@ -85,6 +87,8 @@ def extract_plugin_config(openclaw_config: Dict[str, Any]) -> Dict[str, Any]:
             result["llm_api_key"] = llm["apiKey"]
         if llm.get("baseURL"):
             result["llm_base_url"] = llm["baseURL"]
+        elif llm.get("baseUrl"):
+            result["llm_base_url"] = llm["baseUrl"]
     
     reranker = plugin_config.get("reranker", {})
     if reranker:
@@ -96,6 +100,10 @@ def extract_plugin_config(openclaw_config: Dict[str, Any]) -> Dict[str, Any]:
             result["reranker_api_key"] = reranker["apiKey"]
         if reranker.get("endpoint"):
             result["reranker_endpoint"] = reranker["endpoint"]
+        elif reranker.get("baseURL"):
+            result["reranker_endpoint"] = reranker["baseURL"]
+        elif reranker.get("baseUrl"):
+            result["reranker_endpoint"] = reranker["baseUrl"]
     
     if plugin_config.get("dbPath"):
         result["lancedb_path"] = plugin_config["dbPath"]
@@ -195,7 +203,7 @@ def validate_reranker_config(config: Dict[str, Any]) -> List[str]:
 
 def check_python_dependencies() -> List[str]:
     errors = []
-    required = ["lancedb", "openai", "fastapi", "uvicorn", "pydantic", "networkx"]
+    required = ["lancedb", "openai", "fastapi", "uvicorn", "pydantic", "networkx", "tantivy"]
     
     for package in required:
         try:

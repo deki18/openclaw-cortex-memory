@@ -353,6 +353,34 @@ class EnhancedMemoryController:
         
         return chunks
 
+    @staticmethod
+    def _normalize_graph_node_type(raw_type: Optional[str]) -> str:
+        if not raw_type:
+            return "Concept"
+        normalized = str(raw_type).strip().lower()
+        type_mapping = {
+            "person": "Person",
+            "organization": "Organization",
+            "project": "Project",
+            "task": "Task",
+            "goal": "Goal",
+            "event": "Event",
+            "location": "Location",
+            "document": "Document",
+            "message": "Message",
+            "thread": "Thread",
+            "note": "Note",
+            "account": "Account",
+            "device": "Device",
+            "credential": "Credential",
+            "concept": "Concept",
+            "technology": "Technology",
+            "topic": "Topic",
+            "entity": "Concept",
+            "other": "Concept",
+        }
+        return type_mapping.get(normalized, "Concept")
+
     def _write_sync(
         self,
         text: str,
@@ -420,9 +448,10 @@ class EnhancedMemoryController:
             entities = structured_summary.entities
             for entity in entities[:5]:
                 entity_text = entity.text if hasattr(entity, 'text') else str(entity)
+                entity_type = getattr(entity, "entity_type", None)
                 self.memory_graph.add_node(
                     node_id=f"entity:{entity_text}",
-                    node_type="entity",
+                    node_type=self._normalize_graph_node_type(entity_type),
                     name=entity_text,
                     memory_id=memory_id
                 )
@@ -780,7 +809,7 @@ class EnhancedMemoryController:
         try:
             for entity_name in event.entities:
                 node, warnings = self.memory_graph.add_node(
-                    node_type="Entity",
+                    node_type="Concept",
                     name=entity_name,
                     memory_id=event.id,
                     validate=False
@@ -830,15 +859,15 @@ class EnhancedMemoryController:
                 for entity in entities:
                     if isinstance(entity, dict):
                         entity_text = entity.get("name") or entity.get("text") or str(entity)
-                        entity_type = entity.get("type", "Entity")
+                        entity_type = entity.get("type")
                         entity_attrs = entity.get("attributes", {})
                     else:
                         entity_text = str(entity)
-                        entity_type = "Entity"
+                        entity_type = None
                         entity_attrs = {}
                     
                     node, warnings = self.memory_graph.add_node(
-                        node_type=entity_type,
+                        node_type=self._normalize_graph_node_type(entity_type),
                         name=entity_text,
                         attributes=entity_attrs,
                         memory_id=memory_id,

@@ -7,14 +7,18 @@ const { spawn } = require('child_process');
 const PLUGIN_NAME = 'openclaw-cortex-memory';
 
 function findOpenClawConfig() {
+  const explicitConfigPath = process.env.OPENCLAW_CONFIG_PATH || '';
+  const basePath = process.env.OPENCLAW_BASE_PATH || '';
+  const homePath = process.env.USERPROFILE || process.env.HOME || '';
   const possiblePaths = [
+    explicitConfigPath,
+    basePath ? path.join(basePath, 'openclaw.json') : '',
     path.join(process.cwd(), 'openclaw.json'),
-    path.join(process.env.USERPROFILE || process.env.HOME || '', '.openclaw', 'openclaw.json'),
-    path.join(process.env.OPENCLAW_BASE_PATH || '', 'openclaw.json'),
+    homePath ? path.join(homePath, '.openclaw', 'openclaw.json') : '',
   ];
   
   for (const p of possiblePaths) {
-    if (fs.existsSync(p)) {
+    if (p && fs.existsSync(p)) {
       return p;
     }
   }
