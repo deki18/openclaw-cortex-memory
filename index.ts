@@ -1145,7 +1145,10 @@ async function reflectMemory(_args: Record<string, unknown>, _context: ToolConte
   }
   
   try {
-    await apiCallWithRetry("/reflect", "POST");
+    await apiCallWithRetry("/reflect", "POST", undefined, {
+      timeout: 120000,
+      maxRetries: 2,
+    });
     return { success: true };
   } catch (error) {
     const message = formatApiError(error);
@@ -1160,7 +1163,10 @@ async function syncMemory(_args: Record<string, unknown>, _context: ToolContext)
   }
   
   try {
-    await apiCallWithRetry("/sync", "POST");
+    await apiCallWithRetry("/sync", "POST", undefined, {
+      timeout: 300000,
+      maxRetries: 2,
+    });
     return { success: true };
   } catch (error) {
     const message = formatApiError(error);
@@ -1175,7 +1181,10 @@ async function promoteMemory(_args: Record<string, unknown>, _context: ToolConte
   }
   
   try {
-    await apiCallWithRetry("/promote", "POST");
+    await apiCallWithRetry("/promote", "POST", undefined, {
+      timeout: 120000,
+      maxRetries: 2,
+    });
     return { success: true };
   } catch (error) {
     const message = formatApiError(error);
@@ -1352,13 +1361,22 @@ async function onTimerHandler(payload: unknown, _context: ToolContext): Promise<
   const action = data.action;
   try {
     if (action === "sync") {
-      await apiCall("/sync", "POST");
+      await apiCallWithRetry("/sync", "POST", undefined, {
+        timeout: 300000,
+        maxRetries: 2,
+      });
       logger.info("Scheduled sync complete");
     } else if (action === "reflect" || (config?.autoReflect && !action)) {
-      await apiCall("/reflect", "POST");
+      await apiCallWithRetry("/reflect", "POST", undefined, {
+        timeout: 120000,
+        maxRetries: 2,
+      });
       logger.info("Scheduled reflection complete");
     } else if (action === "promote") {
-      await apiCall("/promote", "POST");
+      await apiCallWithRetry("/promote", "POST", undefined, {
+        timeout: 120000,
+        maxRetries: 2,
+      });
       logger.info("Scheduled promotion complete");
     }
   } catch (error) {
