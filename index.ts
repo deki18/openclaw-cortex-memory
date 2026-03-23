@@ -702,6 +702,29 @@ async function startPythonServiceInternal(): Promise<void> {
 
     let started = false;
     let stderrBuffer = "";
+    let settled = false;
+    let startupTimeout: ReturnType<typeof setTimeout> | null = null;
+
+    const resolveOnce = () => {
+      if (settled) return;
+      settled = true;
+      started = true;
+      if (startupTimeout) {
+        clearTimeout(startupTimeout);
+        startupTimeout = null;
+      }
+      resolve();
+    };
+
+    const rejectOnce = (error: Error) => {
+      if (settled) return;
+      settled = true;
+      if (startupTimeout) {
+        clearTimeout(startupTimeout);
+        startupTimeout = null;
+      }
+      reject(error);
+    };
 
     pythonProcess.stdout?.on("data", (data: Buffer) => {
       const output = data.toString();
@@ -709,8 +732,7 @@ async function startPythonServiceInternal(): Promise<void> {
         logger.info(`[Python] ${output.trim()}`);
       }
       if (output.includes("Cortex Memory API started") || output.includes("Application startup complete")) {
-        started = true;
-        resolve();
+        resolveOnce();
       }
     });
 
@@ -720,30 +742,33 @@ async function startPythonServiceInternal(): Promise<void> {
       if (!output.toLowerCase().includes("key") && !output.toLowerCase().includes("token")) {
         logger.warn(`[Python] ${output.trim()}`);
       }
-      if (output.includes("Cortex Memory API started") && !started) {
-        started = true;
-        resolve();
+      if (
+        output.includes("Cortex Memory API started") ||
+        output.includes("Application startup complete") ||
+        output.includes("Uvicorn running on")
+      ) {
+        resolveOnce();
       }
     });
 
     pythonProcess.on("error", (error: Error) => {
       logger.error("Failed to start Python service:", error.message);
-      reject(error);
+      rejectOnce(error);
     });
 
     pythonProcess.on("exit", (code: number | null) => {
       clearPythonPidFile();
       pythonProcess = null;
       if (!started && code !== 0 && !isShuttingDown) {
-        reject(new Error(`Python service exited with code ${code}. Stderr: ${stderrBuffer.slice(-500)}`));
+        rejectOnce(new Error(`Python service exited with code ${code}. Stderr: ${stderrBuffer.slice(-500)}`));
       }
     });
 
-    setTimeout(() => {
+    startupTimeout = setTimeout(() => {
       if (!started) {
         const tail = stderrBuffer ? `\nLast stderr: ${stderrBuffer.slice(-500)}` : "";
         killPythonProcess();
-        reject(new Error(`Timeout waiting for Python service to start (300s)${tail}`));
+        rejectOnce(new Error(`Timeout waiting for Python service to start (300s)${tail}`));
       }
     }, 300000);
   });
@@ -834,8 +859,6 @@ function formatApiError(error: unknown): string {
 
 interface PendingRequest<T> {
   promise: Promise<T>;
-  resolve: (value: T) => void;
-  reject: (error: Error) => void;
 }
 
 const pendingRequests: Map<string, PendingRequest<unknown>> = new Map();
@@ -866,30 +889,17 @@ async function apiCallWithRetry<T>(
       logger.debug(`Reusing pending request for ${endpoint}`);
       return pending.promise as Promise<T>;
     }
-    
-    let resolveRef: (value: unknown) => void;
-    let rejectRef: (error: Error) => void;
-    const promise = new Promise<T>((resolve, reject) => {
-      resolveRef = resolve as (value: unknown) => void;
-      rejectRef = reject;
-    });
-    
+
+    const requestPromise = apiCallInternal<T>(endpoint, method, body, maxRetries, baseDelay, timeout)
+      .finally(() => {
+        setTimeout(() => pendingRequests.delete(requestKey), requestDebounceMs);
+      });
+
     pendingRequests.set(requestKey, {
-      promise,
-      resolve: resolveRef!,
-      reject: rejectRef!
+      promise: requestPromise
     });
-    
-    try {
-      const result = await apiCallInternal<T>(endpoint, method, body, maxRetries, baseDelay, timeout);
-      resolveRef!(result);
-      return result;
-    } catch (error) {
-      rejectRef!(error as Error);
-      throw error;
-    } finally {
-      setTimeout(() => pendingRequests.delete(requestKey), requestDebounceMs);
-    }
+
+    return await requestPromise;
   }
   
   return apiCallInternal<T>(endpoint, method, body, maxRetries, baseDelay, timeout);
