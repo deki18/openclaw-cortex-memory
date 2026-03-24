@@ -180,7 +180,7 @@ openclaw gateway restart
 | llm.apiKey | 否 | ${LLM_API_KEY} | LLM API Key |
 | llm.baseURL | 否 | - | LLM API 端点 |
 | reranker.provider | 否 | - | `api`（推荐） |
-| reranker.model | 否 | - | Reranker 模型 |
+| reranker.model | 是 | - | Reranker 模型 |
 | reranker.apiKey | 否 | ${RERANKER_API_KEY} | Reranker API Key |
 | reranker.baseURL | 否 | - | Reranker API 端点 |
 | dbPath | 否 | `<plugin-dir>/data/memory` | 记忆目录路径 |

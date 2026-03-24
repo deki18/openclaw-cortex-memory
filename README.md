@@ -84,7 +84,8 @@ npm install
 | `llm.model` | 是 | LLM 模型名称 |
 | `llm.apiKey` | 否 | LLM API Key |
 | `llm.baseURL` | 否 | LLM API 端点 |
-| `reranker` | 否 | 重排序模型配置，推荐配置以提升检索精度 |
+| `reranker.provider` | 否 | 建议使用 `api` |
+| `reranker.model` | 是 | Reranker 模型名称 |
 | `reranker.apiKey` | 否 | Reranker API Key |
 | `reranker.baseURL` | 否 | Reranker API 端点 |
 | `engineMode` | 否 | 固定 `ts` |
