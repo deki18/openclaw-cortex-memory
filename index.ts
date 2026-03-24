@@ -175,6 +175,8 @@ let registeredFallbackTools: string[] = [];
 const registeredHookHandlers = new Map<string, (payload: unknown, context: ToolContext) => Promise<void>>();
 let configWatchInterval: ReturnType<typeof setInterval> | null = null;
 let autoReflectInterval: ReturnType<typeof setInterval> | null = null;
+let lastAutoReflectArchiveMarker = "";
+let lastAutoReflectRunAt = 0;
 let configPath: string | null = null;
 let pythonStartPromise: Promise<void> | null = null;
 let processHandlersRegistered = false;
@@ -188,6 +190,19 @@ function shouldUsePythonRuntime(): boolean {
 function getMemoryRoot(): string {
   const projectRoot = findProjectRoot();
   return config?.dbPath ? path.resolve(config.dbPath) : path.join(projectRoot, "data", "memory");
+}
+
+function getArchiveMarker(): string {
+  try {
+    const archivePath = path.join(getMemoryRoot(), "sessions", "archive", "sessions.jsonl");
+    if (!fs.existsSync(archivePath)) {
+      return "missing";
+    }
+    const stats = fs.statSync(archivePath);
+    return `${stats.size}:${stats.mtimeMs}`;
+  } catch {
+    return "error";
+  }
 }
 
 function getSessionCachedAutoSearch(sessionId: string): { query: string; results: unknown[]; ageSeconds: number } | null {
@@ -546,9 +561,22 @@ function startAutoReflectScheduler(): void {
       agentId: "cortex-memory-scheduler",
       workspaceId: "system",
     };
+    const marker = getArchiveMarker();
+    const now = Date.now();
+    if (marker === "missing" || marker === "error") {
+      return;
+    }
+    if (marker === lastAutoReflectArchiveMarker) {
+      return;
+    }
+    if (now - lastAutoReflectRunAt < 5 * 60 * 1000) {
+      return;
+    }
     resolveEngine().reflectMemory({}, schedulerContext)
       .then(result => {
         if (result.success) {
+          lastAutoReflectArchiveMarker = marker;
+          lastAutoReflectRunAt = now;
           logger.info("Scheduled reflection complete");
         } else {
           logger.warn(`Auto-reflect failed: ${result.error ?? "unknown_error"}`);

@@ -9,6 +9,7 @@ interface LoggerLike {
 
 interface SessionEndState {
   sessions: Record<string, { signature: string; endedAt: string }>;
+  recovery: Record<string, { signature: string; detectedAt: string }>;
 }
 
 interface SessionEndOptions {
@@ -29,19 +30,22 @@ interface SessionRecord {
 function readState(filePath: string): SessionEndState {
   try {
     if (!fs.existsSync(filePath)) {
-      return { sessions: {} };
+      return { sessions: {}, recovery: {} };
     }
     const content = fs.readFileSync(filePath, "utf-8").trim();
     if (!content) {
-      return { sessions: {} };
+      return { sessions: {}, recovery: {} };
     }
     const parsed = JSON.parse(content) as SessionEndState;
     if (!parsed.sessions || typeof parsed.sessions !== "object") {
-      return { sessions: {} };
+      return { sessions: {}, recovery: {} };
+    }
+    if (!parsed.recovery || typeof parsed.recovery !== "object") {
+      parsed.recovery = {};
     }
     return parsed;
   } catch {
-    return { sessions: {} };
+    return { sessions: {}, recovery: {} };
   }
 }
 
@@ -82,6 +86,48 @@ function summarize(records: SessionRecord[]): { summary: string; entities: strin
   return { summary, entities, outcome, signature };
 }
 
+function detectFailureToSuccess(records: SessionRecord[]): {
+  triggered: boolean;
+  failureSample: string;
+  successSample: string;
+  signature: string;
+} {
+  const failurePattern = /(失败|报错|错误|异常|超时|未通过|timeout|error|failed|failure)/i;
+  const successPattern = /(修复|解决|成功|完成|恢复|通过|ok|fixed|resolved|success)/i;
+
+  let seenFailure = false;
+  let failureSample = "";
+  let successSample = "";
+  let failureIndex = -1;
+  let successIndex = -1;
+
+  for (let index = 0; index < records.length; index += 1) {
+    const record = records[index];
+    const content = typeof record.content === "string" ? record.content.trim() : "";
+    if (!content) {
+      continue;
+    }
+    if (!seenFailure && failurePattern.test(content)) {
+      seenFailure = true;
+      failureSample = content.slice(0, 160);
+      failureIndex = index;
+      continue;
+    }
+    if (seenFailure && successPattern.test(content)) {
+      successSample = content.slice(0, 160);
+      successIndex = index;
+      break;
+    }
+  }
+
+  if (!seenFailure || successIndex < 0) {
+    return { triggered: false, failureSample: "", successSample: "", signature: "" };
+  }
+
+  const signature = `${failureIndex}:${successIndex}:${failureSample}:${successSample}`;
+  return { triggered: true, failureSample, successSample, signature };
+}
+
 export function createSessionEnd(options: SessionEndOptions): {
   onSessionEnd(args: { sessionId: string; syncRecords: boolean }): Promise<{ events_generated: number; sync_result?: { imported: number; skipped: number; filesProcessed: number } }>;
 } {
@@ -107,6 +153,7 @@ export function createSessionEnd(options: SessionEndOptions): {
 
     const state = readState(statePath);
     const { summary, entities, outcome, signature } = summarize(records);
+    const recoveryDetection = detectFailureToSuccess(records);
     const previous = state.sessions[sessionId];
     let generated = 0;
 
@@ -131,6 +178,39 @@ export function createSessionEnd(options: SessionEndOptions): {
       options.logger.info(`TS session_end generated event for session ${sessionId}`);
     } else {
       options.logger.debug(`TS session_end skipped duplicate event for session ${sessionId}`);
+    }
+
+    if (recoveryDetection.triggered) {
+      const previousRecovery = state.recovery[sessionId];
+      if (!previousRecovery || previousRecovery.signature !== recoveryDetection.signature) {
+        const recoveryEvent = {
+          id: `evt_${Date.now().toString(36)}_recovery`,
+          timestamp: new Date().toISOString(),
+          summary: `Recovered from failure to success in session ${sessionId}`,
+          entities: ["failure_recovery", "session_learning"],
+          outcome: "success_after_failure",
+          details: {
+            failure: recoveryDetection.failureSample,
+            success: recoveryDetection.successSample,
+          },
+          source_file: `session_end:recovery:${sessionId}`,
+          session_id: sessionId,
+        };
+        const archiveDir = path.dirname(archiveSessionsPath);
+        if (!fs.existsSync(archiveDir)) {
+          fs.mkdirSync(archiveDir, { recursive: true });
+        }
+        fs.appendFileSync(archiveSessionsPath, `${JSON.stringify(recoveryEvent)}\n`, "utf-8");
+        state.recovery[sessionId] = {
+          signature: recoveryDetection.signature,
+          detectedAt: new Date().toISOString(),
+        };
+        writeState(statePath, state);
+        generated += 1;
+        options.logger.info(`TS session_end generated recovery event for session ${sessionId}`);
+      } else {
+        options.logger.debug(`TS session_end skipped duplicate recovery event for session ${sessionId}`);
+      }
     }
 
     const syncResult = args.syncRecords ? await options.syncMemory() : undefined;

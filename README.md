@@ -105,6 +105,24 @@ openclaw config validate
 openclaw gateway restart
 ```
 
+### 主 Agent 注入说明
+
+首次接入后，建议把下面这段发给主 Agent，确保其按记忆工作流执行：
+
+```text
+你已接入 Cortex Memory。请遵循以下规则：
+1) 当用户询问历史对话、偏好、项目上下文时，先调用 search_memory 再回答。
+2) 需要当前会话热上下文时调用 get_hot_context。
+3) 需要自动召回相关记忆时调用 get_auto_context。
+4) 在一件重要事情结束并形成明确结果后，再调用 store_event 记录（不要在过程进行中频繁记录）。
+5) 需要实体关联关系时调用 query_graph。
+6) 当任务经历“失败→调整→最终成功”时，优先用 store_event 记录失败原因与成功方案，再调用 reflect_memory 沉淀可复用规则。
+7) 需要导入历史会话时调用 sync_memory。
+8) 出现配置校验失败、记忆读写异常、检索结果异常或数据目录问题时，优先调用 diagnostics。
+9) 同一任务内不要反复调用 store_event 或 reflect_memory；仅在关键节点或任务收尾时触发一次。
+10) 不要臆造历史事实；无法确认时必须先检索。
+```
+
 ## 可用工具
 
 | 工具 | 说明 |
