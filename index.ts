@@ -542,9 +542,19 @@ function startAutoReflectScheduler(): void {
     if (!isEnabled) {
       return;
     }
-    apiCallWithRetry("/reflect", "POST")
-      .then(() => logger.info("Scheduled reflection complete"))
-      .catch(error => logger.warn(`Auto-reflect failed: ${formatApiError(error)}`));
+    const schedulerContext: ToolContext = {
+      agentId: "cortex-memory-scheduler",
+      workspaceId: "system",
+    };
+    resolveEngine().reflectMemory({}, schedulerContext)
+      .then(result => {
+        if (result.success) {
+          logger.info("Scheduled reflection complete");
+        } else {
+          logger.warn(`Auto-reflect failed: ${result.error ?? "unknown_error"}`);
+        }
+      })
+      .catch(error => logger.warn(`Auto-reflect failed: ${String(error)}`));
   }, 5 * 60 * 1000);
 }
 
@@ -1776,8 +1786,6 @@ export async function enable(): Promise<void> {
     if (shouldUsePythonRuntime()) {
       await startPythonService();
       await waitForService();
-    } else {
-      logger.info("TS engine mode active, skip Python runtime startup");
     }
     isEnabled = true;
     registerTools();
@@ -2027,7 +2035,6 @@ export function register(pluginApi: OpenClawPluginApi, userConfig?: Partial<Cort
 
 async function initializeAsync(): Promise<void> {
   if (!shouldUsePythonRuntime()) {
-    logger.info("TS engine mode active, initializeAsync skipped Python runtime");
     return;
   }
   await startPythonService();
