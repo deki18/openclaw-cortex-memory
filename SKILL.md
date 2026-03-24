@@ -173,16 +173,16 @@ openclaw gateway restart
 | embedding.provider | 是 | - | `api`（推荐） |
 | embedding.model | 是 | - | Embedding 模型名称 |
 | embedding.dimensions | 否 | 3072 | 向量维度 |
-| embedding.apiKey | 否 | ${OPENAI_API_KEY} | API Key |
-| embedding.baseURL | 否 | - | 自定义端点 |
+| embedding.apiKey | 是 | ${EMBEDDING_API_KEY} | Embedding API Key |
+| embedding.baseURL | 是 | - | Embedding API 端点 |
 | llm.provider | 是 | - | `api`（推荐） |
 | llm.model | 是 | - | LLM 模型名称 |
-| llm.apiKey | 否 | ${LLM_API_KEY} | LLM API Key |
-| llm.baseURL | 否 | - | LLM API 端点 |
+| llm.apiKey | 是 | ${LLM_API_KEY} | LLM API Key |
+| llm.baseURL | 是 | - | LLM API 端点 |
 | reranker.provider | 否 | - | `api`（推荐） |
 | reranker.model | 是 | - | Reranker 模型 |
-| reranker.apiKey | 否 | ${RERANKER_API_KEY} | Reranker API Key |
-| reranker.baseURL | 否 | - | Reranker API 端点 |
+| reranker.apiKey | 是 | ${RERANKER_API_KEY} | Reranker API Key |
+| reranker.baseURL | 是 | - | Reranker API 端点 |
 | dbPath | 否 | `<plugin-dir>/data/memory` | 记忆目录路径 |
 | engineMode | 否 | `ts` | 固定为 TS 引擎 |
 | autoSync | 否 | true | 会话结束自动同步 |

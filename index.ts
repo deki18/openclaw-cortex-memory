@@ -561,11 +561,20 @@ function validateConfig(cfg: CortexMemoryConfig): string[] {
   if (!cfg.embedding?.provider || !cfg.embedding?.model) {
     errors.push("embedding.provider and embedding.model are required. Please configure them in openclaw.json");
   }
+  if (!cfg.embedding?.apiKey || !cfg.embedding?.baseURL) {
+    errors.push("embedding.apiKey and embedding.baseURL are required. Please configure third-party embedding endpoint credentials.");
+  }
   if (!cfg.llm?.provider || !cfg.llm?.model) {
     errors.push("llm.provider and llm.model are required. Please configure them in openclaw.json");
   }
+  if (!cfg.llm?.apiKey || !cfg.llm?.baseURL) {
+    errors.push("llm.apiKey and llm.baseURL are required. Please configure third-party LLM endpoint credentials.");
+  }
   if (!cfg.reranker?.model) {
     errors.push("reranker.model is required. Please configure it in openclaw.json");
+  }
+  if (!cfg.reranker?.apiKey || !cfg.reranker?.baseURL) {
+    errors.push("reranker.apiKey and reranker.baseURL are required. Please configure third-party reranker endpoint credentials.");
   }
   
   return errors;

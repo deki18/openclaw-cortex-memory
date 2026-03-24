@@ -78,16 +78,16 @@ npm install
 | `embedding.provider` | 是 | 建议使用 `api`（统一第三方接口模式） |
 | `embedding.model` | 是 | 嵌入模型名称 |
 | `embedding.dimensions` | 否 | 向量维度，需与模型匹配 |
-| `embedding.apiKey` | 否 | Embedding API Key（建议环境变量） |
-| `embedding.baseURL` | 否 | Embedding API 端点 |
+| `embedding.apiKey` | 是 | Embedding API Key（建议 `${EMBEDDING_API_KEY}`） |
+| `embedding.baseURL` | 是 | Embedding API 端点 |
 | `llm.provider` | 是 | 建议使用 `api` |
 | `llm.model` | 是 | LLM 模型名称 |
-| `llm.apiKey` | 否 | LLM API Key |
-| `llm.baseURL` | 否 | LLM API 端点 |
+| `llm.apiKey` | 是 | LLM API Key（建议 `${LLM_API_KEY}`） |
+| `llm.baseURL` | 是 | LLM API 端点 |
 | `reranker.provider` | 否 | 建议使用 `api` |
 | `reranker.model` | 是 | Reranker 模型名称 |
-| `reranker.apiKey` | 否 | Reranker API Key |
-| `reranker.baseURL` | 否 | Reranker API 端点 |
+| `reranker.apiKey` | 是 | Reranker API Key（建议 `${RERANKER_API_KEY}`） |
+| `reranker.baseURL` | 是 | Reranker API 端点 |
 | `engineMode` | 否 | 固定 `ts` |
 | `dbPath` | 否 | 数据目录，默认 `<plugin-dir>/data/memory` |
 | `autoSync` | 否 | 会话结束时自动同步历史记录，默认 `true` |
