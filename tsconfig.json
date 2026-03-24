@@ -14,6 +14,6 @@
     "declarationMap": true,
     "sourceMap": true
   },
-  "include": ["index.ts"],
-  "exclude": ["node_modules", "dist", "venv", "memory_engine", "api", "cli", "tests", "scripts"]
+  "include": ["index.ts", "src/**/*.ts"],
+  "exclude": ["node_modules", "dist", "tests"]
 }

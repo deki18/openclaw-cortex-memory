@@ -459,7 +459,10 @@ function findProjectRoot(): string {
   }
   let current = process.cwd();
   while (current !== path.dirname(current)) {
-    if (fs.existsSync(path.join(current, "api")) && fs.existsSync(path.join(current, "memory_engine"))) {
+    if (
+      fs.existsSync(path.join(current, "openclaw.plugin.json")) &&
+      fs.existsSync(path.join(current, "package.json"))
+    ) {
       return current;
     }
     current = path.dirname(current);

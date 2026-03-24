@@ -36,12 +36,14 @@ metadata:
 
 ### 安装
 
+首次安装（从 Git 克隆）：
+
 ```bash
-cd <plugin-dir>
+cd ~/.openclaw/extensions
+git clone https://github.com/deki18/openclaw-cortex-memory.git
+cd openclaw-cortex-memory
 npm install
 ```
-
-`npm install` 会自动执行 TypeScript 构建。
 
 ### 配置
 
@@ -58,19 +60,25 @@ npm install
           "engineMode": "ts",
           "dbPath": "<optional-memory-dir>",
           "autoSync": true,
-          "autoReflect": false,
+          "autoReflect": true,
           "embedding": {
             "provider": "api",
             "model": "text-embedding-3-large",
+            "apiKey": "${EMBEDDING_API_KEY}",
+            "baseURL": "https://your-embedding-endpoint/v1",
             "dimensions": 3072
           },
           "llm": {
-            "provider": "openai",
-            "model": "gpt-4"
+            "provider": "api",
+            "model": "gpt-4",
+            "apiKey": "${LLM_API_KEY}",
+            "baseURL": "https://your-llm-endpoint/v1"
           },
           "reranker": {
-            "provider": "siliconflow",
-            "model": "BAAI/bge-reranker-v2-m3"
+            "provider": "api",
+            "model": "BAAI/bge-reranker-v2-m3",
+            "apiKey": "${RERANKER_API_KEY}",
+            "baseURL": "https://your-reranker-endpoint/v1/rerank"
           }
         }
       }
@@ -162,15 +170,19 @@ openclaw gateway restart
 
 | 选项 | 必需 | 默认值 | 说明 |
 |------|------|--------|------|
-| embedding.provider | 是 | - | `openai` / `openai-compatible` / `jina` |
+| embedding.provider | 是 | - | `api`（推荐） |
 | embedding.model | 是 | - | Embedding 模型名称 |
 | embedding.dimensions | 否 | 3072 | 向量维度 |
 | embedding.apiKey | 否 | ${OPENAI_API_KEY} | API Key |
 | embedding.baseURL | 否 | - | 自定义端点 |
-| llm.provider | 是 | - | LLM 提供商 |
+| llm.provider | 是 | - | `api`（推荐） |
 | llm.model | 是 | - | LLM 模型名称 |
-| reranker.provider | 否 | - | Reranker 提供商 |
+| llm.apiKey | 否 | ${LLM_API_KEY} | LLM API Key |
+| llm.baseURL | 否 | - | LLM API 端点 |
+| reranker.provider | 否 | - | `api`（推荐） |
 | reranker.model | 否 | - | Reranker 模型 |
+| reranker.apiKey | 否 | ${RERANKER_API_KEY} | Reranker API Key |
+| reranker.baseURL | 否 | - | Reranker API 端点 |
 | dbPath | 否 | `<plugin-dir>/data/memory` | 记忆目录路径 |
 | engineMode | 否 | `ts` | 固定为 TS 引擎 |
 | autoSync | 否 | true | 会话结束自动同步 |
