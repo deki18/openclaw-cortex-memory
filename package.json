@@ -38,7 +38,9 @@
   "files": [
     "dist/",
     "index.ts",
-    "scripts/",
+    "scripts/cli.js",
+    "scripts/install.js",
+    "scripts/uninstall.js",
     "openclaw.plugin.json",
     "SKILL.md"
   ],
