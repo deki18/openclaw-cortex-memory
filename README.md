@@ -107,8 +107,6 @@ npm install
   }
 }
 ```
-## 配置完成后
-pnpm openclaw gateway restart
 
 ### 配置项说明
 
