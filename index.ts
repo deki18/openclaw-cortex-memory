@@ -1566,14 +1566,16 @@ async function onTimerPythonHandler(payload: unknown, _context: ToolContext): Pr
 }
 
 async function onMessageHandler(payload: unknown, context: ToolContext): Promise<void> {
-  if (isInternalSession(context.sessionId)) {
+  const sessionId = resolveSessionId(context, payload);
+  if (isInternalSession(sessionId)) {
     return;
   }
   await runWithTimeout(resolveEngine().onMessage(payload, context), HOOK_GUARD_TIMEOUT_MS, "onMessage hook");
 }
 
 async function onSessionEndHandler(payload: unknown, context: ToolContext): Promise<void> {
-  if (isInternalSession(context.sessionId)) {
+  const sessionId = resolveSessionId(context, payload);
+  if (isInternalSession(sessionId)) {
     return;
   }
   await runWithTimeout(resolveEngine().onSessionEnd(payload, context), HOOK_GUARD_TIMEOUT_MS, "onSessionEnd hook");
