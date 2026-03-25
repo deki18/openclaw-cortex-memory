@@ -14,6 +14,13 @@ interface ReflectorOptions {
   ruleStore: {
     addRule(args: { sectionTitle: string; content: string }): { added: boolean; reason?: string };
   };
+  llm?: {
+    provider: string;
+    model: string;
+    apiKey?: string;
+    baseURL?: string;
+    baseUrl?: string;
+  };
 }
 
 function readJsonl(filePath: string): Record<string, unknown>[] {
@@ -41,6 +48,68 @@ function textOf(record: Record<string, unknown>): string {
   return "";
 }
 
+function normalizeBaseUrl(value?: string): string {
+  if (!value) return "";
+  return value.endsWith("/") ? value.slice(0, -1) : value;
+}
+
+async function requestRuleFromLlm(args: {
+  summary: string;
+  outcome: string;
+  model: string;
+  apiKey: string;
+  baseUrl: string;
+}): Promise<string | null> {
+  const endpoint = args.baseUrl.endsWith("/chat/completions")
+    ? args.baseUrl
+    : `${args.baseUrl}/chat/completions`;
+  const prompt = `事件摘要: ${args.summary}\n结果: ${args.outcome}\n请生成一条可复用的工程规则，要求简洁、可执行、单句输出。`;
+  const body = {
+    model: args.model,
+    temperature: 0.2,
+    messages: [
+      { role: "system", content: "你是工程规则提炼器。输出只包含规则正文，不要编号，不要解释。" },
+      { role: "user", content: prompt },
+    ],
+  };
+  let lastError: unknown = null;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 15000);
+    try {
+      const response = await fetch(endpoint, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${args.apiKey}`,
+        },
+        body: JSON.stringify(body),
+        signal: controller.signal,
+      });
+      clearTimeout(timeoutId);
+      if (!response.ok) {
+        lastError = new Error(`llm_http_${response.status}`);
+        continue;
+      }
+      const json = await response.json() as {
+        choices?: Array<{ message?: { content?: string } }>;
+      };
+      const content = json?.choices?.[0]?.message?.content?.trim() || "";
+      if (content) {
+        return content.slice(0, 500);
+      }
+      lastError = new Error("llm_empty");
+    } catch (error) {
+      clearTimeout(timeoutId);
+      lastError = error;
+    }
+  }
+  if (lastError) {
+    throw lastError;
+  }
+  return null;
+}
+
 export function createReflector(options: ReflectorOptions): {
   reflectMemory(): Promise<{ status: string; message: string; reflected_count: number }>;
   promoteMemory(): Promise<{ status: string; promoted_count: number }>;
@@ -58,7 +127,26 @@ export function createReflector(options: ReflectorOptions): {
         continue;
       }
       const outcome = typeof record.outcome === "string" ? record.outcome : "unknown";
-      const ruleText = `From historical event: ${summary}. Outcome: ${outcome}.`;
+      let ruleText = `From historical event: ${summary}. Outcome: ${outcome}.`;
+      const llmModel = options.llm?.model || "";
+      const llmApiKey = options.llm?.apiKey || "";
+      const llmBaseUrl = normalizeBaseUrl(options.llm?.baseURL || options.llm?.baseUrl);
+      if (llmModel && llmApiKey && llmBaseUrl) {
+        try {
+          const generated = await requestRuleFromLlm({
+            summary,
+            outcome,
+            model: llmModel,
+            apiKey: llmApiKey,
+            baseUrl: llmBaseUrl,
+          });
+          if (generated) {
+            ruleText = generated;
+          }
+        } catch (error) {
+          options.logger.warn(`LLM reflection failed, fallback to template rule: ${error}`);
+        }
+      }
       const added = options.ruleStore.addRule({
         sectionTitle: "Reflected Rule",
         content: ruleText,

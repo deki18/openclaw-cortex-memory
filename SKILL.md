@@ -36,7 +36,16 @@ metadata:
 
 ### 安装
 
-快速安装（推荐，npm 发布版）：
+快速安装（推荐，显式来源）：
+
+```bash
+cd ~/openclaw
+pnpm openclaw plugins install clawhub:openclaw-cortex-memory
+pnpm openclaw plugins enable openclaw-cortex-memory
+pnpm openclaw gateway restart
+```
+
+若尚未在 ClawHub 发布，使用 npm 回退安装：
 
 ```bash
 cd ~/openclaw
@@ -49,11 +58,16 @@ pnpm openclaw gateway restart
 
 ```bash
 cd ~/openclaw
-pnpm openclaw plugins install openclaw-cortex-memory@alpha
+pnpm openclaw plugins uninstall openclaw-cortex-memory
+pnpm openclaw plugins install clawhub:openclaw-cortex-memory
+pnpm openclaw plugins enable openclaw-cortex-memory
 pnpm openclaw gateway restart
 ```
 
-安装前如果 `openclaw.json` 已经提前写了 `allow/slots/entries` 指向本插件，先临时移除，安装后再加回，避免安装前校验报 `plugin not found`。
+说明：
+- 推荐显式安装来源，减少 ClawHub-first 时代的来源歧义。
+- 使用 `plugins install` 的安装记录方式，避免 `loaded without install/load-path provenance`。
+- 保持 `plugins.allow` 显式包含 `openclaw-cortex-memory`，避免运行时把插件判定为未绑定信任源。
 
 ### 本地打包安装（源码模式）
 
@@ -82,6 +96,7 @@ npm install
 ```json
 {
   "plugins": {
+    "allow": ["openclaw-cortex-memory"],
     "slots": { "memory": "openclaw-cortex-memory" },
     "entries": {
       "openclaw-cortex-memory": {

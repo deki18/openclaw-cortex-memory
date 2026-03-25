@@ -30,6 +30,14 @@ interface WriteStoreOptions {
   projectRoot: string;
   dbPath?: string;
   logger: LoggerLike;
+  embedding?: {
+    provider: string;
+    model: string;
+    apiKey?: string;
+    baseURL?: string;
+    baseUrl?: string;
+    dimensions?: number;
+  };
 }
 
 interface PersistedRecord {
@@ -42,6 +50,7 @@ interface PersistedRecord {
   quality_level: "low" | "medium" | "high";
   quality_score: number;
   text_hash: string;
+  embedding?: number[];
 }
 
 function normalizeText(input: string): string {
@@ -91,6 +100,62 @@ function computeHash(text: string): string {
   return crypto.createHash("sha256").update(text).digest("hex");
 }
 
+function normalizeBaseUrl(value?: string): string {
+  if (!value) return "";
+  return value.endsWith("/") ? value.slice(0, -1) : value;
+}
+
+async function requestEmbedding(args: {
+  text: string;
+  model: string;
+  apiKey: string;
+  baseUrl: string;
+  dimensions?: number;
+}): Promise<number[] | null> {
+  const endpoint = args.baseUrl.endsWith("/embeddings") ? args.baseUrl : `${args.baseUrl}/embeddings`;
+  const body: Record<string, unknown> = {
+    input: args.text,
+    model: args.model,
+  };
+  if (typeof args.dimensions === "number" && Number.isFinite(args.dimensions) && args.dimensions > 0) {
+    body.dimensions = args.dimensions;
+  }
+  let lastError: unknown = null;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 10000);
+    try {
+      const response = await fetch(endpoint, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${args.apiKey}`,
+        },
+        body: JSON.stringify(body),
+        signal: controller.signal,
+      });
+      clearTimeout(timeoutId);
+      if (!response.ok) {
+        lastError = new Error(`embedding_http_${response.status}`);
+        continue;
+      }
+      const json = await response.json() as { data?: Array<{ embedding?: number[] }> };
+      const embedding = json?.data?.[0]?.embedding;
+      if (Array.isArray(embedding) && embedding.length > 0) {
+        return embedding.filter(item => Number.isFinite(item));
+      }
+      lastError = new Error("embedding_empty");
+    } catch (error) {
+      clearTimeout(timeoutId);
+      lastError = error;
+    }
+  }
+  if (lastError) {
+    throw lastError;
+  }
+  return null;
+}
+
 export function createWriteStore(options: WriteStoreOptions): { writeMemory(args: WriteMemoryArgs): Promise<WriteMemoryResult> } {
   const memoryRoot = options.dbPath ? path.resolve(options.dbPath) : path.join(options.projectRoot, "data", "memory");
   const activeSessionsPath = path.join(memoryRoot, "sessions", "active", "sessions.jsonl");
@@ -137,6 +202,25 @@ export function createWriteStore(options: WriteStoreOptions): { writeMemory(args
       quality_score: quality.score,
       text_hash: textHash,
     };
+    const embeddingModel = options.embedding?.model || "";
+    const embeddingApiKey = options.embedding?.apiKey || "";
+    const embeddingBaseUrl = normalizeBaseUrl(options.embedding?.baseURL || options.embedding?.baseUrl);
+    if (embeddingModel && embeddingApiKey && embeddingBaseUrl) {
+      try {
+        const embedding = await requestEmbedding({
+          text: cleaned,
+          model: embeddingModel,
+          apiKey: embeddingApiKey,
+          baseUrl: embeddingBaseUrl,
+          dimensions: options.embedding?.dimensions,
+        });
+        if (embedding && embedding.length > 0) {
+          record.embedding = embedding;
+        }
+      } catch (error) {
+        options.logger.warn(`Embedding request failed, fallback to lexical store: ${error}`);
+      }
+    }
 
     ensureDirForFile(activeSessionsPath);
     fs.appendFileSync(activeSessionsPath, `${JSON.stringify(record)}\n`, "utf-8");

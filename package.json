@@ -9,9 +9,15 @@
   },
   "scripts": {
     "build": "tsc && node -e \"require('fs').copyFileSync('openclaw.plugin.json','dist/openclaw.plugin.json')\"",
+    "typecheck": "tsc --noEmit",
+    "check:version": "node scripts/check-version.js",
+    "test:compat": "node scripts/compat-regression.js",
+    "test:model": "node scripts/model-regression.js",
+    "test:all": "npm run test:compat && npm run test:model",
+    "release:check": "node scripts/release-pipeline.js",
     "dev": "tsc --watch",
-    "prepublishOnly": "npm run build",
-    "postinstall": "node scripts/install.js"
+    "prepare": "npm run build",
+    "prepublishOnly": "npm run check:version && npm run build && npm run test:all"
   },
   "keywords": [
     "openclaw",
@@ -37,9 +43,7 @@
   },
   "files": [
     "dist/",
-    "index.ts",
     "scripts/cli.js",
-    "scripts/install.js",
     "scripts/uninstall.js",
     "openclaw.plugin.json",
     "SKILL.md"

@@ -84,9 +84,17 @@ function gatherSessionFiles(openclawBasePath: string, memoryRoot: string): strin
 }
 
 function inferOpenclawBasePath(projectRoot: string): string {
-  const fromEnv = process.env.OPENCLAW_BASE_PATH;
-  if (fromEnv && fs.existsSync(fromEnv)) {
-    return fromEnv;
+  const configPath = process.env.OPENCLAW_CONFIG_PATH;
+  if (configPath && fs.existsSync(configPath)) {
+    return path.dirname(configPath);
+  }
+  const stateDir = process.env.OPENCLAW_STATE_DIR;
+  if (stateDir && fs.existsSync(stateDir)) {
+    return stateDir;
+  }
+  const basePath = process.env.OPENCLAW_BASE_PATH;
+  if (basePath && fs.existsSync(basePath)) {
+    return basePath;
   }
   const home = process.env.USERPROFILE || process.env.HOME || "";
   if (home) {

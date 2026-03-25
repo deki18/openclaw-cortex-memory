@@ -17,14 +17,20 @@ function findProjectRoot() {
 }
 
 function findOpenClawConfig() {
+  const explicitConfigPath = process.env.OPENCLAW_CONFIG_PATH || '';
+  const stateDir = process.env.OPENCLAW_STATE_DIR || '';
+  const basePath = process.env.OPENCLAW_BASE_PATH || '';
+  const homePath = process.env.USERPROFILE || process.env.HOME || '';
   const possiblePaths = [
+    explicitConfigPath,
+    stateDir ? path.join(stateDir, 'openclaw.json') : '',
+    basePath ? path.join(basePath, 'openclaw.json') : '',
     path.join(process.cwd(), 'openclaw.json'),
-    path.join(process.env.USERPROFILE || process.env.HOME || '', '.openclaw', 'openclaw.json'),
-    path.join(process.env.OPENCLAW_BASE_PATH || '', 'openclaw.json'),
+    homePath ? path.join(homePath, '.openclaw', 'openclaw.json') : '',
   ];
   
   for (const p of possiblePaths) {
-    if (fs.existsSync(p)) {
+    if (p && fs.existsSync(p)) {
       return p;
     }
   }
@@ -114,15 +120,20 @@ function removeFromConfig() {
     const content = fs.readFileSync(configPath, 'utf-8');
     const config = JSON.parse(content);
     
+    if (Array.isArray(config.plugins?.allow)) {
+      config.plugins.allow = config.plugins.allow.filter((item) => item !== PLUGIN_NAME);
+    }
     if (config.plugins?.entries?.[PLUGIN_NAME]) {
       delete config.plugins.entries[PLUGIN_NAME];
-      
       if (config.plugins.slots?.memory === PLUGIN_NAME) {
         delete config.plugins.slots.memory;
       }
       
       fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
       console.log(`Removed plugin from config: ${configPath}`);
+    } else if (Array.isArray(config.plugins?.allow)) {
+      fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
+      console.log(`Removed plugin allowlist entry from config: ${configPath}`);
     } else {
       console.log('Plugin not found in config.');
     }

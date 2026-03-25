@@ -267,11 +267,14 @@ function resolveEngine(): MemoryEngine {
     projectRoot,
     dbPath: config.dbPath,
     logger,
+    embedding: config.embedding,
+    reranker: config.reranker,
   });
   const writeStore = createWriteStore({
     projectRoot,
     dbPath: config.dbPath,
     logger,
+    embedding: config.embedding,
   });
   const sessionSync = createSessionSync({
     projectRoot,
@@ -295,6 +298,7 @@ function resolveEngine(): MemoryEngine {
     dbPath: config.dbPath,
     logger,
     ruleStore,
+    llm: config.llm,
   });
   memoryEngine = createTsEngine({
     readStore,
@@ -361,6 +365,16 @@ function sanitizeForLogging(obj: Record<string, unknown>): Record<string, unknow
     }
   }
   return sanitized;
+}
+
+function logLifecycle(event: string, details: Record<string, unknown> = {}): void {
+  const payload = sanitizeForLogging({
+    event,
+    plugin: PLUGIN_ID,
+    ts: new Date().toISOString(),
+    ...details,
+  });
+  logger.info(`[Lifecycle] ${JSON.stringify(payload)}`);
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -521,14 +535,20 @@ function findProjectRoot(): string {
 }
 
 function findOpenClawConfig(): string | null {
+  const explicitConfigPath = process.env.OPENCLAW_CONFIG_PATH || "";
+  const stateDir = process.env.OPENCLAW_STATE_DIR || "";
+  const basePath = process.env.OPENCLAW_BASE_PATH || "";
+  const homePath = process.env.USERPROFILE || process.env.HOME || "";
   const possiblePaths = [
+    explicitConfigPath,
+    stateDir ? path.join(stateDir, "openclaw.json") : "",
+    basePath ? path.join(basePath, "openclaw.json") : "",
     path.join(process.cwd(), "openclaw.json"),
-    path.join(process.env.USERPROFILE || process.env.HOME || "", ".openclaw", "openclaw.json"),
-    path.join(process.env.OPENCLAW_BASE_PATH || "", "openclaw.json"),
+    homePath ? path.join(homePath, ".openclaw", "openclaw.json") : "",
   ];
   
   for (const p of possiblePaths) {
-    if (fs.existsSync(p)) {
+    if (p && fs.existsSync(p)) {
       return p;
     }
   }
@@ -1881,6 +1901,7 @@ export async function enable(): Promise<void> {
   }
   
   logger.info("Enabling Cortex Memory plugin...");
+  logLifecycle("enable_start");
   
   try {
     unregisterFallbackTools();
@@ -1893,9 +1914,11 @@ export async function enable(): Promise<void> {
     registerHooks();
     startAutoReflectScheduler();
     logger.info("Cortex Memory plugin enabled successfully");
+    logLifecycle("enable_success", { registeredTools: registeredTools.length, registeredHooks: registeredHooks.length });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     logger.error(`Failed to enable Cortex Memory plugin: ${message}`);
+    logLifecycle("enable_failed", { error: message });
     throw error;
   }
 }
@@ -1907,6 +1930,7 @@ export async function disable(): Promise<void> {
   }
   
   logger.info("Disabling Cortex Memory plugin...");
+  logLifecycle("disable_start");
   
   unregisterHooks();
   unregisterTools();
@@ -1921,9 +1945,11 @@ export async function disable(): Promise<void> {
   if (config?.fallbackToBuiltin && builtinMemory) {
     logger.info("Falling back to OpenClaw builtin memory system");
     registerFallbackTools();
+    logLifecycle("fallback_enabled", { fallbackTools: registeredFallbackTools.length });
   }
   
   logger.info("Cortex Memory plugin disabled successfully");
+  logLifecycle("disable_success", { fallbackEnabled: registeredFallbackTools.length > 0 });
 }
 
 function registerFallbackTools(): void {
@@ -1998,6 +2024,7 @@ export function getStatus(): { enabled: boolean; serviceRunning: boolean } {
 
 export async function unregister(): Promise<void> {
   logger.info("Unregistering Cortex Memory plugin...");
+  logLifecycle("unregister_start");
   
   stopConfigWatcher();
   stopAutoReflectScheduler();
@@ -2028,6 +2055,7 @@ export async function unregister(): Promise<void> {
   configPath = null;
   
   logger.info("Cortex Memory plugin unregistered successfully");
+  logLifecycle("unregister_success");
 }
 
 export function register(pluginApi: OpenClawPluginApi, userConfig?: Partial<CortexMemoryConfig>): void {
@@ -2112,6 +2140,11 @@ export function register(pluginApi: OpenClawPluginApi, userConfig?: Partial<Cort
   isRegistered = true;
   logger.info("Cortex Memory plugin registered successfully");
   logger.info(`Cortex Memory engine mode: ${resolveEngine().mode}`);
+  logLifecycle("register_success", {
+    engineMode: config.engineMode,
+    enabled: isEnabled,
+    hasBuiltinFallback: Boolean(builtinMemory),
+  });
 
   if (isEnabled) {
     registerTools();
@@ -2127,10 +2160,12 @@ export function register(pluginApi: OpenClawPluginApi, userConfig?: Partial<Cort
         logger.info("Falling back to builtin memory");
         isEnabled = false;
         registerFallbackTools();
+        logLifecycle("fallback_after_init_error", { fallbackTools: registeredFallbackTools.length, error: message });
       }
     });
   } else if (config?.fallbackToBuiltin && builtinMemory) {
     registerFallbackTools();
+    logLifecycle("fallback_registered_on_start", { fallbackTools: registeredFallbackTools.length });
   }
 }
 

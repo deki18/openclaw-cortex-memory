@@ -30,12 +30,28 @@ interface ReadDocument {
   text: string;
   source: string;
   timestamp?: number;
+  embedding?: number[];
 }
 
 interface ReadStoreOptions {
   projectRoot: string;
   dbPath?: string;
   logger: LoggerLike;
+  embedding?: {
+    provider: string;
+    model: string;
+    apiKey?: string;
+    baseURL?: string;
+    baseUrl?: string;
+    dimensions?: number;
+  };
+  reranker?: {
+    provider?: string;
+    model: string;
+    apiKey?: string;
+    baseURL?: string;
+    baseUrl?: string;
+  };
 }
 
 export interface ReadStore {
@@ -131,6 +147,7 @@ function parseJsonlFile(filePath: string, sourceLabel: string, logger: LoggerLik
         text,
         source: sourceLabel,
         timestamp: Number.isFinite(timestampValue) ? timestampValue : undefined,
+        embedding: Array.isArray(parsed.embedding) ? parsed.embedding.filter(item => Number.isFinite(item as number)) as number[] : undefined,
       });
     } catch (error) {
       logger.debug(`Skipping invalid JSONL line in ${filePath}: ${error}`);
@@ -174,6 +191,147 @@ function withRecencyBoost(score: number, timestamp?: number): number {
   return score;
 }
 
+function normalizeBaseUrl(value?: string): string {
+  if (!value) return "";
+  return value.endsWith("/") ? value.slice(0, -1) : value;
+}
+
+function cosineSimilarity(left: number[], right: number[]): number {
+  if (left.length === 0 || right.length === 0) {
+    return 0;
+  }
+  const size = Math.min(left.length, right.length);
+  let dot = 0;
+  let leftNorm = 0;
+  let rightNorm = 0;
+  for (let i = 0; i < size; i += 1) {
+    const a = left[i];
+    const b = right[i];
+    dot += a * b;
+    leftNorm += a * a;
+    rightNorm += b * b;
+  }
+  if (leftNorm === 0 || rightNorm === 0) {
+    return 0;
+  }
+  return dot / (Math.sqrt(leftNorm) * Math.sqrt(rightNorm));
+}
+
+async function requestEmbedding(args: {
+  text: string;
+  model: string;
+  apiKey: string;
+  baseUrl: string;
+  dimensions?: number;
+}): Promise<number[] | null> {
+  const endpoint = args.baseUrl.endsWith("/embeddings") ? args.baseUrl : `${args.baseUrl}/embeddings`;
+  const body: Record<string, unknown> = {
+    input: args.text,
+    model: args.model,
+  };
+  if (typeof args.dimensions === "number" && Number.isFinite(args.dimensions) && args.dimensions > 0) {
+    body.dimensions = args.dimensions;
+  }
+  let lastError: unknown = null;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 10000);
+    try {
+      const response = await fetch(endpoint, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${args.apiKey}`,
+        },
+        body: JSON.stringify(body),
+        signal: controller.signal,
+      });
+      clearTimeout(timeoutId);
+      if (!response.ok) {
+        lastError = new Error(`embedding_http_${response.status}`);
+        continue;
+      }
+      const json = await response.json() as { data?: Array<{ embedding?: number[] }> };
+      const embedding = json?.data?.[0]?.embedding;
+      if (Array.isArray(embedding) && embedding.length > 0) {
+        return embedding.filter(item => Number.isFinite(item));
+      }
+      lastError = new Error("embedding_empty");
+    } catch (error) {
+      clearTimeout(timeoutId);
+      lastError = error;
+    }
+  }
+  if (lastError) {
+    throw lastError;
+  }
+  return null;
+}
+
+async function requestRerank(args: {
+  query: string;
+  candidates: Array<{ id: string; text: string; source: string; score: number }>;
+  model: string;
+  apiKey: string;
+  baseUrl: string;
+}): Promise<Array<{ id: string; text: string; source: string; score: number }>> {
+  const endpoint = args.baseUrl.endsWith("/rerank") ? args.baseUrl : `${args.baseUrl}/rerank`;
+  const documents = args.candidates.map(item => item.text);
+  const body = {
+    model: args.model,
+    query: args.query,
+    documents,
+    top_n: args.candidates.length,
+  };
+  let lastError: unknown = null;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 12000);
+    try {
+      const response = await fetch(endpoint, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${args.apiKey}`,
+        },
+        body: JSON.stringify(body),
+        signal: controller.signal,
+      });
+      clearTimeout(timeoutId);
+      if (!response.ok) {
+        lastError = new Error(`rerank_http_${response.status}`);
+        continue;
+      }
+      const json = await response.json() as {
+        results?: Array<{ index?: number; relevance_score?: number; score?: number }>;
+        data?: Array<{ index?: number; relevance_score?: number; score?: number }>;
+      };
+      const list = Array.isArray(json.results) ? json.results : (Array.isArray(json.data) ? json.data : []);
+      if (!Array.isArray(list) || list.length === 0) {
+        lastError = new Error("rerank_empty");
+        continue;
+      }
+      const mapped = list
+        .map((item, rank) => {
+          const index = typeof item.index === "number" ? item.index : rank;
+          const hit = args.candidates[index];
+          if (!hit) return null;
+          const score = typeof item.relevance_score === "number" ? item.relevance_score : (typeof item.score === "number" ? item.score : hit.score);
+          return { ...hit, score };
+        })
+        .filter((item): item is { id: string; text: string; source: string; score: number } => Boolean(item));
+      if (mapped.length > 0) {
+        return mapped;
+      }
+      lastError = new Error("rerank_map_empty");
+    } catch (error) {
+      clearTimeout(timeoutId);
+      lastError = error;
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error(String(lastError || "rerank_failed"));
+}
+
 export function createReadStore(options: ReadStoreOptions): ReadStore {
   const memoryRoot = options.dbPath ? path.resolve(options.dbPath) : path.join(options.projectRoot, "data", "memory");
 
@@ -197,21 +355,65 @@ export function createReadStore(options: ReadStoreOptions): ReadStore {
       return { results: [] };
     }
     const docs = loadAllDocuments();
-    const ranked = docs
+    let queryEmbedding: number[] | null = null;
+    const embeddingModel = options.embedding?.model || "";
+    const embeddingApiKey = options.embedding?.apiKey || "";
+    const embeddingBaseUrl = normalizeBaseUrl(options.embedding?.baseURL || options.embedding?.baseUrl);
+    if (embeddingModel && embeddingApiKey && embeddingBaseUrl) {
+      try {
+        queryEmbedding = await requestEmbedding({
+          text: query,
+          model: embeddingModel,
+          apiKey: embeddingApiKey,
+          baseUrl: embeddingBaseUrl,
+          dimensions: options.embedding?.dimensions,
+        });
+      } catch (error) {
+        options.logger.warn(`Embedding query failed, fallback to lexical search: ${error}`);
+      }
+    }
+    const lexicalRanked = docs
       .map(doc => {
-        const base = scoreText(query, doc.text);
-        const total = withRecencyBoost(base, doc.timestamp);
+        const lexicalScore = scoreText(query, doc.text);
+        const semanticScore = queryEmbedding && Array.isArray(doc.embedding) && doc.embedding.length > 0
+          ? Math.max(0, cosineSimilarity(queryEmbedding, doc.embedding) * 5)
+          : 0;
+        const hybrid = lexicalScore + semanticScore;
+        const total = withRecencyBoost(hybrid, doc.timestamp);
         return { doc, score: total };
       })
       .filter(item => item.score > 0)
       .sort((a, b) => b.score - a.score)
-      .slice(0, Math.max(1, args.topK))
+      .slice(0, Math.max(1, Math.max(args.topK, 12)))
       .map(item => ({
         id: item.doc.id,
         text: item.doc.text,
         source: item.doc.source,
         score: Number(item.score.toFixed(4)),
       }));
+    const rerankerModel = options.reranker?.model || "";
+    const rerankerApiKey = options.reranker?.apiKey || "";
+    const rerankerBaseUrl = normalizeBaseUrl(options.reranker?.baseURL || options.reranker?.baseUrl);
+    let ranked = lexicalRanked;
+    if (rerankerModel && rerankerApiKey && rerankerBaseUrl && lexicalRanked.length > 1) {
+      try {
+        ranked = await requestRerank({
+          query,
+          candidates: lexicalRanked,
+          model: rerankerModel,
+          apiKey: rerankerApiKey,
+          baseUrl: rerankerBaseUrl,
+        });
+      } catch (error) {
+        options.logger.warn(`Reranker failed, keep hybrid ranking: ${error}`);
+      }
+    }
+    ranked = ranked.slice(0, Math.max(1, args.topK)).map(item => ({
+      id: item.id,
+      text: item.text,
+      source: item.source,
+      score: Number(item.score.toFixed(4)),
+    }));
     return { results: ranked };
   }
 
