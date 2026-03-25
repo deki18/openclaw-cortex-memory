@@ -36,14 +36,11 @@ metadata:
 
 ### 安装
 
-快速安装（推荐）：
+快速安装（推荐，npm 发布版）：
 
 ```bash
-git clone https://github.com/deki18/openclaw-cortex-memory.git ~/openclaw-cortex-memory-src
-cd ~/openclaw-cortex-memory-src
-npm install && npm run build && npm pack
 cd ~/openclaw
-pnpm openclaw plugins install ~/openclaw-cortex-memory-src/openclaw-cortex-memory-0.1.0-Alpha.1.tgz
+pnpm openclaw plugins install openclaw-cortex-memory@alpha
 pnpm openclaw plugins enable openclaw-cortex-memory
 pnpm openclaw gateway restart
 ```
@@ -51,15 +48,23 @@ pnpm openclaw gateway restart
 ### 后续更新
 
 ```bash
-cd ~/openclaw-cortex-memory-src
-git pull && npm install && npm run build && npm pack
-
 cd ~/openclaw
-pnpm openclaw plugins install ~/openclaw-cortex-memory-src/openclaw-cortex-memory-0.1.0-Alpha.1.tgz
+pnpm openclaw plugins install openclaw-cortex-memory@alpha
 pnpm openclaw gateway restart
 ```
 
 安装前如果 `openclaw.json` 已经提前写了 `allow/slots/entries` 指向本插件，先临时移除，安装后再加回，避免安装前校验报 `plugin not found`。
+
+### 本地打包安装（源码模式）
+
+```bash
+git clone https://github.com/deki18/openclaw-cortex-memory.git ~/openclaw-cortex-memory-src
+cd ~/openclaw-cortex-memory-src
+npm install && npm run build && npm pack
+cd ~/openclaw
+pnpm openclaw plugins install ~/openclaw-cortex-memory-src/openclaw-cortex-memory-0.1.0-Alpha.1.tgz
+pnpm openclaw gateway restart
+```
 
 ### 本地开发模式（无安装记录）
 

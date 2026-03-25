@@ -5,7 +5,7 @@
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "bin": {
-    "cortex-memory": "./scripts/cli.js"
+    "cortex-memory": "scripts/cli.js"
   },
   "scripts": {
     "build": "tsc && node -e \"require('fs').copyFileSync('openclaw.plugin.json','dist/openclaw.plugin.json')\"",

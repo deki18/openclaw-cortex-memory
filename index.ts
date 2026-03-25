@@ -82,7 +82,8 @@ interface OpenClawPluginApi {
     name: string;
     description: string;
     parameters: Record<string, unknown>;
-    execute: (params: { args: Record<string, unknown>; context: ToolContext }) => Promise<ToolResult>;
+    execute?: (params: { args?: Record<string, unknown>; context: ToolContext }) => Promise<ToolResult>;
+    handler?: (params: { args?: Record<string, unknown>; context: ToolContext }) => Promise<ToolResult>;
   }): void;
   unregisterTool?(name: string): void;
   registerHook(hook: {
@@ -182,6 +183,13 @@ let pythonStartPromise: Promise<void> | null = null;
 let processHandlersRegistered = false;
 let pythonPidFilePath: string | null = null;
 let memoryEngine: MemoryEngine | null = null;
+
+type RegisteredToolDefinition = {
+  name: string;
+  description: string;
+  parameters: Record<string, unknown>;
+  execute: (params: { args?: Record<string, unknown>; context: ToolContext }) => Promise<ToolResult>;
+};
 
 function shouldUsePythonRuntime(): boolean {
   return false;
@@ -1545,7 +1553,7 @@ async function onTimerHandler(payload: unknown, context: ToolContext): Promise<v
 function registerTools(): void {
   if (!api) return;
   
- const tools = [
+  const tools: RegisteredToolDefinition[] = [
     {
       name: "search_memory",
       description: "Search long-term memory for relevant information",
@@ -1699,9 +1707,22 @@ function registerTools(): void {
   ];
   
   for (const tool of tools) {
-    api.registerTool(tool);
+    registerToolCompat(tool);
     registeredTools.push(tool.name);
   }
+}
+
+function registerToolCompat(tool: RegisteredToolDefinition): void {
+  if (!api) return;
+  const execute = async (params: { args?: Record<string, unknown>; context: ToolContext }) =>
+    tool.execute({ args: params?.args || {}, context: params.context });
+  api.registerTool({
+    name: tool.name,
+    description: tool.description,
+    parameters: tool.parameters,
+    execute,
+    handler: execute,
+  });
 }
 
 function unregisterTools(): void {
@@ -1856,7 +1877,7 @@ export async function disable(): Promise<void> {
 function registerFallbackTools(): void {
   if (!api || !builtinMemory) return;
   
-  api.registerTool({
+  registerToolCompat({
     name: "search_memory",
     description: "Search memory (using builtin system - Cortex Memory disabled)",
     parameters: {
@@ -1868,12 +1889,12 @@ function registerFallbackTools(): void {
       required: ["query"],
       additionalProperties: false,
     },
-    execute: async ({ args, context }: { args: Record<string, unknown>; context: ToolContext }) => 
-      searchMemoryWithFallback(args as { query: string; top_k?: number }, context),
+    execute: async ({ args, context }: { args?: Record<string, unknown>; context: ToolContext }) =>
+      searchMemoryWithFallback((args || {}) as { query: string; top_k?: number }, context),
   });
   registeredFallbackTools.push("search_memory");
   
-  api.registerTool({
+  registerToolCompat({
     name: "store_event",
     description: "Store event (using builtin system - Cortex Memory disabled)",
     parameters: {
@@ -1884,12 +1905,12 @@ function registerFallbackTools(): void {
       required: ["summary"],
       additionalProperties: false,
     },
-    execute: async ({ args, context }: { args: Record<string, unknown>; context: ToolContext }) => 
-      storeEventWithFallback(args as { summary: string }, context),
+    execute: async ({ args, context }: { args?: Record<string, unknown>; context: ToolContext }) =>
+      storeEventWithFallback((args || {}) as { summary: string }, context),
   });
   registeredFallbackTools.push("store_event");
   
-  api.registerTool({
+  registerToolCompat({
     name: "cortex_memory_status",
     description: "Get the current status of the Cortex Memory plugin",
     parameters: { 
@@ -1898,8 +1919,8 @@ function registerFallbackTools(): void {
       required: [],
       additionalProperties: false,
     },
-    execute: async ({ args, context }: { args: Record<string, unknown>; context: ToolContext }) => 
-      getPluginStatus(args, context),
+    execute: async ({ args, context }: { args?: Record<string, unknown>; context: ToolContext }) =>
+      getPluginStatus(args || {}, context),
   });
   registeredFallbackTools.push("cortex_memory_status");
 }
