@@ -83,7 +83,7 @@ interface OpenClawPluginApi {
     description: string;
     parameters: Record<string, unknown>;
     execute?: (params: { args?: Record<string, unknown>; context: ToolContext }) => Promise<ToolResult>;
-    handler?: (params: { args?: Record<string, unknown>; context: ToolContext }) => Promise<ToolResult>;
+    handler?: (...params: unknown[]) => Promise<ToolResult>;
   }): void;
   unregisterTool?(name: string): void;
   registerHook(hook: {
@@ -160,6 +160,7 @@ interface CachedSearchResult {
 let autoSearchCacheBySession = new Map<string, CachedSearchResult>();
 const AUTO_SEARCH_CACHE_TTL = 60000;
 const MAX_AUTO_SEARCH_CACHE_SESSIONS = 200;
+const HOOK_GUARD_TIMEOUT_MS = 2000;
 
 let config: CortexMemoryConfig | null = null;
 let logger: Logger;
@@ -224,6 +225,32 @@ function getSessionCachedAutoSearch(sessionId: string): { query: string; results
     results: cache.results,
     ageSeconds: Math.floor((Date.now() - cache.timestamp) / 1000),
   };
+}
+
+function isInternalSession(sessionId?: string): boolean {
+  if (!sessionId) return false;
+  return sessionId.startsWith("slug-generator-") || sessionId.startsWith("fallback:");
+}
+
+async function runWithTimeout<T>(task: Promise<T>, timeoutMs: number, label: string): Promise<T | null> {
+  let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
+  try {
+    const timeoutPromise = new Promise<null>((resolve) => {
+      timeoutHandle = setTimeout(() => resolve(null), timeoutMs);
+    });
+    const result = await Promise.race([task, timeoutPromise]);
+    if (result === null) {
+      logger.warn(`${label} timed out after ${timeoutMs}ms; skipped to protect gateway responsiveness`);
+    }
+    return result as T | null;
+  } catch (error) {
+    logger.warn(`${label} failed: ${error instanceof Error ? error.message : String(error)}`);
+    return null;
+  } finally {
+    if (timeoutHandle) {
+      clearTimeout(timeoutHandle);
+    }
+  }
 }
 
 function resolveEngine(): MemoryEngine {
@@ -1539,11 +1566,17 @@ async function onTimerPythonHandler(payload: unknown, _context: ToolContext): Pr
 }
 
 async function onMessageHandler(payload: unknown, context: ToolContext): Promise<void> {
-  await resolveEngine().onMessage(payload, context);
+  if (isInternalSession(context.sessionId)) {
+    return;
+  }
+  await runWithTimeout(resolveEngine().onMessage(payload, context), HOOK_GUARD_TIMEOUT_MS, "onMessage hook");
 }
 
 async function onSessionEndHandler(payload: unknown, context: ToolContext): Promise<void> {
-  await resolveEngine().onSessionEnd(payload, context);
+  if (isInternalSession(context.sessionId)) {
+    return;
+  }
+  await runWithTimeout(resolveEngine().onSessionEnd(payload, context), HOOK_GUARD_TIMEOUT_MS, "onSessionEnd hook");
 }
 
 async function onTimerHandler(payload: unknown, context: ToolContext): Promise<void> {
@@ -1715,13 +1748,30 @@ function registerTools(): void {
 function registerToolCompat(tool: RegisteredToolDefinition): void {
   if (!api) return;
   const execute = async (params: { args?: Record<string, unknown>; context: ToolContext }) =>
-    tool.execute({ args: params?.args || {}, context: params.context });
+    tool.execute({
+      args: params?.args || {},
+      context: params.context,
+    });
+  const handler = async (...params: unknown[]) => {
+    const first = params[0] as any;
+    const second = params[1] as any;
+    if (first && typeof first === "object" && "context" in first) {
+      return execute({
+        args: (first.args as Record<string, unknown>) || {},
+        context: first.context as ToolContext,
+      });
+    }
+    return execute({
+      args: (first as Record<string, unknown>) || {},
+      context: (second || {}) as ToolContext,
+    });
+  };
   api.registerTool({
     name: tool.name,
     description: tool.description,
     parameters: tool.parameters,
     execute,
-    handler: execute,
+    handler,
   });
 }
 
