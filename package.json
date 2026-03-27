@@ -16,7 +16,7 @@
     "test:all": "npm run test:compat && npm run test:model",
     "release:check": "node scripts/release-pipeline.js",
     "dev": "tsc --watch",
-    "prepare": "npm run build",
+    "prepack": "npm run build",
     "prepublishOnly": "npm run check:version && npm run build && npm run test:all"
   },
   "keywords": [
