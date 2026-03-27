@@ -31,7 +31,7 @@ pnpm openclaw plugins install clawhub:openclaw-cortex-memory
 pnpm openclaw plugins enable openclaw-cortex-memory
 ```
 
-若尚未在 ClawHub 发布，使用 npm 回退安装：
+npm 安装方式：
 
 ```bash
 cd ~/openclaw
@@ -196,10 +196,12 @@ npx cortex-memory help                # 查看命令帮助
 
 ## 注意事项
 
-1. **API Key 安全**：使用环境变量 `${OPENAI_API_KEY}` 而非硬编码
+1. **API Key 安全**：使用 `${EMBEDDING_API_KEY}`、`${LLM_API_KEY}`、`${RERANKER_API_KEY}` 等环境变量而非硬编码
 2. **向量维度**：必须与嵌入模型匹配，如 `text-embedding-3-large` 为 3072
 3. **重排序**：可选配置 `reranker` 以提升检索精度
-4. **单栈运行**：当前版本为纯 TS，无 Python 运行时依赖
+4. **外部传输**：检索与反思会调用你配置的 embedding/llm/reranker endpoint，请使用可信服务并最小化密钥权限
+5. **会话数据**：启用 `autoSync` 时会读取 OpenClaw 会话文件并写入本地记忆目录，生产环境建议先小范围验证
+6. **单栈运行**：当前版本为纯 TS，无 Python 运行时依赖
 
 ## 许可证
 

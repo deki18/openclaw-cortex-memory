@@ -8,9 +8,9 @@ metadata:
       "emoji": "🧠",
       "os": ["darwin", "linux", "win32"],
       "requires": {
-        "env": ["OPENAI_API_KEY"]
+        "env": ["EMBEDDING_API_KEY", "LLM_API_KEY", "RERANKER_API_KEY"]
       },
-      "primaryEnv": "OPENAI_API_KEY"
+      "primaryEnv": "EMBEDDING_API_KEY"
     }
   }
 ---
@@ -76,7 +76,7 @@ git clone https://github.com/deki18/openclaw-cortex-memory.git ~/openclaw-cortex
 cd ~/openclaw-cortex-memory-src
 npm install && npm run build && npm pack
 cd ~/openclaw
-pnpm openclaw plugins install ~/openclaw-cortex-memory-src/openclaw-cortex-memory-0.1.0-Alpha.1.tgz
+pnpm openclaw plugins install ~/openclaw-cortex-memory-src/openclaw-cortex-memory-0.1.0-Alpha.3.tgz
 pnpm openclaw gateway restart
 ```
 
@@ -280,4 +280,4 @@ openclaw gateway restart
 ## 依赖
 
 - Node.js >= 22
-- OPENAI_API_KEY（或兼容 API 配置）
+- EMBEDDING_API_KEY、LLM_API_KEY、RERANKER_API_KEY（或兼容 API 配置）
