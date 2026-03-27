@@ -1,6 +1,7 @@
 node_modules/
 dist/
 package-lock.json
+openclaw-cortex-memory-0.1.0-Alpha.3.tgz
 
 venv/
 

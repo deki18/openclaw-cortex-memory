@@ -52,6 +52,9 @@
     "plugin": true,
     "requiresPython": false,
     "cli": "cortex-memory",
+    "compat": {
+      "pluginApi": ">=2026.3.22"
+    },
     "extensions": [
       "./dist/index.js"
     ]
