@@ -27,7 +27,7 @@
     "agent",
     "rag"
   ],
-  "author": "",
+  "author": "deki18",
   "license": "MIT",
   "dependencies": {
     "undici": "^6.21.0"

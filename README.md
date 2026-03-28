@@ -3,6 +3,8 @@
 OpenClaw 长期记忆插件，提供跨会话检索、事件存储、规则反思、增量同步与运行诊断能力。  
 可作为 OpenClaw 的 memory slot 直接接入，支持从历史会话持续沉淀可复用记忆。
 
+发布签名见 [SIGNATURE.md](file:///d:/AI_Program/openclaw-cortex-memory/SIGNATURE.md)。
+
 ## 功能特性
 
 | 特性 | 说明 |

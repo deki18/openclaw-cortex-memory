@@ -4,7 +4,7 @@
   "version": "0.1.0-Alpha.5",
   "description": "Long-term memory system with semantic, episodic, and procedural memory for AI Agents",
   "main": "dist/index.js",
-  "author": "OpenClaw Community",
+  "author": "deki18",
   "license": "MIT",
   "type": "memory",
   "repository": {
