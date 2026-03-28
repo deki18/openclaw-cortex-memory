@@ -76,7 +76,7 @@ git clone https://github.com/deki18/openclaw-cortex-memory.git ~/openclaw-cortex
 cd ~/openclaw-cortex-memory-src
 npm install && npm run build && npm pack
 cd ~/openclaw
-pnpm openclaw plugins install ~/openclaw-cortex-memory-src/openclaw-cortex-memory-0.1.0-Alpha.5.tgz
+pnpm openclaw plugins install ~/openclaw-cortex-memory-src/openclaw-cortex-memory-0.1.0-Alpha.6.tgz
 pnpm openclaw gateway restart
 ```
 
