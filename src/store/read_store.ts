@@ -1,5 +1,6 @@
 import * as fs from "fs";
 import * as path from "path";
+import { createRequire } from "module";
 
 interface LoggerLike {
   debug: (message: string, ...args: unknown[]) => void;
@@ -543,12 +544,12 @@ async function searchLanceDb(args: {
   logger: LoggerLike;
 }): Promise<ReadDocument[]> {
   try {
+    const require = createRequire(__filename);
     const lancedbDir = path.join(args.memoryRoot, "vector", "lancedb");
     if (!fs.existsSync(lancedbDir)) {
       return [];
     }
-    const dynamicImport = new Function("specifier", "return import(specifier)") as (specifier: string) => Promise<unknown>;
-    const moduleValue = await dynamicImport("@lancedb/lancedb");
+    const moduleValue = require("@lancedb/lancedb") as unknown;
     const connect = (moduleValue as { connect?: (uri: string) => Promise<unknown> }).connect;
     if (typeof connect !== "function") {
       return [];

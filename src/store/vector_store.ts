@@ -1,5 +1,6 @@
 import * as fs from "fs";
 import * as path from "path";
+import { createRequire } from "module";
 
 interface LoggerLike {
   debug: (message: string, ...args: unknown[]) => void;
@@ -28,14 +29,14 @@ interface VectorStoreOptions {
 export function createVectorStore(options: VectorStoreOptions): {
   upsert(record: VectorStoreRecord): Promise<void>;
 } {
+  const require = createRequire(__filename);
   const vectorRoot = path.join(options.memoryRoot, "vector");
   const lancedbFilePath = path.join(vectorRoot, "lancedb_events.jsonl");
   const lancedbDir = path.join(vectorRoot, "lancedb");
 
   async function tryUpsertLanceDb(record: VectorStoreRecord): Promise<boolean> {
     try {
-      const dynamicImport = new Function("specifier", "return import(specifier)") as (specifier: string) => Promise<unknown>;
-      const lancedbModule = await dynamicImport("@lancedb/lancedb");
+      const lancedbModule = require("@lancedb/lancedb") as unknown;
       const connect = (lancedbModule as { connect?: (uri: string) => Promise<unknown> }).connect;
       if (typeof connect !== "function") {
         return false;
