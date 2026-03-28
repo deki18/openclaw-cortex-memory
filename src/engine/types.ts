@@ -27,6 +27,10 @@ export interface StoreEventArgs {
 
 export interface QueryGraphArgs {
   entity: string;
+  rel?: string;
+  dir?: "incoming" | "outgoing" | "both";
+  path_to?: string;
+  max_depth?: number;
 }
 
 export interface GetHotContextArgs {

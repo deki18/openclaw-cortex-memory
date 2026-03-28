@@ -76,7 +76,7 @@ git clone https://github.com/deki18/openclaw-cortex-memory.git ~/openclaw-cortex
 cd ~/openclaw-cortex-memory-src
 npm install && npm run build && npm pack
 cd ~/openclaw
-pnpm openclaw plugins install ~/openclaw-cortex-memory-src/openclaw-cortex-memory-0.1.0-Alpha.3.tgz
+pnpm openclaw plugins install ~/openclaw-cortex-memory-src/openclaw-cortex-memory-0.1.0-Alpha.4.tgz
 pnpm openclaw gateway restart
 ```
 
@@ -105,7 +105,33 @@ npm install
           "engineMode": "ts",
           "dbPath": "<optional-memory-dir>",
           "autoSync": true,
-          "autoReflect": true,
+          "autoReflect": false,
+          "autoReflectIntervalMinutes": 30,
+          "readFusion": {
+            "enabled": true,
+            "maxCandidates": 10,
+            "authoritative": true
+          },
+          "memoryDecay": {
+            "enabled": true,
+            "minFloor": 0.15,
+            "defaultHalfLifeDays": 90,
+            "halfLifeByEventType": {
+              "issue": 30,
+              "fix": 30,
+              "action_item": 30,
+              "decision": 120,
+              "preference": 240,
+              "constraint": 240,
+              "requirement": 240
+            },
+            "antiDecay": {
+              "enabled": true,
+              "maxBoost": 1.6,
+              "hitWeight": 0.08,
+              "recentWindowDays": 30
+            }
+          },
           "embedding": {
             "provider": "api",
             "model": "text-embedding-3-large",
@@ -131,6 +157,14 @@ npm install
   }
 }
 ```
+
+关键功能开关（建议显式配置）：
+
+- `readFusion.enabled`：开启多路召回后的 LLM 融合
+- `readFusion.authoritative`：仅返回融合后的权威记忆包
+- `memoryDecay.enabled`：开启按事件类型的半衰期衰减
+- `memoryDecay.antiDecay.enabled`：开启命中频次反衰减
+- `autoReflect`：建议验证稳定后再开启（默认 false）
 
 ### 启动
 
@@ -183,12 +217,16 @@ openclaw gateway restart
 
 ### query_graph
 
-查询归档事件中的实体共现关系。
+查询归档事件中的实体关系（relations 优先，共现关系回退）。
 
 **参数：**
 | 参数 | 类型 | 必需 | 说明 |
 |------|------|------|------|
 | entity | string | 是 | 实体名称 |
+| rel | string | 否 | 关系类型过滤（如 `depends_on`） |
+| dir | string | 否 | 方向过滤：`incoming` / `outgoing` / `both` |
+| path_to | string | 否 | 查询从 `entity` 到目标实体的路径 |
+| max_depth | number | 否 | 路径最大深度（2~4） |
 
 ### get_hot_context
 
@@ -250,6 +288,18 @@ openclaw gateway restart
 | engineMode | 否 | `ts` | 固定为 TS 引擎 |
 | autoSync | 否 | true | 会话结束自动同步 |
 | autoReflect | 否 | false | 自动触发反思 |
+| autoReflectIntervalMinutes | 否 | 30 | 自动反思扫描间隔（分钟） |
+| readFusion.enabled | 否 | true | 启用检索重排后的 LLM 融合 |
+| readFusion.maxCandidates | 否 | 10 | 融合候选上限 |
+| readFusion.authoritative | 否 | true | 仅返回融合权威记忆包 |
+| memoryDecay.enabled | 否 | true | 启用按事件类型半衰期衰减 |
+| memoryDecay.minFloor | 否 | 0.15 | 衰减系数下限 |
+| memoryDecay.defaultHalfLifeDays | 否 | 90 | 未配置类型默认半衰期（天） |
+| memoryDecay.halfLifeByEventType | 否 | - | 各事件类型半衰期覆盖配置 |
+| memoryDecay.antiDecay.enabled | 否 | true | 启用命中频次反衰减 |
+| memoryDecay.antiDecay.maxBoost | 否 | 1.6 | 反衰减最大增益 |
+| memoryDecay.antiDecay.hitWeight | 否 | 0.08 | 命中次数增益系数 |
+| memoryDecay.antiDecay.recentWindowDays | 否 | 30 | 命中新鲜度窗口（天） |
 
 ## 数据文件
 
@@ -259,9 +309,14 @@ openclaw gateway restart
 | `<dbPath>/CORTEX_RULES.md` | 规则文件 |
 | `<dbPath>/sessions/active/sessions.jsonl` | 活跃会话记忆 |
 | `<dbPath>/sessions/archive/sessions.jsonl` | 归档事件 |
+| `<dbPath>/vector/lancedb` | LanceDB 向量表（可用时） |
+| `<dbPath>/vector/lancedb_events.jsonl` | 向量回退存储（LanceDB 不可用时） |
 | `<dbPath>/.sync_state.json` | 同步增量状态 |
 | `<dbPath>/.session_end_state.json` | session_end 幂等状态 |
 | `<dbPath>/.rule_store_state.json` | 规则去重状态 |
+| `<dbPath>/.dedup_index.json` | 三阶段去重索引 |
+| `<dbPath>/.read_hit_stats.json` | 检索命中频次统计（反衰减） |
+| `<dbPath>/graph/mutation_log.jsonl` | 图谱变更审计日志 |
 
 ## 错误处理
 

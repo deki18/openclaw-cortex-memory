@@ -7,10 +7,13 @@ import type { MemoryEngine } from "./src/engine/memory_engine";
 import { createTsEngine } from "./src/engine/ts_engine";
 import { createReadStore } from "./src/store/read_store";
 import { createWriteStore } from "./src/store/write_store";
+import { createArchiveStore } from "./src/store/archive_store";
+import { createVectorStore } from "./src/store/vector_store";
 import { createSessionSync } from "./src/sync/session_sync";
 import { createSessionEnd } from "./src/session/session_end";
 import { createRuleStore } from "./src/rules/rule_store";
 import { createReflector } from "./src/reflect/reflector";
+import { createThreeStageDeduplicator } from "./src/dedup/three_stage_deduplicator";
 import type { EngineMode } from "./src/engine/types";
 
 interface EmbeddingConfig {
@@ -46,6 +49,24 @@ interface CortexMemoryConfig {
   dbPath?: string;
   autoSync?: boolean;
   autoReflect?: boolean;
+  autoReflectIntervalMinutes?: number;
+  readFusion?: {
+    enabled?: boolean;
+    maxCandidates?: number;
+    authoritative?: boolean;
+  };
+  memoryDecay?: {
+    enabled?: boolean;
+    minFloor?: number;
+    defaultHalfLifeDays?: number;
+    halfLifeByEventType?: Record<string, number>;
+    antiDecay?: {
+      enabled?: boolean;
+      maxBoost?: number;
+      hitWeight?: number;
+      recentWindowDays?: number;
+    };
+  };
   fallbackToBuiltin?: boolean;
   apiUrl?: string;
   engineMode?: EngineMode;
@@ -145,6 +166,40 @@ const MAX_OPENCLAW_VERSION = "2027.0.0";
 const defaultConfig: Partial<CortexMemoryConfig> = {
   autoSync: true,
   autoReflect: false,
+  autoReflectIntervalMinutes: 30,
+  readFusion: {
+    enabled: true,
+    maxCandidates: 10,
+    authoritative: true,
+  },
+  memoryDecay: {
+    enabled: true,
+    minFloor: 0.15,
+    defaultHalfLifeDays: 90,
+    antiDecay: {
+      enabled: true,
+      maxBoost: 1.6,
+      hitWeight: 0.08,
+      recentWindowDays: 30,
+    },
+    halfLifeByEventType: {
+      issue: 30,
+      fix: 30,
+      action_item: 30,
+      blocker: 30,
+      plan: 60,
+      milestone: 60,
+      follow_up: 60,
+      decision: 120,
+      insight: 120,
+      retrospective: 120,
+      preference: 240,
+      constraint: 240,
+      requirement: 240,
+      dependency: 240,
+      assumption: 240,
+    },
+  },
   enabled: true,
   fallbackToBuiltin: true,
   engineMode: "ts",
@@ -269,12 +324,31 @@ function resolveEngine(): MemoryEngine {
     logger,
     embedding: config.embedding,
     reranker: config.reranker,
+    llm: config.llm,
+    fusion: config.readFusion,
+    memoryDecay: config.memoryDecay,
   });
   const writeStore = createWriteStore({
     projectRoot,
     dbPath: config.dbPath,
     logger,
     embedding: config.embedding,
+  });
+  const vectorStore = createVectorStore({
+    memoryRoot,
+    logger,
+  });
+  const deduplicator = createThreeStageDeduplicator({
+    memoryRoot,
+    logger,
+  });
+  const archiveStore = createArchiveStore({
+    projectRoot,
+    memoryRoot,
+    logger,
+    embedding: config.embedding,
+    deduplicator,
+    vectorStore,
   });
   const sessionSync = createSessionSync({
     projectRoot,
@@ -287,6 +361,9 @@ function resolveEngine(): MemoryEngine {
     dbPath: config.dbPath,
     logger,
     syncMemory: sessionSync.syncMemory,
+    syncDailySummaries: sessionSync.syncDailySummaries,
+    archiveStore,
+    llm: config.llm,
   });
   const ruleStore = createRuleStore({
     projectRoot,
@@ -303,10 +380,12 @@ function resolveEngine(): MemoryEngine {
   memoryEngine = createTsEngine({
     readStore,
     writeStore,
+    archiveStore,
     sessionSync,
     sessionEnd,
     reflector,
     memoryRoot,
+    projectRoot,
     getCachedAutoSearch: getSessionCachedAutoSearch,
     resolveSessionId: (context, payload) => resolveSessionId(context, payload),
     normalizeIncomingMessage,
@@ -608,6 +687,8 @@ function startAutoReflectScheduler(): void {
   if (!config?.autoReflect || autoReflectInterval) {
     return;
   }
+  const intervalMinutes = Math.max(5, Math.floor(config.autoReflectIntervalMinutes ?? 30));
+  const intervalMs = intervalMinutes * 60 * 1000;
   autoReflectInterval = setInterval(() => {
     if (!isEnabled) {
       return;
@@ -624,7 +705,7 @@ function startAutoReflectScheduler(): void {
     if (marker === lastAutoReflectArchiveMarker) {
       return;
     }
-    if (now - lastAutoReflectRunAt < 5 * 60 * 1000) {
+    if (now - lastAutoReflectRunAt < intervalMs) {
       return;
     }
     resolveEngine().reflectMemory({}, schedulerContext)
@@ -638,7 +719,7 @@ function startAutoReflectScheduler(): void {
         }
       })
       .catch(error => logger.warn(`Auto-reflect failed: ${String(error)}`));
-  }, 5 * 60 * 1000);
+  }, intervalMs);
 }
 
 function stopAutoReflectScheduler(): void {
@@ -668,6 +749,41 @@ function validateConfig(cfg: CortexMemoryConfig): string[] {
   }
   if (!cfg.reranker?.apiKey || !cfg.reranker?.baseURL) {
     errors.push("reranker.apiKey and reranker.baseURL are required. Please configure third-party reranker endpoint credentials.");
+  }
+  if (typeof cfg.autoReflectIntervalMinutes === "number" && (!Number.isFinite(cfg.autoReflectIntervalMinutes) || cfg.autoReflectIntervalMinutes < 5)) {
+    errors.push("autoReflectIntervalMinutes must be a number >= 5.");
+  }
+  if (cfg.readFusion && typeof cfg.readFusion.maxCandidates === "number" && (!Number.isFinite(cfg.readFusion.maxCandidates) || cfg.readFusion.maxCandidates < 2)) {
+    errors.push("readFusion.maxCandidates must be a number >= 2.");
+  }
+  if (cfg.memoryDecay) {
+    if (typeof cfg.memoryDecay.minFloor === "number" && (!Number.isFinite(cfg.memoryDecay.minFloor) || cfg.memoryDecay.minFloor < 0 || cfg.memoryDecay.minFloor > 1)) {
+      errors.push("memoryDecay.minFloor must be within [0,1].");
+    }
+    if (typeof cfg.memoryDecay.defaultHalfLifeDays === "number" && (!Number.isFinite(cfg.memoryDecay.defaultHalfLifeDays) || cfg.memoryDecay.defaultHalfLifeDays <= 0)) {
+      errors.push("memoryDecay.defaultHalfLifeDays must be > 0.");
+    }
+    const mapping = cfg.memoryDecay.halfLifeByEventType;
+    if (mapping && typeof mapping === "object") {
+      for (const [key, value] of Object.entries(mapping)) {
+        if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
+          errors.push(`memoryDecay.halfLifeByEventType.${key} must be > 0.`);
+          break;
+        }
+      }
+    }
+    const anti = cfg.memoryDecay.antiDecay;
+    if (anti) {
+      if (typeof anti.maxBoost === "number" && (!Number.isFinite(anti.maxBoost) || anti.maxBoost < 1)) {
+        errors.push("memoryDecay.antiDecay.maxBoost must be >= 1.");
+      }
+      if (typeof anti.hitWeight === "number" && (!Number.isFinite(anti.hitWeight) || anti.hitWeight < 0)) {
+        errors.push("memoryDecay.antiDecay.hitWeight must be >= 0.");
+      }
+      if (typeof anti.recentWindowDays === "number" && (!Number.isFinite(anti.recentWindowDays) || anti.recentWindowDays <= 0)) {
+        errors.push("memoryDecay.antiDecay.recentWindowDays must be > 0.");
+      }
+    }
   }
   
   return errors;
@@ -2097,6 +2213,24 @@ export function register(pluginApi: OpenClawPluginApi, userConfig?: Partial<Cort
     dbPath: effectiveConfig.dbPath,
     autoSync: effectiveConfig.autoSync ?? defaultConfig.autoSync,
     autoReflect: effectiveConfig.autoReflect ?? defaultConfig.autoReflect,
+    autoReflectIntervalMinutes: effectiveConfig.autoReflectIntervalMinutes ?? defaultConfig.autoReflectIntervalMinutes,
+    readFusion: {
+      enabled: effectiveConfig.readFusion?.enabled ?? defaultConfig.readFusion?.enabled,
+      maxCandidates: effectiveConfig.readFusion?.maxCandidates ?? defaultConfig.readFusion?.maxCandidates,
+      authoritative: effectiveConfig.readFusion?.authoritative ?? defaultConfig.readFusion?.authoritative,
+    },
+    memoryDecay: {
+      enabled: effectiveConfig.memoryDecay?.enabled ?? defaultConfig.memoryDecay?.enabled,
+      minFloor: effectiveConfig.memoryDecay?.minFloor ?? defaultConfig.memoryDecay?.minFloor,
+      defaultHalfLifeDays: effectiveConfig.memoryDecay?.defaultHalfLifeDays ?? defaultConfig.memoryDecay?.defaultHalfLifeDays,
+      halfLifeByEventType: effectiveConfig.memoryDecay?.halfLifeByEventType ?? defaultConfig.memoryDecay?.halfLifeByEventType,
+      antiDecay: {
+        enabled: effectiveConfig.memoryDecay?.antiDecay?.enabled ?? defaultConfig.memoryDecay?.antiDecay?.enabled,
+        maxBoost: effectiveConfig.memoryDecay?.antiDecay?.maxBoost ?? defaultConfig.memoryDecay?.antiDecay?.maxBoost,
+        hitWeight: effectiveConfig.memoryDecay?.antiDecay?.hitWeight ?? defaultConfig.memoryDecay?.antiDecay?.hitWeight,
+        recentWindowDays: effectiveConfig.memoryDecay?.antiDecay?.recentWindowDays ?? defaultConfig.memoryDecay?.antiDecay?.recentWindowDays,
+      },
+    },
     enabled: effectiveConfig.enabled ?? defaultConfig.enabled,
     fallbackToBuiltin: effectiveConfig.fallbackToBuiltin ?? defaultConfig.fallbackToBuiltin,
     apiUrl: effectiveConfig.apiUrl ?? "http://127.0.0.1:8765",

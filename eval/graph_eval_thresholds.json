@@ -1,0 +1,5 @@
+{
+  "relation_hit_rate_min": 0.8,
+  "path_correct_rate_min": 0.8,
+  "conflict_detection_ratio_min": 0.1
+}

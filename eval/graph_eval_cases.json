@@ -1,0 +1,24 @@
+[
+  {
+    "id": "case_relation_1",
+    "entity": "deploy_pipeline",
+    "rel": "depends_on",
+    "dir": "outgoing",
+    "expected_relation_types": ["depends_on"],
+    "min_edges": 1
+  },
+  {
+    "id": "case_relation_2",
+    "entity": "memory_sync",
+    "dir": "both",
+    "expected_relation_types": ["blocks", "resolves", "related_to"],
+    "min_edges": 1
+  },
+  {
+    "id": "case_path_1",
+    "entity": "task_a",
+    "path_to": "task_c",
+    "max_depth": 4,
+    "expected_path": true
+  }
+]

@@ -1,6 +1,6 @@
 {
   "name": "openclaw-cortex-memory",
-  "version": "0.1.0-Alpha.3",
+  "version": "0.1.0-Alpha.4",
   "description": "Long-term memory system for OpenClaw AI Agent",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -13,7 +13,8 @@
     "check:version": "node scripts/check-version.js",
     "test:compat": "node scripts/compat-regression.js",
     "test:model": "node scripts/model-regression.js",
-    "test:all": "npm run test:compat && npm run test:model",
+    "test:graph": "node scripts/graph-eval.js",
+    "test:all": "npm run test:compat && npm run test:model && npm run test:graph",
     "release:check": "node scripts/release-pipeline.js",
     "dev": "tsc --watch",
     "prepack": "npm run build",
@@ -30,6 +31,9 @@
   "license": "MIT",
   "dependencies": {
     "undici": "^6.21.0"
+  },
+  "optionalDependencies": {
+    "@lancedb/lancedb": "^0.22.0"
   },
   "devDependencies": {
     "@types/node": "^22.19.15",

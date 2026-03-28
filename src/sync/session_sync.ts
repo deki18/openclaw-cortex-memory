@@ -11,6 +11,7 @@ interface LoggerLike {
 
 interface SyncState {
   files: Record<string, { size: number; lineCount: number }>;
+  markdowns?: Record<string, { digest: string; importedAt: string }>;
 }
 
 interface SessionSyncOptions {
@@ -41,19 +42,22 @@ function firstString(values: unknown[]): string | undefined {
 function readState(filePath: string): SyncState {
   try {
     if (!fs.existsSync(filePath)) {
-      return { files: {} };
+      return { files: {}, markdowns: {} };
     }
     const content = fs.readFileSync(filePath, "utf-8").trim();
     if (!content) {
-      return { files: {} };
+      return { files: {}, markdowns: {} };
     }
     const parsed = JSON.parse(content) as SyncState;
     if (!parsed.files || typeof parsed.files !== "object") {
-      return { files: {} };
+      return { files: {}, markdowns: {} };
+    }
+    if (!parsed.markdowns || typeof parsed.markdowns !== "object") {
+      parsed.markdowns = {};
     }
     return parsed;
   } catch {
-    return { files: {} };
+    return { files: {}, markdowns: {} };
   }
 }
 
@@ -81,6 +85,24 @@ function gatherSessionFiles(openclawBasePath: string, memoryRoot: string): strin
     results.add(localActiveFile);
   }
   return [...results];
+}
+
+function gatherDailySummaryFiles(openclawBasePath: string): string[] {
+  const summaryDir = path.join(openclawBasePath, "workspace", "memory");
+  if (!fs.existsSync(summaryDir) || !fs.statSync(summaryDir).isDirectory()) {
+    return [];
+  }
+  const files: string[] = [];
+  for (const entry of fs.readdirSync(summaryDir)) {
+    if (!entry.toLowerCase().endsWith(".md")) {
+      continue;
+    }
+    const filePath = path.join(summaryDir, entry);
+    if (fs.existsSync(filePath) && fs.statSync(filePath).isFile()) {
+      files.push(filePath);
+    }
+  }
+  return files;
 }
 
 function inferOpenclawBasePath(projectRoot: string): string {
@@ -145,12 +167,91 @@ function getSessionId(record: Record<string, unknown>, fallbackSeed: string): st
   );
 }
 
-export function createSessionSync(options: SessionSyncOptions): { syncMemory(): Promise<{ imported: number; skipped: number; filesProcessed: number }> } {
+function parseDailySummary(content: string): string[] {
+  const normalized = content
+    .replace(/\r\n/g, "\n")
+    .split("\n")
+    .map(line => line.trim())
+    .filter(Boolean)
+    .filter(line => !line.startsWith("```"));
+  const chunks: string[] = [];
+  let current: string[] = [];
+  for (const line of normalized) {
+    const isHeader = line.startsWith("#");
+    const isBullet = /^[-*]\s+/.test(line);
+    if (isHeader && current.length > 0) {
+      chunks.push(current.join("\n"));
+      current = [];
+    }
+    current.push(line);
+    if (isBullet && current.length >= 6) {
+      chunks.push(current.join("\n"));
+      current = [];
+    }
+  }
+  if (current.length > 0) {
+    chunks.push(current.join("\n"));
+  }
+  return chunks.map(chunk => chunk.trim()).filter(chunk => chunk.length >= 10);
+}
+
+export function createSessionSync(options: SessionSyncOptions): {
+  syncMemory(): Promise<{ imported: number; skipped: number; filesProcessed: number; summaryImported: number; summarySkipped: number }>;
+  syncDailySummaries(): Promise<{ imported: number; skipped: number; filesProcessed: number }>;
+} {
   const memoryRoot = options.dbPath ? path.resolve(options.dbPath) : path.join(options.projectRoot, "data", "memory");
   const statePath = path.join(memoryRoot, ".sync_state.json");
   const openclawBasePath = inferOpenclawBasePath(options.projectRoot);
 
-  async function syncMemory(): Promise<{ imported: number; skipped: number; filesProcessed: number }> {
+  async function syncDailySummaries(): Promise<{ imported: number; skipped: number; filesProcessed: number }> {
+    const files = gatherDailySummaryFiles(openclawBasePath);
+    const state = readState(statePath);
+    if (!state.markdowns || typeof state.markdowns !== "object") {
+      state.markdowns = {};
+    }
+    let imported = 0;
+    let skipped = 0;
+    let filesProcessed = 0;
+    for (const filePath of files) {
+      if (!fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) {
+        continue;
+      }
+      const content = fs.readFileSync(filePath, "utf-8");
+      const digest = crypto.createHash("sha1").update(content).digest("hex");
+      const prev = state.markdowns[filePath];
+      if (prev && prev.digest === digest) {
+        skipped += 1;
+        continue;
+      }
+      const chunks = parseDailySummary(content);
+      if (chunks.length === 0) {
+        state.markdowns[filePath] = { digest, importedAt: new Date().toISOString() };
+        skipped += 1;
+        continue;
+      }
+      const summarySessionId = `daily_summary:${path.basename(filePath)}`;
+      for (const chunk of chunks) {
+        const result = await options.writeStore.writeMemory({
+          text: chunk,
+          role: "system",
+          source: "daily_summary_sync",
+          sessionId: summarySessionId,
+        });
+        if (result.status === "ok") {
+          imported += 1;
+        } else {
+          skipped += 1;
+        }
+      }
+      state.markdowns[filePath] = { digest, importedAt: new Date().toISOString() };
+      filesProcessed += 1;
+    }
+    writeState(statePath, state);
+    options.logger.info(`TS daily summary sync completed: imported=${imported}, skipped=${skipped}, files=${filesProcessed}`);
+    return { imported, skipped, filesProcessed };
+  }
+
+  async function syncMemory(): Promise<{ imported: number; skipped: number; filesProcessed: number; summaryImported: number; summarySkipped: number }> {
     const files = gatherSessionFiles(openclawBasePath, memoryRoot);
     const state = readState(statePath);
     let imported = 0;
@@ -211,9 +312,18 @@ export function createSessionSync(options: SessionSyncOptions): { syncMemory(): 
     }
 
     writeState(statePath, state);
-    options.logger.info(`TS sync completed: imported=${imported}, skipped=${skipped}, files=${filesProcessed}`);
-    return { imported, skipped, filesProcessed };
+    const summary = await syncDailySummaries();
+    options.logger.info(
+      `TS sync completed: imported=${imported}, skipped=${skipped}, files=${filesProcessed}, summaryImported=${summary.imported}, summarySkipped=${summary.skipped}`,
+    );
+    return {
+      imported,
+      skipped,
+      filesProcessed,
+      summaryImported: summary.imported,
+      summarySkipped: summary.skipped,
+    };
   }
 
-  return { syncMemory };
+  return { syncMemory, syncDailySummaries };
 }
