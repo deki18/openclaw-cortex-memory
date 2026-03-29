@@ -1,7 +1,6 @@
 # OpenClaw Cortex Memory
 
-OpenClaw 长期记忆插件，提供跨会话检索、事件存储、规则反思、增量同步与运行诊断能力。  
-可作为 OpenClaw 的 memory slot 直接接入，支持从历史会话持续沉淀可复用记忆。
+面向 OpenClaw 的长期记忆插件，集成多路检索、事件归档、图谱关系、向量化与反衰减排序，支持历史增量导入、规则反思和可观测诊断，帮助 Agent 在跨会话中持续积累并稳定调用高价值记忆。  
 
 发布签名见 [SIGNATURE.md]
 
@@ -67,6 +66,16 @@ pnpm openclaw plugins install openclaw-cortex-memory@alpha
 pnpm openclaw plugins enable openclaw-cortex-memory
 ```
 
+第三种安装方式（当 ClawHub/npm 解析受网络影响时）：
+
+```bash
+curl -L -o /tmp/cortex.tgz https://registry.npmjs.org/openclaw-cortex-memory/-/openclaw-cortex-memory-0.1.0-Alpha.8.tgz
+cd ~/openclaw
+pnpm openclaw plugins install /tmp/cortex.tgz
+pnpm openclaw plugins enable openclaw-cortex-memory
+rm -f /tmp/cortex.tgz
+```
+
 后续更新：
 
 ```bash
@@ -80,6 +89,7 @@ pnpm openclaw plugins enable openclaw-cortex-memory
 - 推荐显式安装来源，减少 ClawHub-first 时代的来源歧义。
 - 使用 `plugins install` 的安装记录方式，避免 `loaded without install/load-path provenance`。
 - 保持 `plugins.allow` 显式包含 `openclaw-cortex-memory`，避免运行时把插件判定为未绑定信任源。
+- 若 `plugins install openclaw-cortex-memory` 在 ClawHub 解析阶段失败，可使用上述 tgz 方式直接安装。
 
 
 ### 本地开发模式（无安装记录）

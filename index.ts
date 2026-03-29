@@ -23,6 +23,8 @@ interface EmbeddingConfig {
   baseURL?: string;
   baseUrl?: string;
   dimensions?: number;
+  timeoutMs?: number;
+  maxRetries?: number;
 }
 
 interface LLMConfig {
@@ -738,6 +740,12 @@ function validateConfig(cfg: CortexMemoryConfig): string[] {
   if (!cfg.embedding?.apiKey || !cfg.embedding?.baseURL) {
     errors.push("embedding.apiKey and embedding.baseURL are required. Please configure third-party embedding endpoint credentials.");
   }
+  if (typeof cfg.embedding?.timeoutMs === "number" && (!Number.isFinite(cfg.embedding.timeoutMs) || cfg.embedding.timeoutMs < 1000)) {
+    errors.push("embedding.timeoutMs must be a number >= 1000.");
+  }
+  if (typeof cfg.embedding?.maxRetries === "number" && (!Number.isFinite(cfg.embedding.maxRetries) || cfg.embedding.maxRetries < 1 || cfg.embedding.maxRetries > 8)) {
+    errors.push("embedding.maxRetries must be between 1 and 8.");
+  }
   if (!cfg.llm?.provider || !cfg.llm?.model) {
     errors.push("llm.provider and llm.model are required. Please configure them in openclaw.json");
   }
@@ -1139,7 +1147,7 @@ function stopPythonService(): void {
 }
 
 function getBaseUrl(): string {
-  return config?.apiUrl ?? "http://127.0.0.1:8765";
+  return config?.apiUrl ?? "http://localhost:8765";
 }
 
 async function waitForService(maxAttempts = 30): Promise<void> {
@@ -2233,7 +2241,7 @@ export function register(pluginApi: OpenClawPluginApi, userConfig?: Partial<Cort
     },
     enabled: effectiveConfig.enabled ?? defaultConfig.enabled,
     fallbackToBuiltin: effectiveConfig.fallbackToBuiltin ?? defaultConfig.fallbackToBuiltin,
-    apiUrl: effectiveConfig.apiUrl ?? "http://127.0.0.1:8765",
+    apiUrl: effectiveConfig.apiUrl ?? "http://localhost:8765",
     engineMode: "ts",
   } as CortexMemoryConfig;
   memoryEngine = null;

@@ -1,7 +1,7 @@
 {
   "id": "openclaw-cortex-memory",
   "name": "Cortex Memory",
-  "version": "0.1.0-Alpha.6",
+  "version": "0.1.0-Alpha.8",
   "description": "Long-term memory system with semantic, episodic, and procedural memory for AI Agents",
   "main": "dist/index.js",
   "author": "deki18",
@@ -56,7 +56,26 @@
             "type": "array",
             "description": "Involved entities",
             "items": {
-              "type": "string"
+              "oneOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "name": {
+                      "type": "string"
+                    },
+                    "type": {
+                      "type": "string"
+                    }
+                  },
+                  "additionalProperties": false
+                }
+              ]
             }
           },
           "outcome": {
@@ -67,7 +86,27 @@
             "type": "array",
             "description": "Entity relationships",
             "items": {
-              "type": "string"
+              "oneOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "source": {
+                      "type": "string"
+                    },
+                    "target": {
+                      "type": "string"
+                    },
+                    "type": {
+                      "type": "string"
+                    }
+                  },
+                  "required": ["source", "target"],
+                  "additionalProperties": false
+                }
+              ]
             }
           }
         },
@@ -194,7 +233,7 @@
       "apiUrl": {
         "type": "string",
         "description": "URL of the memory service API",
-        "default": "http://127.0.0.1:8765"
+        "default": "http://localhost:8765"
       },
       "engineMode": {
         "type": "string",
@@ -248,8 +287,19 @@
           "dimensions": {
             "type": "integer",
             "description": "Embedding dimensions"
+          },
+          "timeoutMs": {
+            "type": "integer",
+            "description": "Embedding request timeout in milliseconds",
+            "default": 20000
+          },
+          "maxRetries": {
+            "type": "integer",
+            "description": "Maximum retry attempts for embedding requests",
+            "default": 4
           }
         },
+        "required": ["provider", "model", "apiKey", "baseURL"],
         "additionalProperties": false
       },
       "llm": {
@@ -277,6 +327,7 @@
             "description": "LLM API base URL (camelCase alias)"
           }
         },
+        "required": ["provider", "model", "apiKey", "baseURL"],
         "additionalProperties": false
       },
       "reranker": {
@@ -304,6 +355,7 @@
             "description": "Reranker API base URL (camelCase alias)"
           }
         },
+        "required": ["provider", "model", "apiKey", "baseURL"],
         "additionalProperties": false
       },
       "fallbackToBuiltin": {

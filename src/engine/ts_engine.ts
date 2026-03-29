@@ -133,21 +133,55 @@ export function createTsEngine(deps: TsEngineDeps): MemoryEngine {
 
   async function storeEvent(args: StoreEventArgs, _context: ToolContext): Promise<ToolResult> {
     try {
-      if (!args.summary?.trim()) {
+      const rawArgs = args as unknown as Record<string, unknown>;
+      const summaryCandidate = typeof rawArgs?.summary === "string"
+        ? rawArgs.summary
+        : typeof (rawArgs?.input as Record<string, unknown> | undefined)?.summary === "string"
+          ? String((rawArgs.input as Record<string, unknown>).summary)
+          : typeof (rawArgs?.event as Record<string, unknown> | undefined)?.summary === "string"
+            ? String((rawArgs.event as Record<string, unknown>).summary)
+            : "";
+      const normalizedSummary = summaryCandidate.trim();
+      if (!normalizedSummary) {
         return { success: false, error: "Invalid input provided. Missing 'summary' parameter." };
       }
-      const entities = Array.isArray(args.entities)
-        ? args.entities.map(item => {
+      const entityInput = Array.isArray(rawArgs.entities)
+        ? rawArgs.entities
+        : Array.isArray((rawArgs.input as Record<string, unknown> | undefined)?.entities)
+          ? ((rawArgs.input as Record<string, unknown>).entities as unknown[])
+          : Array.isArray((rawArgs.event as Record<string, unknown> | undefined)?.entities)
+            ? ((rawArgs.event as Record<string, unknown>).entities as unknown[])
+            : [];
+      const entities = Array.isArray(entityInput)
+        ? entityInput.map(item => {
+            if (typeof item === "string") {
+              return item.trim();
+            }
             if (item && typeof item === "object") {
-              const value = (item.name || item.id || "") as string;
+              const value = ((item as { name?: string; id?: string }).name || (item as { name?: string; id?: string }).id || "") as string;
               return typeof value === "string" ? value.trim() : "";
             }
             return "";
           }).filter(Boolean)
         : [];
-      const relations = Array.isArray(args.relations)
-        ? args.relations
+      const relationInput = Array.isArray(rawArgs.relations)
+        ? rawArgs.relations
+        : Array.isArray((rawArgs.input as Record<string, unknown> | undefined)?.relations)
+          ? ((rawArgs.input as Record<string, unknown>).relations as unknown[])
+          : Array.isArray((rawArgs.event as Record<string, unknown> | undefined)?.relations)
+            ? ((rawArgs.event as Record<string, unknown>).relations as unknown[])
+            : [];
+      const relations = Array.isArray(relationInput)
+        ? relationInput
             .map(item => {
+              if (typeof item === "string") {
+                const [sourceRaw, typeRaw, targetRaw] = item.split("|");
+                const source = (sourceRaw || "").trim();
+                const target = (targetRaw || "").trim();
+                const type = normalizeRelationType((typeRaw || "related_to").trim(), graphSchema);
+                if (!source || !target) return null;
+                return { source, target, type };
+              }
               if (!item || typeof item !== "object") return null;
               const relation = item as { source?: string; target?: string; type?: string };
               if (!relation.source || !relation.target) return null;
@@ -159,13 +193,20 @@ export function createTsEngine(deps: TsEngineDeps): MemoryEngine {
             })
             .filter((item): item is { source: string; target: string; type: string } => Boolean(item))
         : [];
+      const outcomeValue = typeof rawArgs.outcome === "string"
+        ? rawArgs.outcome
+        : typeof (rawArgs.input as Record<string, unknown> | undefined)?.outcome === "string"
+          ? String((rawArgs.input as Record<string, unknown>).outcome)
+          : typeof (rawArgs.event as Record<string, unknown> | undefined)?.outcome === "string"
+            ? String((rawArgs.event as Record<string, unknown>).outcome)
+            : "";
       const result = await deps.archiveStore.storeEvents([
         {
           event_type: "manual_event",
-          summary: args.summary.trim(),
+          summary: normalizedSummary,
           entities,
           relations,
-          outcome: args.outcome ?? "",
+          outcome: outcomeValue,
           session_id: "manual",
           source_file: "ts_store_event",
           confidence: 1,

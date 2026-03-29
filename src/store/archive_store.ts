@@ -20,6 +20,8 @@ interface EmbeddingConfig {
   baseURL?: string;
   baseUrl?: string;
   dimensions?: number;
+  timeoutMs?: number;
+  maxRetries?: number;
 }
 
 interface ExtractedEvent {
@@ -93,6 +95,8 @@ async function requestEmbedding(args: {
   apiKey: string;
   baseUrl: string;
   dimensions?: number;
+  timeoutMs?: number;
+  maxRetries?: number;
 }): Promise<number[] | null> {
   const endpoint = args.baseUrl.endsWith("/embeddings") ? args.baseUrl : `${args.baseUrl}/embeddings`;
   const body: Record<string, unknown> = {
@@ -102,10 +106,16 @@ async function requestEmbedding(args: {
   if (typeof args.dimensions === "number" && Number.isFinite(args.dimensions) && args.dimensions > 0) {
     body.dimensions = args.dimensions;
   }
+  const timeoutMs = typeof args.timeoutMs === "number" && Number.isFinite(args.timeoutMs) && args.timeoutMs >= 1000
+    ? Math.floor(args.timeoutMs)
+    : 20000;
+  const maxRetries = typeof args.maxRetries === "number" && Number.isFinite(args.maxRetries) && args.maxRetries >= 1
+    ? Math.min(8, Math.floor(args.maxRetries))
+    : 4;
   let lastError: unknown = null;
-  for (let attempt = 0; attempt < 3; attempt += 1) {
+  for (let attempt = 0; attempt < maxRetries; attempt += 1) {
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 10000);
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
     try {
       const response = await fetch(endpoint, {
         method: "POST",
@@ -130,6 +140,9 @@ async function requestEmbedding(args: {
     } catch (error) {
       clearTimeout(timeoutId);
       lastError = error;
+    }
+    if (attempt < maxRetries - 1) {
+      await new Promise(resolve => setTimeout(resolve, 300 * Math.pow(2, attempt)));
     }
   }
   if (lastError) {
@@ -205,6 +218,8 @@ export function createArchiveStore(options: ArchiveStoreOptions): {
             apiKey: embeddingApiKey,
             baseUrl: embeddingBaseUrl,
             dimensions: options.embedding?.dimensions,
+            timeoutMs: options.embedding?.timeoutMs,
+            maxRetries: options.embedding?.maxRetries,
           }) || undefined;
         } catch (error) {
           options.logger.warn(`Archive embedding failed: ${error}`);
