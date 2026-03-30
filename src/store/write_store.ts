@@ -40,6 +40,34 @@ interface WriteStoreOptions {
     timeoutMs?: number;
     maxRetries?: number;
   };
+  vectorChunking?: {
+    chunkSize?: number;
+    chunkOverlap?: number;
+  };
+  vectorStore?: {
+    upsert(record: {
+      id: string;
+      session_id: string;
+      event_type: string;
+      summary: string;
+      timestamp: string;
+      layer: "active" | "archive";
+      source_memory_id: string;
+      source_memory_canonical_id?: string;
+      outcome?: string;
+      entities?: string[];
+      relations?: Array<{ source: string; target: string; type: string }>;
+      embedding: number[];
+      quality_score: number;
+      char_count: number;
+      token_count: number;
+      chunk_index?: number;
+      chunk_total?: number;
+      chunk_start?: number;
+      chunk_end?: number;
+    }): Promise<void>;
+    deleteBySourceMemory(args: { layer: "active" | "archive"; sourceMemoryId: string }): Promise<void>;
+  };
 }
 
 interface PersistedRecord {
@@ -49,9 +77,16 @@ interface PersistedRecord {
   role: string;
   source: string;
   content: string;
+  layer: "active";
+  embedding_status: "ok" | "failed" | "pending";
+  llm_gate_decision: "active_only" | "archive_event" | "skip";
   quality_level: "low" | "medium" | "high";
   quality_score: number;
   text_hash: string;
+  char_count: number;
+  token_count: number;
+  vector_chunks_total?: number;
+  vector_chunks_ok?: number;
   embedding?: number[];
 }
 
@@ -102,9 +137,106 @@ function computeHash(text: string): string {
   return crypto.createHash("sha256").update(text).digest("hex");
 }
 
+function estimateTokenCount(text: string): number {
+  const parts = text
+    .split(/[\s,.;:!?，。；：！？、()（）[\]{}"'`~]+/)
+    .map(part => part.trim())
+    .filter(Boolean);
+  return parts.length;
+}
+
 function normalizeBaseUrl(value?: string): string {
   if (!value) return "";
   return value.endsWith("/") ? value.slice(0, -1) : value;
+}
+
+function splitTextChunks(text: string, chunkSize: number, chunkOverlap: number): Array<{
+  index: number;
+  start: number;
+  end: number;
+  text: string;
+}> {
+  const normalizedSize = Number.isFinite(chunkSize) && chunkSize >= 200 ? Math.floor(chunkSize) : 600;
+  const normalizedOverlap = Number.isFinite(chunkOverlap) && chunkOverlap >= 0
+    ? Math.floor(chunkOverlap)
+    : 100;
+  const overlap = Math.min(normalizedOverlap, Math.max(0, normalizedSize - 50));
+  const output: Array<{ index: number; start: number; end: number; text: string }> = [];
+  if (!text.trim()) {
+    return output;
+  }
+  let cursor = 0;
+  let index = 0;
+  const punctuationSet = new Set(["。", "！", "？", ".", "!", "?", "\n", "；", ";"]);
+  while (cursor < text.length) {
+    const rawEnd = Math.min(text.length, cursor + normalizedSize);
+    let end = rawEnd;
+    if (rawEnd < text.length) {
+      const backwardStart = Math.max(cursor + Math.floor(normalizedSize * 0.45), cursor + 1);
+      let found = -1;
+      for (let i = rawEnd - 1; i >= backwardStart; i -= 1) {
+        if (punctuationSet.has(text[i])) {
+          found = i + 1;
+          break;
+        }
+      }
+      if (found < 0) {
+        const forwardEnd = Math.min(text.length, rawEnd + Math.floor(normalizedSize * 0.2));
+        for (let i = rawEnd; i < forwardEnd; i += 1) {
+          if (punctuationSet.has(text[i])) {
+            found = i + 1;
+            break;
+          }
+        }
+      }
+      if (found > cursor) {
+        end = found;
+      }
+    }
+    if (end <= cursor) {
+      end = Math.min(text.length, cursor + normalizedSize);
+    }
+    const chunkText = text.slice(cursor, end).trim();
+    if (chunkText) {
+      output.push({ index, start: cursor, end, text: chunkText });
+      index += 1;
+    }
+    if (end >= text.length) {
+      break;
+    }
+    const nextCursor = Math.max(cursor + 1, end - overlap);
+    if (nextCursor <= cursor) {
+      cursor = end;
+    } else {
+      cursor = nextCursor;
+    }
+  }
+  return output;
+}
+
+async function mapWithConcurrency<T, R>(
+  items: T[],
+  maxConcurrency: number,
+  mapper: (item: T, index: number) => Promise<R>,
+): Promise<R[]> {
+  if (items.length === 0) {
+    return [];
+  }
+  const concurrency = Math.max(1, Math.min(maxConcurrency, items.length));
+  const results = new Array<R>(items.length);
+  let cursor = 0;
+  async function worker(): Promise<void> {
+    while (true) {
+      const current = cursor;
+      cursor += 1;
+      if (current >= items.length) {
+        break;
+      }
+      results[current] = await mapper(items[current], current);
+    }
+  }
+  await Promise.all(Array.from({ length: concurrency }, () => worker()));
+  return results;
 }
 
 async function requestEmbedding(args: {
@@ -211,34 +343,95 @@ export function createWriteStore(options: WriteStoreOptions): { writeMemory(args
       role: args.role || "user",
       source: args.source || "message",
       content: cleaned,
+      layer: "active",
+      embedding_status: "pending",
+      llm_gate_decision: "active_only",
       quality_level: quality.level,
       quality_score: quality.score,
       text_hash: textHash,
+      char_count: cleaned.length,
+      token_count: estimateTokenCount(cleaned),
     };
     const embeddingModel = options.embedding?.model || "";
     const embeddingApiKey = options.embedding?.apiKey || "";
     const embeddingBaseUrl = normalizeBaseUrl(options.embedding?.baseURL || options.embedding?.baseUrl);
-    if (embeddingModel && embeddingApiKey && embeddingBaseUrl) {
+    const chunkSize = options.vectorChunking?.chunkSize ?? 600;
+    const chunkOverlap = options.vectorChunking?.chunkOverlap ?? 100;
+    const maxParallel = 6;
+    const vectorStore = options.vectorStore;
+    if (embeddingModel && embeddingApiKey && embeddingBaseUrl && vectorStore) {
+      const chunks = splitTextChunks(cleaned, chunkSize, chunkOverlap);
+      record.vector_chunks_total = chunks.length;
+      record.vector_chunks_ok = 0;
       try {
-        const embedding = await requestEmbedding({
-          text: cleaned,
-          model: embeddingModel,
-          apiKey: embeddingApiKey,
-          baseUrl: embeddingBaseUrl,
-          dimensions: options.embedding?.dimensions,
-          timeoutMs: options.embedding?.timeoutMs,
-          maxRetries: options.embedding?.maxRetries,
-        });
-        if (embedding && embedding.length > 0) {
-          record.embedding = embedding;
-        }
+        await vectorStore.deleteBySourceMemory({ layer: "active", sourceMemoryId: record.id });
       } catch (error) {
-        options.logger.warn(`Embedding request failed, fallback to lexical store: ${error}`);
+        options.logger.warn(`Active vector cleanup failed before upsert: ${error}`);
       }
+      const chunkEmbeddings = await mapWithConcurrency(chunks, maxParallel, async (chunk) => {
+        try {
+          const embedding = await requestEmbedding({
+            text: chunk.text,
+            model: embeddingModel,
+            apiKey: embeddingApiKey,
+            baseUrl: embeddingBaseUrl,
+            dimensions: options.embedding?.dimensions,
+            timeoutMs: options.embedding?.timeoutMs,
+            maxRetries: options.embedding?.maxRetries,
+          });
+          if (!embedding || embedding.length === 0) {
+            return null;
+          }
+          return { chunk, embedding };
+        } catch (error) {
+          options.logger.warn(`Active chunk embedding failed id=${record.id} chunk=${chunk.index} error=${error}`);
+          return null;
+        }
+      });
+      const validEmbeddings = chunkEmbeddings
+        .filter((item): item is { chunk: { index: number; start: number; end: number; text: string }; embedding: number[] } => Boolean(item))
+        .sort((a, b) => a.chunk.index - b.chunk.index);
+      if (validEmbeddings.length > 0) {
+        record.embedding = validEmbeddings[0].embedding;
+      }
+      const upsertStatus = await mapWithConcurrency(validEmbeddings, maxParallel, async (item) => {
+        const { chunk, embedding } = item;
+        try {
+          await vectorStore.upsert({
+            id: `vec_${record.id}_c${chunk.index}`,
+            session_id: record.session_id,
+            event_type: "message",
+            summary: chunk.text,
+            timestamp: record.timestamp,
+            layer: "active",
+            source_memory_id: record.id,
+            source_memory_canonical_id: record.id,
+            embedding,
+            quality_score: record.quality_score,
+            char_count: chunk.text.length,
+            token_count: estimateTokenCount(chunk.text),
+            chunk_index: chunk.index,
+            chunk_total: chunks.length,
+            chunk_start: chunk.start,
+            chunk_end: chunk.end,
+          });
+          return true;
+        } catch (error) {
+          options.logger.warn(`Active chunk embedding failed id=${record.id} chunk=${chunk.index} error=${error}`);
+          return false;
+        }
+      });
+      record.vector_chunks_ok = upsertStatus.filter(Boolean).length;
+      record.embedding_status = record.vector_chunks_total > 0 && record.vector_chunks_ok === record.vector_chunks_total
+        ? "ok"
+        : "failed";
     }
 
     ensureDirForFile(activeSessionsPath);
     fs.appendFileSync(activeSessionsPath, `${JSON.stringify(record)}\n`, "utf-8");
+    if (record.vector_chunks_total && record.vector_chunks_total > 0) {
+      options.logger.info(`active_vector_chunks source=${record.id} ok=${record.vector_chunks_ok || 0}/${record.vector_chunks_total}`);
+    }
     options.logger.info(`TS write stored message for session ${args.sessionId}`);
     return { status: "ok", memory_id: id, quality };
   }

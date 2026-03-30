@@ -2,7 +2,6 @@
 
 const fs = require('fs');
 const path = require('path');
-const { spawn } = require('child_process');
 
 const PLUGIN_NAME = 'openclaw-cortex-memory';
 
@@ -175,21 +174,22 @@ function getStatus() {
 }
 
 function runUninstall(args) {
-  const uninstallScript = path.join(__dirname, 'uninstall.js');
-  
-  if (!fs.existsSync(uninstallScript)) {
+  const uninstallScriptPath = path.join(__dirname, 'uninstall.js');
+  if (!fs.existsSync(uninstallScriptPath)) {
     console.error('Uninstall script not found.');
     process.exit(1);
   }
-  
-  const child = spawn(process.execPath, [uninstallScript, 'uninstall', ...args], {
-    stdio: 'inherit',
-    cwd: process.cwd()
-  });
-  
-  child.on('exit', (code) => {
-    process.exit(code || 0);
-  });
+  try {
+    const uninstallModule = require(uninstallScriptPath);
+    if (!uninstallModule || typeof uninstallModule.uninstall !== 'function') {
+      console.error('Invalid uninstall script export.');
+      process.exit(1);
+    }
+    uninstallModule.uninstall(args);
+  } catch (error) {
+    console.error(`Failed to run uninstall: ${error instanceof Error ? error.message : String(error)}`);
+    process.exit(1);
+  }
 }
 
 function showHelp() {

@@ -14,6 +14,7 @@ import { createSessionEnd } from "./src/session/session_end";
 import { createRuleStore } from "./src/rules/rule_store";
 import { createReflector } from "./src/reflect/reflector";
 import { createThreeStageDeduplicator } from "./src/dedup/three_stage_deduplicator";
+import { getEnvValue, getHomeDir, getProcessEnvCopy } from "./src/utils/runtime_env";
 import type { EngineMode } from "./src/engine/types";
 
 interface EmbeddingConfig {
@@ -56,6 +57,30 @@ interface CortexMemoryConfig {
     enabled?: boolean;
     maxCandidates?: number;
     authoritative?: boolean;
+    channelWeights?: {
+      rules?: number;
+      archive?: number;
+      vector?: number;
+      graph?: number;
+    };
+    channelTopK?: {
+      rules?: number;
+      archive?: number;
+      vector?: number;
+      graph?: number;
+    };
+    minLexicalHits?: number;
+    minSemanticHits?: number;
+    lengthNorm?: {
+      enabled?: boolean;
+      pivotChars?: number;
+      strength?: number;
+      minFactor?: number;
+    };
+  };
+  vectorChunking?: {
+    chunkSize?: number;
+    chunkOverlap?: number;
   };
   memoryDecay?: {
     enabled?: boolean;
@@ -173,6 +198,30 @@ const defaultConfig: Partial<CortexMemoryConfig> = {
     enabled: true,
     maxCandidates: 10,
     authoritative: true,
+    channelWeights: {
+      rules: 1,
+      archive: 1.15,
+      vector: 1.2,
+      graph: 1,
+    },
+    channelTopK: {
+      rules: 8,
+      archive: 20,
+      vector: 20,
+      graph: 12,
+    },
+    minLexicalHits: 1,
+    minSemanticHits: 1,
+    lengthNorm: {
+      enabled: true,
+      pivotChars: 1200,
+      strength: 0.75,
+      minFactor: 0.45,
+    },
+  },
+  vectorChunking: {
+    chunkSize: 600,
+    chunkOverlap: 100,
   },
   memoryDecay: {
     enabled: true,
@@ -330,15 +379,17 @@ function resolveEngine(): MemoryEngine {
     fusion: config.readFusion,
     memoryDecay: config.memoryDecay,
   });
+  const vectorStore = createVectorStore({
+    memoryRoot,
+    logger,
+  });
   const writeStore = createWriteStore({
     projectRoot,
     dbPath: config.dbPath,
     logger,
     embedding: config.embedding,
-  });
-  const vectorStore = createVectorStore({
-    memoryRoot,
-    logger,
+    vectorChunking: config.vectorChunking,
+    vectorStore,
   });
   const deduplicator = createThreeStageDeduplicator({
     memoryRoot,
@@ -349,6 +400,7 @@ function resolveEngine(): MemoryEngine {
     memoryRoot,
     logger,
     embedding: config.embedding,
+    vectorChunking: config.vectorChunking,
     deduplicator,
     vectorStore,
   });
@@ -356,6 +408,8 @@ function resolveEngine(): MemoryEngine {
     projectRoot,
     dbPath: config.dbPath,
     logger,
+    llm: config.llm,
+    archiveStore,
     writeStore,
   });
   const sessionEnd = createSessionEnd({
@@ -382,12 +436,17 @@ function resolveEngine(): MemoryEngine {
   memoryEngine = createTsEngine({
     readStore,
     writeStore,
+    vectorStore,
     archiveStore,
     sessionSync,
     sessionEnd,
     reflector,
     memoryRoot,
     projectRoot,
+    embedding: config.embedding,
+    llm: config.llm,
+    reranker: config.reranker,
+    vectorChunking: config.vectorChunking,
     getCachedAutoSearch: getSessionCachedAutoSearch,
     resolveSessionId: (context, payload) => resolveSessionId(context, payload),
     normalizeIncomingMessage,
@@ -580,7 +639,7 @@ function compareVersions(a: string, b: string): number {
 
 async function checkOpenClawVersion(): Promise<void> {
   try {
-    const version = process.env.OPENCLAW_VERSION;
+    const version = getEnvValue("OPENCLAW_VERSION");
     if (version) {
       if (compareVersions(version, MIN_OPENCLAW_VERSION) < 0) {
         throw new Error(`Incompatible OpenClaw version: ${version}. Minimum required: ${MIN_OPENCLAW_VERSION}`);
@@ -616,10 +675,10 @@ function findProjectRoot(): string {
 }
 
 function findOpenClawConfig(): string | null {
-  const explicitConfigPath = process.env.OPENCLAW_CONFIG_PATH || "";
-  const stateDir = process.env.OPENCLAW_STATE_DIR || "";
-  const basePath = process.env.OPENCLAW_BASE_PATH || "";
-  const homePath = process.env.USERPROFILE || process.env.HOME || "";
+  const explicitConfigPath = getEnvValue("OPENCLAW_CONFIG_PATH");
+  const stateDir = getEnvValue("OPENCLAW_STATE_DIR");
+  const basePath = getEnvValue("OPENCLAW_BASE_PATH");
+  const homePath = getHomeDir();
   const possiblePaths = [
     explicitConfigPath,
     stateDir ? path.join(stateDir, "openclaw.json") : "",
@@ -763,6 +822,55 @@ function validateConfig(cfg: CortexMemoryConfig): string[] {
   }
   if (cfg.readFusion && typeof cfg.readFusion.maxCandidates === "number" && (!Number.isFinite(cfg.readFusion.maxCandidates) || cfg.readFusion.maxCandidates < 2)) {
     errors.push("readFusion.maxCandidates must be a number >= 2.");
+  }
+  if (cfg.readFusion?.channelWeights) {
+    for (const [key, value] of Object.entries(cfg.readFusion.channelWeights)) {
+      if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
+        errors.push(`readFusion.channelWeights.${key} must be a number > 0.`);
+        break;
+      }
+    }
+  }
+  if (cfg.readFusion?.channelTopK) {
+    for (const [key, value] of Object.entries(cfg.readFusion.channelTopK)) {
+      if (typeof value !== "number" || !Number.isFinite(value) || value < 1) {
+        errors.push(`readFusion.channelTopK.${key} must be a number >= 1.`);
+        break;
+      }
+    }
+  }
+  if (typeof cfg.readFusion?.minLexicalHits === "number" && (!Number.isFinite(cfg.readFusion.minLexicalHits) || cfg.readFusion.minLexicalHits < 0)) {
+    errors.push("readFusion.minLexicalHits must be a number >= 0.");
+  }
+  if (typeof cfg.readFusion?.minSemanticHits === "number" && (!Number.isFinite(cfg.readFusion.minSemanticHits) || cfg.readFusion.minSemanticHits < 0)) {
+    errors.push("readFusion.minSemanticHits must be a number >= 0.");
+  }
+  if (cfg.readFusion?.lengthNorm) {
+    const ln = cfg.readFusion.lengthNorm;
+    if (typeof ln.pivotChars === "number" && (!Number.isFinite(ln.pivotChars) || ln.pivotChars <= 0)) {
+      errors.push("readFusion.lengthNorm.pivotChars must be > 0.");
+    }
+    if (typeof ln.strength === "number" && (!Number.isFinite(ln.strength) || ln.strength <= 0)) {
+      errors.push("readFusion.lengthNorm.strength must be > 0.");
+    }
+    if (typeof ln.minFactor === "number" && (!Number.isFinite(ln.minFactor) || ln.minFactor <= 0 || ln.minFactor > 1)) {
+      errors.push("readFusion.lengthNorm.minFactor must be within (0,1].");
+    }
+  }
+  if (cfg.vectorChunking) {
+    if (typeof cfg.vectorChunking.chunkSize === "number" && (!Number.isFinite(cfg.vectorChunking.chunkSize) || cfg.vectorChunking.chunkSize < 200)) {
+      errors.push("vectorChunking.chunkSize must be >= 200.");
+    }
+    if (typeof cfg.vectorChunking.chunkOverlap === "number" && (!Number.isFinite(cfg.vectorChunking.chunkOverlap) || cfg.vectorChunking.chunkOverlap < 0)) {
+      errors.push("vectorChunking.chunkOverlap must be >= 0.");
+    }
+    if (
+      typeof cfg.vectorChunking.chunkSize === "number" &&
+      typeof cfg.vectorChunking.chunkOverlap === "number" &&
+      cfg.vectorChunking.chunkOverlap >= cfg.vectorChunking.chunkSize
+    ) {
+      errors.push("vectorChunking.chunkOverlap must be smaller than chunkSize.");
+    }
   }
   if (cfg.memoryDecay) {
     if (typeof cfg.memoryDecay.minFloor === "number" && (!Number.isFinite(cfg.memoryDecay.minFloor) || cfg.memoryDecay.minFloor < 0 || cfg.memoryDecay.minFloor > 1)) {
@@ -984,7 +1092,7 @@ async function startPythonServiceInternal(): Promise<void> {
   logger.info("Starting Cortex Memory Python service...");
 
   const env: Record<string, string> = {
-    ...process.env as Record<string, string>,
+    ...getProcessEnvCopy(),
     CORTEX_MEMORY_EMBEDDING_PROVIDER: config.embedding.provider,
     CORTEX_MEMORY_EMBEDDING_MODEL: config.embedding.model,
     CORTEX_MEMORY_LLM_PROVIDER: config.llm.provider,
@@ -992,7 +1100,7 @@ async function startPythonServiceInternal(): Promise<void> {
     CORTEX_MEMORY_RERANKER_PROVIDER: config.reranker.provider || "",
     CORTEX_MEMORY_RERANKER_MODEL: config.reranker.model,
     CORTEX_MEMORY_DB_PATH: config.dbPath || path.join(
-      process.env.USERPROFILE || process.env.HOME || "", 
+      getHomeDir(),
       ".openclaw", "agents", "main", "lancedb_store"
     ),
   };
@@ -1854,6 +1962,32 @@ function registerTools(): void {
       },
     },
     {
+      name: "backfill_embeddings",
+      description: "Backfill missing embeddings for active/archive records",
+      parameters: {
+        type: "object",
+        properties: {
+          layer: { type: "string", enum: ["active", "archive", "all"], description: "Target layer to backfill" },
+          batch_size: { type: "integer", description: "Batch size per processing window" },
+          max_retries: { type: "integer", description: "Max retry count for failed records" },
+          retry_failed_only: { type: "boolean", description: "Only retry failed records" },
+          rebuild_mode: { type: "string", enum: ["incremental", "vector_only", "full"], description: "Rebuild mode" },
+        },
+        required: [],
+        additionalProperties: false,
+      },
+      execute: async (params: { args?: Record<string, unknown>; context: ToolContext }) => {
+        const args = params.args || params;
+        return resolveEngine().backfillEmbeddings(args as {
+          layer?: "active" | "archive" | "all";
+          batch_size?: number;
+          max_retries?: number;
+          retry_failed_only?: boolean;
+          rebuild_mode?: "incremental" | "vector_only" | "full";
+        }, params.context);
+      },
+    },
+    {
       name: "delete_memory",
       description: "Delete a memory by ID",
       parameters: {
@@ -2226,6 +2360,20 @@ export function register(pluginApi: OpenClawPluginApi, userConfig?: Partial<Cort
       enabled: effectiveConfig.readFusion?.enabled ?? defaultConfig.readFusion?.enabled,
       maxCandidates: effectiveConfig.readFusion?.maxCandidates ?? defaultConfig.readFusion?.maxCandidates,
       authoritative: effectiveConfig.readFusion?.authoritative ?? defaultConfig.readFusion?.authoritative,
+      channelWeights: effectiveConfig.readFusion?.channelWeights ?? defaultConfig.readFusion?.channelWeights,
+      channelTopK: effectiveConfig.readFusion?.channelTopK ?? defaultConfig.readFusion?.channelTopK,
+      minLexicalHits: effectiveConfig.readFusion?.minLexicalHits ?? defaultConfig.readFusion?.minLexicalHits,
+      minSemanticHits: effectiveConfig.readFusion?.minSemanticHits ?? defaultConfig.readFusion?.minSemanticHits,
+      lengthNorm: {
+        enabled: effectiveConfig.readFusion?.lengthNorm?.enabled ?? defaultConfig.readFusion?.lengthNorm?.enabled,
+        pivotChars: effectiveConfig.readFusion?.lengthNorm?.pivotChars ?? defaultConfig.readFusion?.lengthNorm?.pivotChars,
+        strength: effectiveConfig.readFusion?.lengthNorm?.strength ?? defaultConfig.readFusion?.lengthNorm?.strength,
+        minFactor: effectiveConfig.readFusion?.lengthNorm?.minFactor ?? defaultConfig.readFusion?.lengthNorm?.minFactor,
+      },
+    },
+    vectorChunking: {
+      chunkSize: effectiveConfig.vectorChunking?.chunkSize ?? defaultConfig.vectorChunking?.chunkSize,
+      chunkOverlap: effectiveConfig.vectorChunking?.chunkOverlap ?? defaultConfig.vectorChunking?.chunkOverlap,
     },
     memoryDecay: {
       enabled: effectiveConfig.memoryDecay?.enabled ?? defaultConfig.memoryDecay?.enabled,

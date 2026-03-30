@@ -13,6 +13,7 @@ interface LoggerLike {
 }
 
 interface SessionEndState {
+  version: string;
   sessions: Record<string, { signature: string; endedAt: string }>;
   recovery: Record<string, { signature: string; detectedAt: string }>;
 }
@@ -68,25 +69,32 @@ interface StructuredEvent {
   actor?: string;
 }
 
+const SESSION_END_PROMPT_VERSION = "session-end-write.v1.1.0";
+const SESSION_END_REGRESSION_SAMPLES = [
+  "样例A: “排查后发现依赖冲突并修复，构建恢复成功” => event_type=fix",
+  "样例B: “提出几个想法但无决策结果” => 不应提取 archive_event",
+];
+
 function readState(filePath: string): SessionEndState {
   try {
     if (!fs.existsSync(filePath)) {
-      return { sessions: {}, recovery: {} };
+      return { version: "2", sessions: {}, recovery: {} };
     }
     const content = fs.readFileSync(filePath, "utf-8").trim();
     if (!content) {
-      return { sessions: {}, recovery: {} };
+      return { version: "2", sessions: {}, recovery: {} };
     }
     const parsed = JSON.parse(content) as SessionEndState;
     if (!parsed.sessions || typeof parsed.sessions !== "object") {
-      return { sessions: {}, recovery: {} };
+      return { version: "2", sessions: {}, recovery: {} };
     }
     if (!parsed.recovery || typeof parsed.recovery !== "object") {
       parsed.recovery = {};
     }
+    parsed.version = typeof parsed.version === "string" && parsed.version.trim() ? parsed.version : "2";
     return parsed;
   } catch {
-    return { sessions: {}, recovery: {} };
+    return { version: "2", sessions: {}, recovery: {} };
   }
 }
 
@@ -95,6 +103,7 @@ function writeState(filePath: string, state: SessionEndState): void {
   if (!fs.existsSync(dir)) {
     fs.mkdirSync(dir, { recursive: true });
   }
+  state.version = "2";
   fs.writeFileSync(filePath, JSON.stringify(state, null, 2), "utf-8");
 }
 
@@ -224,11 +233,13 @@ async function extractEventsWithLlm(args: {
     .join("\n")
     .slice(-12000);
   const schemaPrompt = [
+    `prompt_version=${SESSION_END_PROMPT_VERSION}`,
     "请从下面会话中提取多个可长期记忆事件，按 JSON 数组输出。",
     "每个元素字段：event_type, summary, entities[], relations[], entity_types, outcome, confidence。",
     "entity_types 是对象，键为实体名，值为类型（如 Task/Issue/Fix/Plan/Milestone/Project/Person/Team/Concept）。",
     `event_type 只能取：${args.graphSchema.eventTypes.join(", ")}。`,
     "summary 要单句、可复用、非流水账；relations 为 {source,target,type}。",
+    ...SESSION_END_REGRESSION_SAMPLES,
     "只输出 JSON，不要解释。",
   ].join("\n");
   const body = {
@@ -332,6 +343,10 @@ export function createSessionEnd(options: SessionEndOptions): {
   const graphSchema = loadGraphSchema(options.projectRoot);
   const activeSessionsPath = path.join(memoryRoot, "sessions", "active", "sessions.jsonl");
   const statePath = path.join(memoryRoot, ".session_end_state.json");
+  options.logger.info(`session_end_prompt_version=${SESSION_END_PROMPT_VERSION}`);
+  if (!fs.existsSync(statePath)) {
+    options.logger.warn("session_end_state_missing: first run will rebuild session-end dedup state");
+  }
 
   async function onSessionEnd(args: {
     sessionId: string;
@@ -347,6 +362,7 @@ export function createSessionEnd(options: SessionEndOptions): {
       ? args.messages
       : loadActiveSessionRecords(activeSessionsPath, sessionId);
     if (records.length === 0) {
+      options.logger.info(`session_end_skip reason=no_active_records session=${sessionId}`);
       const syncResult = args.syncRecords ? await options.syncMemory() : undefined;
       const dailySummarySyncResult = options.syncDailySummaries ? await options.syncDailySummaries() : undefined;
       return { events_generated: 0, sync_result: syncResult, daily_summary_sync_result: dailySummarySyncResult };

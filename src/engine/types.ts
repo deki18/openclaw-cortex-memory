@@ -56,3 +56,11 @@ export interface CleanupMemoriesArgs {
   days_old?: number;
   memory_type?: string;
 }
+
+export interface BackfillEmbeddingsArgs {
+  layer?: "active" | "archive" | "all";
+  batch_size?: number;
+  max_retries?: number;
+  retry_failed_only?: boolean;
+  rebuild_mode?: "incremental" | "vector_only" | "full";
+}

@@ -14,11 +14,20 @@ interface VectorStoreRecord {
   event_type: string;
   summary: string;
   timestamp: string;
+  layer: "active" | "archive";
+  source_memory_id: string;
+  source_memory_canonical_id?: string;
   outcome?: string;
   entities?: string[];
   relations?: Array<{ source: string; target: string; type: string }>;
   embedding: number[];
   quality_score: number;
+  char_count: number;
+  token_count: number;
+  chunk_index?: number;
+  chunk_total?: number;
+  chunk_start?: number;
+  chunk_end?: number;
 }
 
 interface VectorStoreOptions {
@@ -28,6 +37,7 @@ interface VectorStoreOptions {
 
 export function createVectorStore(options: VectorStoreOptions): {
   upsert(record: VectorStoreRecord): Promise<void>;
+  deleteBySourceMemory(args: { layer: "active" | "archive"; sourceMemoryId: string }): Promise<void>;
 } {
   const require = createRequire(__filename);
   const vectorRoot = path.join(options.memoryRoot, "vector");
@@ -54,10 +64,19 @@ export function createVectorStore(options: VectorStoreOptions): {
         event_type: record.event_type,
         summary: record.summary,
         timestamp: record.timestamp,
+        layer: record.layer,
+        source_memory_id: record.source_memory_id,
+        source_memory_canonical_id: record.source_memory_canonical_id || "",
         outcome: record.outcome || "",
         entities_json: JSON.stringify(record.entities || []),
         relations_json: JSON.stringify(record.relations || []),
         quality_score: record.quality_score,
+        char_count: record.char_count,
+        token_count: record.token_count,
+        chunk_index: typeof record.chunk_index === "number" ? record.chunk_index : -1,
+        chunk_total: typeof record.chunk_total === "number" ? record.chunk_total : 1,
+        chunk_start: typeof record.chunk_start === "number" ? record.chunk_start : 0,
+        chunk_end: typeof record.chunk_end === "number" ? record.chunk_end : record.char_count,
         vector: record.embedding,
       };
       let table: unknown = null;
@@ -107,6 +126,46 @@ export function createVectorStore(options: VectorStoreOptions): {
     fs.writeFileSync(lancedbFilePath, `${remaining.join("\n")}\n`, "utf-8");
   }
 
+  async function tryDeleteBySourceMemory(args: { layer: "active" | "archive"; sourceMemoryId: string }): Promise<boolean> {
+    try {
+      const lancedbModule = require("@lancedb/lancedb") as unknown;
+      const connect = (lancedbModule as { connect?: (uri: string) => Promise<unknown> }).connect;
+      if (typeof connect !== "function") {
+        return false;
+      }
+      const db = await connect(lancedbDir) as { openTable?: (name: string) => Promise<unknown> };
+      if (!db || typeof db.openTable !== "function") {
+        return false;
+      }
+      const table = await db.openTable("events") as { delete?: (expr: string) => Promise<void> };
+      if (!table || typeof table.delete !== "function") {
+        return false;
+      }
+      const safeId = args.sourceMemoryId.replace(/'/g, "''");
+      await table.delete(`layer='${args.layer}' and source_memory_id='${safeId}'`);
+      return true;
+    } catch (error) {
+      options.logger.warn(`LanceDB deleteBySourceMemory failed, fallback to jsonl cleanup: ${error}`);
+      return false;
+    }
+  }
+
+  function fallbackDeleteBySourceMemory(args: { layer: "active" | "archive"; sourceMemoryId: string }): void {
+    if (!fs.existsSync(lancedbFilePath)) {
+      return;
+    }
+    const lines = fs.readFileSync(lancedbFilePath, "utf-8").split(/\r?\n/).filter(Boolean);
+    const remaining = lines.filter(line => {
+      try {
+        const parsed = JSON.parse(line) as { source_memory_id?: string; layer?: string };
+        return !(parsed.source_memory_id === args.sourceMemoryId && parsed.layer === args.layer);
+      } catch {
+        return false;
+      }
+    });
+    fs.writeFileSync(lancedbFilePath, `${remaining.join("\n")}${remaining.length > 0 ? "\n" : ""}`, "utf-8");
+  }
+
   async function upsert(record: VectorStoreRecord): Promise<void> {
     if (!record.embedding || record.embedding.length === 0) {
       return;
@@ -117,6 +176,16 @@ export function createVectorStore(options: VectorStoreOptions): {
     }
   }
 
+  async function deleteBySourceMemory(args: { layer: "active" | "archive"; sourceMemoryId: string }): Promise<void> {
+    if (!args.sourceMemoryId) {
+      return;
+    }
+    const deleted = await tryDeleteBySourceMemory(args);
+    if (!deleted) {
+      fallbackDeleteBySourceMemory(args);
+    }
+  }
+
   options.logger.info(`Vector store initialized at ${vectorRoot}`);
-  return { upsert };
+  return { upsert, deleteBySourceMemory };
 }

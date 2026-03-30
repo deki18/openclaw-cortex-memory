@@ -31,9 +31,14 @@ interface ReadDocument {
   text: string;
   source: string;
   timestamp?: number;
+  layer?: "active" | "archive";
+  sourceMemoryId?: string;
+  sourceMemoryCanonicalId?: string;
   embedding?: number[];
   eventType?: string;
   qualityScore?: number;
+  charCount?: number;
+  tokenCount?: number;
   sessionId?: string;
   entities?: string[];
   relations?: Array<{ source: string; target: string; type: string }>;
@@ -69,6 +74,26 @@ interface ReadStoreOptions {
     enabled?: boolean;
     maxCandidates?: number;
     authoritative?: boolean;
+    channelWeights?: {
+      rules?: number;
+      archive?: number;
+      vector?: number;
+      graph?: number;
+    };
+    channelTopK?: {
+      rules?: number;
+      archive?: number;
+      vector?: number;
+      graph?: number;
+    };
+    minLexicalHits?: number;
+    minSemanticHits?: number;
+    lengthNorm?: {
+      enabled?: boolean;
+      pivotChars?: number;
+      strength?: number;
+      minFactor?: number;
+    };
   };
   memoryDecay?: {
     enabled?: boolean;
@@ -119,6 +144,71 @@ function scoreText(query: string, text: string): number {
     if (t.includes(token)) {
       score += 1;
     }
+  }
+  return score;
+}
+
+function tokenize(text: string): string[] {
+  return text
+    .toLowerCase()
+    .split(/[^a-z0-9\u4e00-\u9fa5]+/i)
+    .map(token => token.trim())
+    .filter(Boolean);
+}
+
+function buildBm25Stats(
+  docs: ReadDocument[],
+  queryTerms: string[],
+  getTokens?: (doc: ReadDocument) => string[],
+): {
+  avgDocLen: number;
+  docFreq: Map<string, number>;
+} {
+  const docFreq = new Map<string, number>();
+  let totalLen = 0;
+  for (const doc of docs) {
+    const tokens = typeof getTokens === "function" ? getTokens(doc) : tokenize(doc.text);
+    totalLen += tokens.length;
+    if (queryTerms.length === 0) {
+      continue;
+    }
+    const termSet = new Set(tokens);
+    for (const term of queryTerms) {
+      if (termSet.has(term)) {
+        docFreq.set(term, (docFreq.get(term) || 0) + 1);
+      }
+    }
+  }
+  const avgDocLen = docs.length > 0 ? Math.max(1, totalLen / docs.length) : 1;
+  return { avgDocLen, docFreq };
+}
+
+function bm25Score(args: {
+  queryTerms: string[];
+  docText: string;
+  docTokens?: string[];
+  docCount: number;
+  avgDocLen: number;
+  docFreq: Map<string, number>;
+}): number {
+  const tokens = Array.isArray(args.docTokens) ? args.docTokens : tokenize(args.docText);
+  if (tokens.length === 0 || args.queryTerms.length === 0 || args.docCount <= 0) {
+    return 0;
+  }
+  const termFreq = new Map<string, number>();
+  for (const token of tokens) {
+    termFreq.set(token, (termFreq.get(token) || 0) + 1);
+  }
+  const k1 = 1.2;
+  const b = 0.75;
+  let score = 0;
+  for (const term of args.queryTerms) {
+    const tf = termFreq.get(term) || 0;
+    if (tf <= 0) continue;
+    const df = args.docFreq.get(term) || 0;
+    const idf = Math.log(1 + ((args.docCount - df + 0.5) / (df + 0.5)));
+    const denominator = tf + k1 * (1 - b + b * (tokens.length / Math.max(1, args.avgDocLen)));
+    score += idf * (((k1 + 1) * tf) / Math.max(1e-6, denominator));
   }
   return score;
 }
@@ -193,9 +283,20 @@ function parseJsonlFile(filePath: string, sourceLabel: string, logger: LoggerLik
         text,
         source: sourceLabel,
         timestamp: Number.isFinite(timestampValue) ? timestampValue : undefined,
+        layer: parsed.layer === "active" || parsed.layer === "archive"
+          ? parsed.layer
+          : (sourceLabel === "sessions_active" ? "active" : (sourceLabel === "sessions_archive" ? "archive" : undefined)),
+        sourceMemoryId: typeof parsed.source_memory_id === "string"
+          ? parsed.source_memory_id
+          : id,
+        sourceMemoryCanonicalId: typeof parsed.source_memory_canonical_id === "string"
+          ? parsed.source_memory_canonical_id
+          : (typeof parsed.canonical_id === "string" ? parsed.canonical_id : undefined),
         embedding: Array.isArray(parsed.embedding) ? parsed.embedding.filter(item => Number.isFinite(item as number)) as number[] : undefined,
         eventType: typeof parsed.event_type === "string" ? parsed.event_type.trim() : undefined,
         qualityScore: typeof parsed.quality_score === "number" ? parsed.quality_score : undefined,
+        charCount: typeof parsed.char_count === "number" ? parsed.char_count : undefined,
+        tokenCount: typeof parsed.token_count === "number" ? parsed.token_count : undefined,
         sessionId: typeof parsed.session_id === "string" ? parsed.session_id : undefined,
         entities,
         relations,
@@ -331,6 +432,7 @@ interface RankedCandidate {
   doc: ReadDocument;
   source: "rules" | "archive" | "vector" | "graph";
   lexical: number;
+  bm25: number;
   semantic: number;
   recency: number;
   quality: number;
@@ -364,6 +466,12 @@ interface HitStatItem {
 interface HitStatState {
   items: Record<string, HitStatItem>;
 }
+
+const READ_FUSION_PROMPT_VERSION = "read-fusion.v1.1.0";
+const READ_FUSION_REGRESSION_SAMPLES = [
+  "样例A: 同一 source_memory_id 同时出现在 archive 与 vector，输出中只保留一条主事实并在证据链保留两者关联。",
+  "样例B: 新旧决策冲突时，将冲突写入 conflicts，并在 canonical_answer 标注优先级依据（时间、质量、明确性）。",
+];
 
 function cosineSimilarity(left: number[], right: number[]): number {
   if (left.length === 0 || right.length === 0) {
@@ -537,6 +645,67 @@ function sourceWeight(source: RankedCandidate["source"], intent: QueryIntent): n
   return 1;
 }
 
+function mergeKeyFromDoc(doc: ReadDocument): string {
+  const canonical = typeof doc.sourceMemoryCanonicalId === "string" ? doc.sourceMemoryCanonicalId.trim() : "";
+  if (canonical) {
+    return `canonical:${canonical}`;
+  }
+  const sourceMemoryId = typeof doc.sourceMemoryId === "string" ? doc.sourceMemoryId.trim() : "";
+  if (sourceMemoryId) {
+    return `source:${sourceMemoryId}`;
+  }
+  return `id:${doc.id}`;
+}
+
+function customChannelWeight(source: RankedCandidate["source"], options?: ReadStoreOptions["fusion"]): number {
+  const weights = options?.channelWeights;
+  if (!weights) return 1;
+  const value = weights[source];
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
+    return 1;
+  }
+  return value;
+}
+
+function lengthNormalizeFactor(doc: ReadDocument, options?: ReadStoreOptions["fusion"]): number {
+  const lengthNorm = options?.lengthNorm;
+  if (lengthNorm?.enabled === false) {
+    return 1;
+  }
+  const pivotChars = typeof lengthNorm?.pivotChars === "number" && lengthNorm.pivotChars > 0
+    ? lengthNorm.pivotChars
+    : 1200;
+  const strength = typeof lengthNorm?.strength === "number" && lengthNorm.strength > 0
+    ? lengthNorm.strength
+    : 0.75;
+  const minFactor = typeof lengthNorm?.minFactor === "number" && lengthNorm.minFactor > 0 && lengthNorm.minFactor <= 1
+    ? lengthNorm.minFactor
+    : 0.45;
+  const charCount = typeof doc.charCount === "number" && Number.isFinite(doc.charCount)
+    ? doc.charCount
+    : doc.text.length;
+  if (charCount <= pivotChars) {
+    return 1;
+  }
+  const over = (charCount - pivotChars) / pivotChars;
+  const factor = 1 / (1 + over * strength);
+  return Math.max(minFactor, Math.min(1, factor));
+}
+
+function channelQuota(
+  source: RankedCandidate["source"],
+  topK: number,
+  options?: ReadStoreOptions["fusion"],
+): number {
+  const configured = options?.channelTopK?.[source];
+  if (typeof configured === "number" && Number.isFinite(configured) && configured >= 1) {
+    return Math.floor(configured);
+  }
+  if (source === "rules") return Math.max(6, topK * 2);
+  if (source === "graph") return Math.max(8, topK * 3);
+  return Math.max(12, topK * 4);
+}
+
 async function searchLanceDb(args: {
   memoryRoot: string;
   queryEmbedding: number[];
@@ -592,9 +761,14 @@ async function searchLanceDb(args: {
         text: summary,
         source: "vector_lancedb",
         timestamp: Number.isFinite(ts) ? ts : undefined,
+        layer: record.layer === "active" || record.layer === "archive" ? record.layer : undefined,
+        sourceMemoryId: typeof record.source_memory_id === "string" ? record.source_memory_id : undefined,
+        sourceMemoryCanonicalId: typeof record.source_memory_canonical_id === "string" ? record.source_memory_canonical_id : undefined,
         embedding: Array.isArray(record.vector) ? (record.vector as number[]).filter(item => Number.isFinite(item)) : undefined,
         eventType: typeof record.event_type === "string" ? record.event_type : undefined,
         qualityScore: typeof record.quality_score === "number" ? record.quality_score : undefined,
+        charCount: typeof record.char_count === "number" ? record.char_count : undefined,
+        tokenCount: typeof record.token_count === "number" ? record.token_count : undefined,
         sessionId: typeof record.session_id === "string" ? record.session_id : undefined,
         entities,
         relations: Array.isArray(relations) ? relations : [],
@@ -643,9 +817,14 @@ function parseVectorFallback(filePath: string, logger: LoggerLike): ReadDocument
         text: summary,
         source: "vector_jsonl",
         timestamp: Number.isFinite(ts) ? ts : undefined,
+        layer: parsed.layer === "active" || parsed.layer === "archive" ? parsed.layer : undefined,
+        sourceMemoryId: typeof parsed.source_memory_id === "string" ? parsed.source_memory_id : undefined,
+        sourceMemoryCanonicalId: typeof parsed.source_memory_canonical_id === "string" ? parsed.source_memory_canonical_id : undefined,
         embedding: Array.isArray(parsed.embedding) ? parsed.embedding.filter(item => Number.isFinite(item as number)) as number[] : undefined,
         eventType: typeof parsed.event_type === "string" ? parsed.event_type.trim() : undefined,
         qualityScore: typeof parsed.quality_score === "number" ? parsed.quality_score : undefined,
+        charCount: typeof parsed.char_count === "number" ? parsed.char_count : undefined,
+        tokenCount: typeof parsed.token_count === "number" ? parsed.token_count : undefined,
         sessionId: typeof parsed.session_id === "string" ? parsed.session_id : undefined,
         entities,
         relations,
@@ -683,6 +862,7 @@ async function requestFusion(args: {
     .join("\n")
     .slice(0, 18000);
   const prompt = [
+    `prompt_version=${READ_FUSION_PROMPT_VERSION}`,
     "你是记忆检索融合器。请融合多路召回结果，产出可直接给 Agent 使用的完整记忆包，不要让 Agent 再去翻历史。",
     "必须严格返回 JSON：",
     "{\"canonical_answer\": string, \"coverage_note\": string, \"facts\": [{\"text\": string, \"evidence_ids\": string[]}], \"timeline\": [{\"when\": string, \"event\": string, \"evidence_ids\": string[]}], \"entities\": [{\"name\": string, \"role\": string}], \"decisions\": [{\"decision\": string, \"rationale\": string, \"evidence_ids\": string[]}], \"fixes\": [{\"issue\": string, \"fix\": string, \"evidence_ids\": string[]}], \"preferences\": [{\"subject\": string, \"preference\": string, \"evidence_ids\": string[]}], \"risks\": [{\"risk\": string, \"mitigation\": string, \"evidence_ids\": string[]}], \"action_items\": [{\"item\": string, \"owner\": string, \"status\": string, \"evidence_ids\": string[]}], \"conflicts\": [{\"topic\": string, \"details\": string}], \"evidence_ids\": string[], \"confidence\": number}",
@@ -693,6 +873,8 @@ async function requestFusion(args: {
     "4) 若存在冲突写入 conflicts，否则返回空数组",
     "5) confidence 0~1",
     "6) 不确定信息必须在 coverage_note 标注",
+    "7) 同源记录合并：同 source_memory_id/source_memory_canonical_id 的候选只保留一条主结论，其余作为证据补充",
+    ...READ_FUSION_REGRESSION_SAMPLES,
   ].join("\n");
   const body = {
     model: args.llm.model,
@@ -766,6 +948,22 @@ export function createReadStore(options: ReadStoreOptions): ReadStore {
   const memoryRoot = options.dbPath ? path.resolve(options.dbPath) : path.join(options.projectRoot, "data", "memory");
   const vectorFallbackPath = path.join(memoryRoot, "vector", "lancedb_events.jsonl");
   const hitStatsPath = path.join(memoryRoot, ".read_hit_stats.json");
+  let docsCache: { signature: string; docs: ReadDocument[] } | null = null;
+  let vectorFallbackCache: { signature: string; docs: ReadDocument[] } | null = null;
+  let bm25TokenCacheSignature = "";
+  let bm25TokenCache = new Map<string, string[]>();
+
+  function fileSignature(filePath: string): string {
+    try {
+      if (!fs.existsSync(filePath)) {
+        return `${filePath}:missing`;
+      }
+      const stat = fs.statSync(filePath);
+      return `${filePath}:${stat.size}:${Math.floor(stat.mtimeMs)}`;
+    } catch {
+      return `${filePath}:error`;
+    }
+  }
 
   function loadHitStats(): HitStatState {
     try {
@@ -829,13 +1027,48 @@ export function createReadStore(options: ReadStoreOptions): ReadStore {
     const memoryMdPath = path.join(memoryRoot, "MEMORY.md");
     const activeSessionsPath = path.join(memoryRoot, "sessions", "active", "sessions.jsonl");
     const archiveSessionsPath = path.join(memoryRoot, "sessions", "archive", "sessions.jsonl");
-
-    return [
+    const signature = [
+      fileSignature(cortexRulesPath),
+      fileSignature(memoryMdPath),
+      fileSignature(activeSessionsPath),
+      fileSignature(archiveSessionsPath),
+    ].join("|");
+    if (docsCache && docsCache.signature === signature) {
+      return docsCache.docs;
+    }
+    const docs = [
       ...parseMarkdownFile(cortexRulesPath, "CORTEX_RULES.md"),
       ...parseMarkdownFile(memoryMdPath, "MEMORY.md"),
       ...parseJsonlFile(activeSessionsPath, "sessions_active", options.logger),
       ...parseJsonlFile(archiveSessionsPath, "sessions_archive", options.logger),
     ];
+    docsCache = { signature, docs };
+    return docs;
+  }
+
+  function loadVectorFallbackCached(): ReadDocument[] {
+    const signature = fileSignature(vectorFallbackPath);
+    if (vectorFallbackCache && vectorFallbackCache.signature === signature) {
+      return vectorFallbackCache.docs;
+    }
+    const docs = parseVectorFallback(vectorFallbackPath, options.logger);
+    vectorFallbackCache = { signature, docs };
+    return docs;
+  }
+
+  function getBm25Tokens(doc: ReadDocument, signature: string): string[] {
+    if (bm25TokenCacheSignature !== signature) {
+      bm25TokenCacheSignature = signature;
+      bm25TokenCache = new Map<string, string[]>();
+    }
+    const key = `${doc.source}|${doc.id}|${doc.text.length}|${doc.text.slice(0, 64)}`;
+    const cached = bm25TokenCache.get(key);
+    if (cached) {
+      return cached;
+    }
+    const tokens = tokenize(doc.text);
+    bm25TokenCache.set(key, tokens);
+    return tokens;
   }
 
   async function searchMemory(args: ReadStoreSearchArgs): Promise<{ results: unknown[] }> {
@@ -869,7 +1102,7 @@ export function createReadStore(options: ReadStoreOptions): ReadStore {
       : [];
     const vectorDocsFallback = vectorDocsFromLance.length > 0
       ? []
-      : parseVectorFallback(vectorFallbackPath, options.logger);
+      : loadVectorFallbackCached();
     const vectorDocs = [...vectorDocsFromLance, ...vectorDocsFallback];
 
     const graphDocs = docs
@@ -887,6 +1120,14 @@ export function createReadStore(options: ReadStoreOptions): ReadStore {
 
     const rulesDocs = docs.filter(doc => doc.source === "CORTEX_RULES.md");
     const archiveDocs = docs.filter(doc => doc.source.startsWith("sessions_"));
+    const bm25Terms = tokenize(query);
+    const bm25Corpus = [...rulesDocs, ...archiveDocs, ...vectorDocs, ...graphDocs];
+    const bm25Signature = `${docsCache?.signature || "na"}|vector:${vectorDocs.length}:${vectorDocs.slice(0, 40).map(item => `${item.id}:${item.text.length}`).join(",")}`;
+    const bm25Stats = buildBm25Stats(
+      bm25Corpus,
+      bm25Terms,
+      doc => getBm25Tokens(doc, bm25Signature),
+    );
 
     const combinedCandidates: RankedCandidate[] = [];
     const channels: Record<RankedCandidate["source"], RankedCandidate[]> = {
@@ -898,10 +1139,19 @@ export function createReadStore(options: ReadStoreOptions): ReadStore {
 
     const evaluateDoc = (doc: ReadDocument, source: RankedCandidate["source"]): RankedCandidate | null => {
       const lexical = scoreText(query, doc.text);
+      const bm25 = bm25Score({
+        queryTerms: bm25Terms,
+        docText: doc.text,
+        docTokens: getBm25Tokens(doc, bm25Signature),
+        docCount: bm25Corpus.length,
+        avgDocLen: bm25Stats.avgDocLen,
+        docFreq: bm25Stats.docFreq,
+      });
+      const lexicalCombined = lexical + bm25 * 2;
       const semantic = queryEmbedding && Array.isArray(doc.embedding) && doc.embedding.length > 0
         ? Math.max(0, cosineSimilarity(queryEmbedding, doc.embedding) * 5)
         : 0;
-      if (lexical <= 0 && semantic <= 0) {
+      if (lexicalCombined <= 0 && semantic <= 0) {
         return null;
       }
       const recency = recencyScore(doc.timestamp);
@@ -910,20 +1160,24 @@ export function createReadStore(options: ReadStoreOptions): ReadStore {
         ? (preferredTypes.includes(doc.eventType) ? 1 : 0)
         : 0.5;
       const graphMatch = source === "graph" ? 1 : 0;
+      const sourceBaseWeight = sourceWeight(source, intent);
+      const sourceConfigWeight = customChannelWeight(source, options.fusion);
+      const lengthNorm = lengthNormalizeFactor(doc, options.fusion);
       const baseWeighted = (
-        0.2 * lexical +
-        0.3 * semantic +
+        0.2 * lexicalCombined +
+        0.3 * (semantic * lengthNorm) +
         0.1 * recency +
         0.15 * quality +
         0.15 * typeMatch +
         0.1 * graphMatch
-      ) * sourceWeight(source, intent);
+      ) * sourceBaseWeight * sourceConfigWeight;
       const decayFactor = computeDecayFactor(doc.id, doc.eventType, doc.timestamp, options.memoryDecay, hitStats);
       const weighted = baseWeighted * decayFactor;
       return {
         doc,
         source,
-        lexical,
+        lexical: lexicalCombined,
+        bm25,
         semantic,
         recency,
         quality,
@@ -953,7 +1207,7 @@ export function createReadStore(options: ReadStoreOptions): ReadStore {
 
     for (const key of Object.keys(channels) as Array<keyof typeof channels>) {
       channels[key].sort((a, b) => b.weighted - a.weighted);
-      combinedCandidates.push(...channels[key].slice(0, Math.max(20, args.topK * 5)));
+      combinedCandidates.push(...channels[key].slice(0, channelQuota(key, args.topK, options.fusion)));
     }
 
     const rrfMap = new Map<string, number>();
@@ -964,23 +1218,40 @@ export function createReadStore(options: ReadStoreOptions): ReadStore {
       for (let i = 0; i < list.length; i += 1) {
         const candidate = list[i];
         const rrf = 1 / (rrfK + i + 1);
-        rrfMap.set(candidate.doc.id, (rrfMap.get(candidate.doc.id) || 0) + rrf);
-        const current = weightedMap.get(candidate.doc.id);
+        const mergeKey = mergeKeyFromDoc(candidate.doc);
+        rrfMap.set(mergeKey, (rrfMap.get(mergeKey) || 0) + rrf);
+        const current = weightedMap.get(mergeKey);
         if (!current || candidate.weighted > current.weighted) {
-          weightedMap.set(candidate.doc.id, candidate);
+          weightedMap.set(mergeKey, candidate);
         }
       }
     }
 
-    const preRanked = [...weightedMap.values()]
-      .map(candidate => ({
+    const preRanked = [...weightedMap.entries()]
+      .map(([mergeKey, candidate]) => ({
         id: candidate.doc.id,
+        merge_key: mergeKey,
+        source_memory_id: candidate.doc.sourceMemoryId || "",
+        source_memory_canonical_id: candidate.doc.sourceMemoryCanonicalId || "",
         text: candidate.doc.text,
         source: candidate.doc.source,
+        layer: candidate.doc.layer || "",
         event_type: candidate.doc.eventType || "",
         quality_score: candidate.quality,
         timestamp: candidate.doc.timestamp ? new Date(candidate.doc.timestamp).toISOString() : "",
-        score: candidate.weighted + (rrfMap.get(candidate.doc.id) || 0) * 1.5,
+        score: candidate.weighted + (rrfMap.get(mergeKey) || 0) * 1.5,
+        score_breakdown: {
+          lexical: Number(candidate.lexical.toFixed(4)),
+          bm25: Number(candidate.bm25.toFixed(4)),
+          semantic: Number(candidate.semantic.toFixed(4)),
+          recency: Number(candidate.recency.toFixed(4)),
+          quality: Number(candidate.quality.toFixed(4)),
+          type: Number(candidate.typeMatch.toFixed(4)),
+          graph: Number(candidate.graphMatch.toFixed(4)),
+          decay: Number(candidate.decayFactor.toFixed(4)),
+          rrf: Number(((rrfMap.get(mergeKey) || 0) * 1.5).toFixed(4)),
+          weighted: Number(candidate.weighted.toFixed(4)),
+        },
         reason_tags: [
           `intent:${intent.toLowerCase()}`,
           candidate.semantic > 0 ? "vector_hit" : "lexical_hit",
@@ -989,6 +1260,7 @@ export function createReadStore(options: ReadStoreOptions): ReadStore {
           candidate.quality >= 0.7 ? "high_quality" : "normal_quality",
           candidate.decayFactor < 1 ? `decay:${candidate.decayFactor.toFixed(3)}` : "decay:1.000",
           `source:${candidate.source}`,
+          `merge_key:${mergeKey}`,
         ],
       }))
       .sort((a, b) => b.score - a.score)
@@ -1002,13 +1274,20 @@ export function createReadStore(options: ReadStoreOptions): ReadStore {
     const rerankerModel = options.reranker?.model || "";
     const rerankerApiKey = options.reranker?.apiKey || "";
     const rerankerBaseUrl = normalizeBaseUrl(options.reranker?.baseURL || options.reranker?.baseUrl);
-    let rerankedSimple: Array<{ id: string; text: string; source: string; score: number }> = lexicalRanked.map(item => ({
+    const fusionEnabled = options.fusion?.enabled !== false;
+    const llmModel = options.llm?.model || "";
+    const llmApiKey = options.llm?.apiKey || "";
+    const llmBaseUrl = normalizeBaseUrl(options.llm?.baseURL || options.llm?.baseUrl);
+    const fusionAuthoritative = options.fusion?.authoritative !== false;
+    const skipRerankerForFusion = fusionEnabled && fusionAuthoritative && llmModel && llmApiKey && llmBaseUrl;
+    let rerankedSimple: Array<{ id: string; merge_key?: string; text: string; source: string; score: number }> = lexicalRanked.map(item => ({
       id: item.id,
+      merge_key: item.merge_key,
       text: item.text,
       source: item.source,
       score: item.score,
     }));
-    if (rerankerModel && rerankerApiKey && rerankerBaseUrl && lexicalRanked.length > 1) {
+    if (rerankerModel && rerankerApiKey && rerankerBaseUrl && lexicalRanked.length > 1 && !skipRerankerForFusion) {
       try {
         rerankedSimple = await requestRerank({
           query,
@@ -1016,6 +1295,10 @@ export function createReadStore(options: ReadStoreOptions): ReadStore {
           model: rerankerModel,
           apiKey: rerankerApiKey,
           baseUrl: rerankerBaseUrl,
+        });
+        rerankedSimple = rerankedSimple.map(item => {
+          const found = lexicalRanked.find(entry => entry.id === item.id);
+          return { ...item, merge_key: found?.merge_key || item.id };
         });
       } catch (error) {
         options.logger.warn(`Reranker failed, keep hybrid ranking: ${error}`);
@@ -1025,19 +1308,98 @@ export function createReadStore(options: ReadStoreOptions): ReadStore {
       const hit = lexicalRanked.find(entry => entry.id === item.id);
       return {
       id: item.id,
+      merge_key: hit?.merge_key || item.merge_key || item.id,
+      source_memory_id: hit?.source_memory_id || "",
+      source_memory_canonical_id: hit?.source_memory_canonical_id || "",
       text: item.text,
       source: item.source,
+      layer: hit?.layer || "",
       event_type: hit?.event_type || "",
       quality_score: hit?.quality_score ?? 0,
       timestamp: hit?.timestamp || "",
       score: Number(item.score.toFixed(4)),
+      score_breakdown: hit?.score_breakdown || {},
       reason_tags: Array.isArray(hit?.reason_tags) ? hit?.reason_tags : [],
+      explain: {
+        merge_key: hit?.merge_key || item.merge_key || item.id,
+        source_memory_id: hit?.source_memory_id || "",
+        source_memory_canonical_id: hit?.source_memory_canonical_id || "",
+        channel: item.source,
+        layer: hit?.layer || "",
+        score_breakdown: hit?.score_breakdown || {},
+        reason_tags: Array.isArray(hit?.reason_tags) ? hit?.reason_tags : [],
+      },
     };
     });
-    const fusionEnabled = options.fusion?.enabled !== false;
-    const llmModel = options.llm?.model || "";
-    const llmApiKey = options.llm?.apiKey || "";
-    const llmBaseUrl = normalizeBaseUrl(options.llm?.baseURL || options.llm?.baseUrl);
+    const minLexicalHits = Math.max(0, Math.floor(options.fusion?.minLexicalHits ?? 1));
+    const minSemanticHits = Math.max(0, Math.floor(options.fusion?.minSemanticHits ?? 1));
+    const fallbackPool = lexicalRanked.filter(item => !ranked.some(existing => existing.id === item.id));
+    const lexicalCount = ranked.filter(item => item.reason_tags.includes("lexical_hit")).length;
+    const semanticCount = ranked.filter(item => item.reason_tags.includes("vector_hit")).length;
+    if (semanticCount < minSemanticHits) {
+      const needed = minSemanticHits - semanticCount;
+      const supplement = fallbackPool.filter(item => item.reason_tags.includes("vector_hit")).slice(0, needed);
+      for (const item of supplement) {
+        ranked.push({
+          id: item.id,
+          merge_key: item.merge_key,
+          source_memory_id: item.source_memory_id,
+          source_memory_canonical_id: item.source_memory_canonical_id,
+          text: item.text,
+          source: item.source,
+          layer: item.layer,
+          event_type: item.event_type,
+          quality_score: item.quality_score,
+          timestamp: item.timestamp,
+          score: Number(item.score.toFixed(4)),
+          score_breakdown: item.score_breakdown || {},
+          reason_tags: Array.isArray(item.reason_tags) ? item.reason_tags : [],
+          explain: {
+            merge_key: item.merge_key,
+            source_memory_id: item.source_memory_id,
+            source_memory_canonical_id: item.source_memory_canonical_id,
+            channel: item.source,
+            layer: item.layer,
+            score_breakdown: item.score_breakdown || {},
+            reason_tags: Array.isArray(item.reason_tags) ? item.reason_tags : [],
+          },
+        });
+      }
+    }
+    if (lexicalCount < minLexicalHits) {
+      const needed = minLexicalHits - lexicalCount;
+      const supplement = fallbackPool.filter(item => item.reason_tags.includes("lexical_hit")).slice(0, needed);
+      for (const item of supplement) {
+        if (ranked.some(existing => existing.id === item.id)) {
+          continue;
+        }
+        ranked.push({
+          id: item.id,
+          merge_key: item.merge_key,
+          source_memory_id: item.source_memory_id,
+          source_memory_canonical_id: item.source_memory_canonical_id,
+          text: item.text,
+          source: item.source,
+          layer: item.layer,
+          event_type: item.event_type,
+          quality_score: item.quality_score,
+          timestamp: item.timestamp,
+          score: Number(item.score.toFixed(4)),
+          score_breakdown: item.score_breakdown || {},
+          reason_tags: Array.isArray(item.reason_tags) ? item.reason_tags : [],
+          explain: {
+            merge_key: item.merge_key,
+            source_memory_id: item.source_memory_id,
+            source_memory_canonical_id: item.source_memory_canonical_id,
+            channel: item.source,
+            layer: item.layer,
+            score_breakdown: item.score_breakdown || {},
+            reason_tags: Array.isArray(item.reason_tags) ? item.reason_tags : [],
+          },
+        });
+      }
+    }
+    ranked.sort((a, b) => b.score - a.score);
     if (fusionEnabled && llmModel && llmApiKey && llmBaseUrl && ranked.length > 1) {
       try {
         const maxCandidates = Math.max(4, Math.min(20, options.fusion?.maxCandidates ?? 10));
@@ -1069,6 +1431,11 @@ export function createReadStore(options: ReadStoreOptions): ReadStore {
             timestamp: new Date().toISOString(),
             score: Number((Math.max(...ranked.map(item => item.score)) + 1).toFixed(4)),
             reason_tags: ["llm_fused_authoritative", `evidence:${fusion.evidence_ids.length}`],
+            explain: {
+              channel: "llm_fusion",
+              fused_from: ranked.slice(0, maxCandidates).map(item => item.id),
+              reason_tags: ["llm_fused_authoritative", `evidence:${fusion.evidence_ids.length}`],
+            },
             fused_coverage_note: fusion.coverage_note || "",
             fused_facts: fusion.facts,
             fused_timeline: fusion.timeline || [],
@@ -1097,8 +1464,9 @@ export function createReadStore(options: ReadStoreOptions): ReadStore {
         options.logger.warn(`LLM fusion failed, fallback to reranked results: ${error}`);
       }
     }
-    markHit(ranked.map(item => item.id));
-    return { results: ranked };
+    const finalRanked = ranked.slice(0, Math.max(1, args.topK));
+    markHit(finalRanked.map(item => item.id));
+    return { results: finalRanked };
   }
 
   async function getHotContext(args: ReadStoreHotArgs): Promise<{ context: unknown[] }> {

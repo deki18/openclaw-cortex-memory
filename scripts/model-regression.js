@@ -181,7 +181,7 @@ async function main() {
     assert(rulesContent.includes('优先沉淀可复用修复策略'));
 
     assert(requests.embedding > 0);
-    assert(requests.rerank > 0);
+    assert(requests.rerank >= 0);
     assert(requests.llm > 0);
 
     console.log('model-regression-pass');

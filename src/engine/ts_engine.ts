@@ -5,6 +5,7 @@ import type { MemoryEngine } from "./memory_engine";
 import type { ReadStore } from "../store/read_store";
 import type { WriteMemoryResult } from "../store/write_store";
 import type {
+  BackfillEmbeddingsArgs,
   CleanupMemoriesArgs,
   DeleteMemoryArgs,
   GetAutoContextArgs,
@@ -17,10 +18,40 @@ import type {
   UpdateMemoryArgs,
 } from "./types";
 
+const PROMPT_VERSIONS = {
+  write_gate: "write-gate.v1.1.0",
+  session_end_write: "session-end-write.v1.1.0",
+  read_fusion: "read-fusion.v1.1.0",
+};
+
 interface TsEngineDeps {
   readStore: ReadStore;
   writeStore: {
     writeMemory(args: { text: string; role: string; source: string; sessionId: string }): Promise<WriteMemoryResult>;
+  };
+  vectorStore: {
+    upsert(record: {
+      id: string;
+      session_id: string;
+      event_type: string;
+      summary: string;
+      timestamp: string;
+      layer: "active" | "archive";
+      source_memory_id: string;
+      source_memory_canonical_id?: string;
+      outcome?: string;
+      entities?: string[];
+      relations?: Array<{ source: string; target: string; type: string }>;
+      embedding: number[];
+      quality_score: number;
+      char_count: number;
+      token_count: number;
+      chunk_index?: number;
+      chunk_total?: number;
+      chunk_start?: number;
+      chunk_end?: number;
+    }): Promise<void>;
+    deleteBySourceMemory(args: { layer: "active" | "archive"; sourceMemoryId: string }): Promise<void>;
   };
   archiveStore: {
     storeEvents(events: Array<{
@@ -53,6 +84,34 @@ interface TsEngineDeps {
   };
   memoryRoot: string;
   projectRoot: string;
+  embedding?: {
+    provider: string;
+    model: string;
+    apiKey?: string;
+    baseURL?: string;
+    baseUrl?: string;
+    dimensions?: number;
+    timeoutMs?: number;
+    maxRetries?: number;
+  };
+  llm?: {
+    provider?: string;
+    model: string;
+    apiKey?: string;
+    baseURL?: string;
+    baseUrl?: string;
+  };
+  reranker?: {
+    provider?: string;
+    model: string;
+    apiKey?: string;
+    baseURL?: string;
+    baseUrl?: string;
+  };
+  vectorChunking?: {
+    chunkSize?: number;
+    chunkOverlap?: number;
+  };
   getCachedAutoSearch: (sessionId: string) => { query: string; results: unknown[]; ageSeconds: number } | null;
   resolveSessionId: (context: ToolContext, payload?: unknown) => string;
   normalizeIncomingMessage: (payload: unknown) => { text: string; role: string; source: string } | null;
@@ -129,6 +188,311 @@ export function createTsEngine(deps: TsEngineDeps): MemoryEngine {
       activePath: path.join(deps.memoryRoot, "sessions", "active", "sessions.jsonl"),
       archivePath: path.join(deps.memoryRoot, "sessions", "archive", "sessions.jsonl"),
     };
+  }
+
+  function parseJsonFile(filePath: string): Record<string, unknown> | null {
+    try {
+      if (!fs.existsSync(filePath)) {
+        return null;
+      }
+      const raw = fs.readFileSync(filePath, "utf-8").trim();
+      if (!raw) {
+        return null;
+      }
+      return JSON.parse(raw) as Record<string, unknown>;
+    } catch {
+      return null;
+    }
+  }
+
+  function embeddingStats(records: Array<Record<string, unknown>>): {
+    total: number;
+    ok: number;
+    failed: number;
+    pending: number;
+    coverage: number;
+  } {
+    let ok = 0;
+    let failed = 0;
+    let pending = 0;
+    for (const record of records) {
+      const explicit = typeof record.embedding_status === "string" ? record.embedding_status.trim() : "";
+      const hasEmbedding = Array.isArray(record.embedding) && record.embedding.length > 0;
+      if (explicit === "ok" || hasEmbedding) {
+        ok += 1;
+      } else if (explicit === "failed") {
+        failed += 1;
+      } else {
+        pending += 1;
+      }
+    }
+    const total = records.length;
+    const coverage = total > 0 ? Number((ok / total).toFixed(4)) : 0;
+    return { total, ok, failed, pending, coverage };
+  }
+
+  function normalizeBaseUrl(value?: string): string {
+    if (!value) return "";
+    return value.endsWith("/") ? value.slice(0, -1) : value;
+  }
+
+  function estimateTokenCount(text: string): number {
+    const parts = text
+      .split(/[\s,.;:!?，。；：！？、()（）[\]{}"'`~]+/)
+      .map(part => part.trim())
+      .filter(Boolean);
+    return parts.length;
+  }
+
+  function buildVectorSourceText(record: Record<string, unknown>, layer: "active" | "archive"): string {
+    if (layer === "active") {
+      const content = typeof record.content === "string" && record.content.trim()
+        ? record.content.trim()
+        : (typeof record.text === "string" ? record.text.trim() : "");
+      return content;
+    }
+    const summary = typeof record.summary === "string" ? record.summary.trim() : "";
+    const eventType = typeof record.event_type === "string" ? record.event_type.trim() : "insight";
+    const outcome = typeof record.outcome === "string" ? record.outcome.trim() : "";
+    const sourceFile = typeof record.source_file === "string" ? record.source_file.trim() : "";
+    const actor = typeof record.actor === "string" ? record.actor.trim() : "";
+    const entities = Array.isArray(record.entities)
+      ? record.entities.filter(v => typeof v === "string").map(v => String(v).trim()).filter(Boolean)
+      : [];
+    const relations = Array.isArray(record.relations)
+      ? record.relations
+          .map(v => {
+            if (!v || typeof v !== "object") return "";
+            const relation = v as Record<string, unknown>;
+            const source = typeof relation.source === "string" ? relation.source.trim() : "";
+            const target = typeof relation.target === "string" ? relation.target.trim() : "";
+            const type = typeof relation.type === "string" ? relation.type.trim() : "related_to";
+            if (!source || !target) return "";
+            return `${source} -[${type}]-> ${target}`;
+          })
+          .filter(Boolean)
+      : [];
+    const lines = [
+      `event_type: ${eventType}`,
+      `summary: ${summary}`,
+      `outcome: ${outcome}`,
+      `entities: ${entities.join(", ")}`,
+      `source_file: ${sourceFile}`,
+      `actor: ${actor}`,
+      relations.length > 0 ? `relations: ${relations.join(" ; ")}` : "",
+    ].filter(Boolean);
+    return lines.join("\n").trim();
+  }
+
+  function splitTextChunks(text: string, chunkSize: number, chunkOverlap: number): Array<{
+    index: number;
+    start: number;
+    end: number;
+    text: string;
+  }> {
+    const normalizedSize = Number.isFinite(chunkSize) && chunkSize >= 200 ? Math.floor(chunkSize) : 600;
+    const normalizedOverlap = Number.isFinite(chunkOverlap) && chunkOverlap >= 0
+      ? Math.floor(chunkOverlap)
+      : 100;
+    const overlap = Math.min(normalizedOverlap, Math.max(0, normalizedSize - 50));
+    const output: Array<{ index: number; start: number; end: number; text: string }> = [];
+    let cursor = 0;
+    let index = 0;
+    const punctuationSet = new Set(["。", "！", "？", ".", "!", "?", "\n", "；", ";"]);
+    while (cursor < text.length) {
+      const rawEnd = Math.min(text.length, cursor + normalizedSize);
+      let end = rawEnd;
+      if (rawEnd < text.length) {
+        const backwardStart = Math.max(cursor + Math.floor(normalizedSize * 0.45), cursor + 1);
+        let found = -1;
+        for (let i = rawEnd - 1; i >= backwardStart; i -= 1) {
+          if (punctuationSet.has(text[i])) {
+            found = i + 1;
+            break;
+          }
+        }
+        if (found < 0) {
+          const forwardEnd = Math.min(text.length, rawEnd + Math.floor(normalizedSize * 0.2));
+          for (let i = rawEnd; i < forwardEnd; i += 1) {
+            if (punctuationSet.has(text[i])) {
+              found = i + 1;
+              break;
+            }
+          }
+        }
+        if (found > cursor) {
+          end = found;
+        }
+      }
+      if (end <= cursor) {
+        end = Math.min(text.length, cursor + normalizedSize);
+      }
+      const chunkText = text.slice(cursor, end).trim();
+      if (chunkText) {
+        output.push({ index, start: cursor, end, text: chunkText });
+        index += 1;
+      }
+      if (end >= text.length) {
+        break;
+      }
+      const nextCursor = Math.max(cursor + 1, end - overlap);
+      cursor = nextCursor <= cursor ? end : nextCursor;
+    }
+    return output;
+  }
+
+  function upsertJsonFile(filePath: string, patch: Record<string, unknown>): void {
+    const current = parseJsonFile(filePath) || {};
+    const next = { ...current, ...patch };
+    const dir = path.dirname(filePath);
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+    fs.writeFileSync(filePath, JSON.stringify(next, null, 2), "utf-8");
+  }
+
+  async function probeModelConnection(args: {
+    kind: "embedding" | "llm" | "reranker";
+    model: string;
+    apiKey: string;
+    baseUrl: string;
+    timeoutMs?: number;
+  }): Promise<{ configured: boolean; connected: boolean; model: string; base_url: string; error: string }> {
+    const timeoutMs = typeof args.timeoutMs === "number" && Number.isFinite(args.timeoutMs) && args.timeoutMs >= 1000
+      ? Math.floor(args.timeoutMs)
+      : 8000;
+    if (!args.model || !args.apiKey || !args.baseUrl) {
+      return {
+        configured: false,
+        connected: false,
+        model: args.model || "",
+        base_url: args.baseUrl || "",
+        error: "not_configured",
+      };
+    }
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      let endpoint = args.baseUrl;
+      let payload: Record<string, unknown> = {};
+      if (args.kind === "embedding") {
+        endpoint = args.baseUrl.endsWith("/embeddings") ? args.baseUrl : `${args.baseUrl}/embeddings`;
+        payload = {
+          model: args.model,
+          input: "diagnostics connectivity probe",
+        };
+      } else if (args.kind === "llm") {
+        endpoint = args.baseUrl.endsWith("/chat/completions") ? args.baseUrl : `${args.baseUrl}/chat/completions`;
+        payload = {
+          model: args.model,
+          messages: [{ role: "user", content: "ping" }],
+          max_tokens: 1,
+          temperature: 0,
+        };
+      } else {
+        endpoint = args.baseUrl.endsWith("/rerank") ? args.baseUrl : `${args.baseUrl}/rerank`;
+        payload = {
+          model: args.model,
+          query: "diagnostics",
+          documents: ["diagnostics connectivity probe"],
+          top_n: 1,
+        };
+      }
+      const response = await fetch(endpoint, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${args.apiKey}`,
+        },
+        body: JSON.stringify(payload),
+        signal: controller.signal,
+      });
+      clearTimeout(timeoutId);
+      if (!response.ok) {
+        return {
+          configured: true,
+          connected: false,
+          model: args.model,
+          base_url: args.baseUrl,
+          error: `http_${response.status}`,
+        };
+      }
+      return {
+        configured: true,
+        connected: true,
+        model: args.model,
+        base_url: args.baseUrl,
+        error: "",
+      };
+    } catch (error) {
+      clearTimeout(timeoutId);
+      return {
+        configured: true,
+        connected: false,
+        model: args.model,
+        base_url: args.baseUrl,
+        error: error instanceof Error ? error.message : String(error),
+      };
+    }
+  }
+
+  async function requestEmbedding(args: {
+    text: string;
+    model: string;
+    apiKey: string;
+    baseUrl: string;
+    dimensions?: number;
+    timeoutMs?: number;
+    maxRetries?: number;
+  }): Promise<number[] | null> {
+    const endpoint = args.baseUrl.endsWith("/embeddings") ? args.baseUrl : `${args.baseUrl}/embeddings`;
+    const body: Record<string, unknown> = {
+      input: args.text,
+      model: args.model,
+    };
+    if (typeof args.dimensions === "number" && Number.isFinite(args.dimensions) && args.dimensions > 0) {
+      body.dimensions = args.dimensions;
+    }
+    const timeoutMs = typeof args.timeoutMs === "number" && Number.isFinite(args.timeoutMs) && args.timeoutMs >= 1000
+      ? Math.floor(args.timeoutMs)
+      : 20000;
+    const maxRetries = typeof args.maxRetries === "number" && Number.isFinite(args.maxRetries) && args.maxRetries >= 1
+      ? Math.min(8, Math.floor(args.maxRetries))
+      : 4;
+    let lastError: unknown = null;
+    for (let attempt = 0; attempt < maxRetries; attempt += 1) {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+      try {
+        const response = await fetch(endpoint, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            authorization: `Bearer ${args.apiKey}`,
+          },
+          body: JSON.stringify(body),
+          signal: controller.signal,
+        });
+        clearTimeout(timeoutId);
+        if (!response.ok) {
+          lastError = new Error(`embedding_http_${response.status}`);
+          continue;
+        }
+        const json = await response.json() as { data?: Array<{ embedding?: number[] }> };
+        const embedding = json?.data?.[0]?.embedding;
+        if (Array.isArray(embedding) && embedding.length > 0) {
+          return embedding.filter(item => Number.isFinite(item));
+        }
+        lastError = new Error("embedding_empty");
+      } catch (error) {
+        clearTimeout(timeoutId);
+        lastError = error;
+      }
+      if (attempt < maxRetries - 1) {
+        await new Promise(resolve => setTimeout(resolve, 300 * Math.pow(2, attempt)));
+      }
+    }
+    throw lastError instanceof Error ? lastError : new Error(String(lastError || "embedding_failed"));
   }
 
   async function storeEvent(args: StoreEventArgs, _context: ToolContext): Promise<ToolResult> {
@@ -472,19 +836,344 @@ export function createTsEngine(deps: TsEngineDeps): MemoryEngine {
     return { success: true, data: { deletedCount } };
   }
 
+  async function backfillEmbeddings(args: BackfillEmbeddingsArgs, _context: ToolContext): Promise<ToolResult> {
+    const layer = args.layer === "active" || args.layer === "archive" || args.layer === "all" ? args.layer : "all";
+    const rebuildMode = args.rebuild_mode === "vector_only" || args.rebuild_mode === "full"
+      ? args.rebuild_mode
+      : "incremental";
+    const batchSize = typeof args.batch_size === "number" && Number.isFinite(args.batch_size) && args.batch_size > 0
+      ? Math.min(500, Math.floor(args.batch_size))
+      : 100;
+    const maxRetries = typeof args.max_retries === "number" && Number.isFinite(args.max_retries) && args.max_retries >= 1
+      ? Math.min(10, Math.floor(args.max_retries))
+      : 3;
+    const retryFailedOnly = args.retry_failed_only === true;
+    const forceRebuild = rebuildMode === "vector_only" || rebuildMode === "full";
+    const model = deps.embedding?.model || "";
+    const apiKey = deps.embedding?.apiKey || "";
+    const baseUrl = normalizeBaseUrl(deps.embedding?.baseURL || deps.embedding?.baseUrl);
+    if (!model || !apiKey || !baseUrl) {
+      return { success: false, error: "Embedding config missing for backfill tool." };
+    }
+
+    const statePath = path.join(deps.memoryRoot, ".vector_backfill_state.json");
+    const syncStatePath = path.join(deps.memoryRoot, ".sync_state.json");
+    const previousState = parseJsonFile(statePath) || {};
+    const failureCountState = (typeof previousState.failureCounts === "object" && previousState.failureCounts !== null)
+      ? previousState.failureCounts as Record<string, unknown>
+      : {};
+    let fullSyncResult: { imported: number; skipped: number; filesProcessed: number } | null = null;
+    if (rebuildMode === "full") {
+      try {
+        fullSyncResult = await deps.sessionSync.syncMemory();
+      } catch (error) {
+        deps.logger.warn(`backfill_full_rebuild_sync_failed error=${error}`);
+      }
+    }
+
+    const { activePath, archivePath } = memoryFiles();
+    const targetFiles: Array<{ layer: "active" | "archive"; filePath: string }> = [];
+    if (layer === "all" || layer === "active") {
+      targetFiles.push({ layer: "active", filePath: activePath });
+    }
+    if (layer === "all" || layer === "archive") {
+      targetFiles.push({ layer: "archive", filePath: archivePath });
+    }
+
+    const queue: Array<{ layer: "active" | "archive"; filePath: string; index: number }> = [];
+    const recordsByFile = new Map<string, Array<Record<string, unknown>>>();
+    for (const target of targetFiles) {
+      const records = readJsonl(target.filePath);
+      recordsByFile.set(target.filePath, records);
+      for (let i = 0; i < records.length; i += 1) {
+        const record = records[i];
+        const id = typeof record.id === "string" ? record.id : "";
+        if (!id) {
+          continue;
+        }
+        const status = typeof record.embedding_status === "string" ? record.embedding_status.trim() : "";
+        const hasEmbedding = Array.isArray(record.embedding) && record.embedding.length > 0;
+        if (forceRebuild) {
+          queue.push({ layer: target.layer, filePath: target.filePath, index: i });
+          continue;
+        }
+        if (retryFailedOnly) {
+          if (status !== "failed") {
+            continue;
+          }
+        } else if (status === "ok" || hasEmbedding) {
+          continue;
+        }
+        const failCountRaw = failureCountState[id];
+        const failCount = typeof failCountRaw === "number" ? failCountRaw : 0;
+        if (failCount >= maxRetries && status === "failed") {
+          continue;
+        }
+        queue.push({ layer: target.layer, filePath: target.filePath, index: i });
+      }
+    }
+
+    const totalCandidates = queue.length;
+    let success = 0;
+    let failed = 0;
+    let skipped = 0;
+    let processed = 0;
+    const failureCounts: Record<string, number> = {};
+    for (const [key, value] of Object.entries(failureCountState)) {
+      if (typeof value === "number" && Number.isFinite(value)) {
+        failureCounts[key] = value;
+      }
+    }
+
+    for (let start = 0; start < queue.length; start += batchSize) {
+      const batch = queue.slice(start, start + batchSize);
+      for (const item of batch) {
+        processed += 1;
+        const records = recordsByFile.get(item.filePath) || [];
+        const record = records[item.index];
+        if (!record) {
+          skipped += 1;
+          continue;
+        }
+        const id = typeof record.id === "string" ? record.id : "";
+        if (!id) {
+          skipped += 1;
+          continue;
+        }
+        const text = buildVectorSourceText(record, item.layer);
+        if (!text) {
+          record.embedding_status = "failed";
+          failed += 1;
+          failureCounts[id] = (failureCounts[id] || 0) + 1;
+          continue;
+        }
+        const chunkSize = deps.vectorChunking?.chunkSize ?? 600;
+        const chunkOverlap = deps.vectorChunking?.chunkOverlap ?? 100;
+        const chunks = splitTextChunks(text, chunkSize, chunkOverlap);
+        if (chunks.length === 0) {
+          record.embedding_status = "failed";
+          failed += 1;
+          failureCounts[id] = (failureCounts[id] || 0) + 1;
+          continue;
+        }
+        try {
+          if (forceRebuild) {
+            record.embedding_status = "pending";
+          }
+          await deps.vectorStore.deleteBySourceMemory({ layer: item.layer, sourceMemoryId: id });
+          let chunkOk = 0;
+          for (const chunk of chunks) {
+            const embedding = await requestEmbedding({
+              text: chunk.text,
+              model,
+              apiKey,
+              baseUrl,
+              dimensions: deps.embedding?.dimensions,
+              timeoutMs: deps.embedding?.timeoutMs,
+              maxRetries: deps.embedding?.maxRetries,
+            });
+            if (!embedding || embedding.length === 0) {
+              continue;
+            }
+            if (!record.embedding) {
+              record.embedding = embedding;
+            }
+            await deps.vectorStore.upsert({
+              id: `${id}_c${chunk.index}`,
+              session_id: typeof record.session_id === "string" ? record.session_id : "unknown",
+              event_type: typeof record.event_type === "string" ? record.event_type : (item.layer === "active" ? "message" : "insight"),
+              summary: chunk.text,
+              timestamp: typeof record.timestamp === "string" ? record.timestamp : new Date().toISOString(),
+              layer: item.layer,
+              source_memory_id: id,
+              source_memory_canonical_id: typeof record.canonical_id === "string" ? record.canonical_id : id,
+              outcome: typeof record.outcome === "string" ? record.outcome : "",
+              entities: Array.isArray(record.entities) ? record.entities.filter(v => typeof v === "string") as string[] : [],
+              relations: Array.isArray(record.relations)
+                ? record.relations
+                    .map(v => {
+                      if (!v || typeof v !== "object") return null;
+                      const relation = v as Record<string, unknown>;
+                      const source = typeof relation.source === "string" ? relation.source : "";
+                      const target = typeof relation.target === "string" ? relation.target : "";
+                      const type = typeof relation.type === "string" ? relation.type : "related_to";
+                      if (!source || !target) return null;
+                      return { source, target, type };
+                    })
+                    .filter((v): v is { source: string; target: string; type: string } => Boolean(v))
+                : [],
+              embedding,
+              quality_score: typeof record.quality_score === "number" ? record.quality_score : 0.5,
+              char_count: chunk.text.length,
+              token_count: estimateTokenCount(chunk.text),
+              chunk_index: chunk.index,
+              chunk_total: chunks.length,
+              chunk_start: chunk.start,
+              chunk_end: chunk.end,
+            });
+            chunkOk += 1;
+          }
+          record.vector_chunks_total = chunks.length;
+          record.vector_chunks_ok = chunkOk;
+          record.embedding_status = chunkOk === chunks.length ? "ok" : "failed";
+          if (!record.layer) {
+            record.layer = item.layer;
+          }
+          if (typeof record.char_count !== "number") {
+            record.char_count = text.length;
+          }
+          if (typeof record.token_count !== "number") {
+            record.token_count = estimateTokenCount(text);
+          }
+          if (chunkOk === chunks.length) {
+            success += 1;
+            failureCounts[id] = 0;
+          } else {
+            failed += 1;
+            failureCounts[id] = (failureCounts[id] || 0) + 1;
+          }
+        } catch (error) {
+          record.embedding_status = "failed";
+          failed += 1;
+          failureCounts[id] = (failureCounts[id] || 0) + 1;
+          deps.logger.warn(`backfill_embedding_failed id=${id} layer=${item.layer} error=${error}`);
+        }
+      }
+      deps.logger.info(`backfill_progress processed=${processed}/${totalCandidates} success=${success} failed=${failed} skipped=${skipped}`);
+    }
+
+    for (const target of targetFiles) {
+      const records = recordsByFile.get(target.filePath);
+      if (records) {
+        writeJsonl(target.filePath, records);
+      }
+    }
+
+    const summary = {
+      runAt: new Date().toISOString(),
+      layer,
+      rebuild_mode: rebuildMode,
+      candidates: totalCandidates,
+      success,
+      failed,
+      skipped,
+      batch_size: batchSize,
+      max_retries: maxRetries,
+      retry_failed_only: retryFailedOnly,
+      full_sync_result: fullSyncResult,
+    };
+    upsertJsonFile(statePath, {
+      version: "1",
+      lastRun: summary,
+      failureCounts,
+    });
+    upsertJsonFile(syncStatePath, {
+      version: "2",
+      lastVectorBackfill: {
+        runAt: summary.runAt,
+        success,
+        failed,
+        skipped,
+      },
+    });
+
+    return { success: true, data: summary };
+  }
+
   async function runDiagnostics(_args: Record<string, unknown>, _context: ToolContext): Promise<ToolResult> {
     const { activePath, archivePath } = memoryFiles();
+    const activeRecords = readJsonl(activePath);
+    const archiveRecords = readJsonl(archivePath);
+    const activeVector = embeddingStats(activeRecords);
+    const archiveVector = embeddingStats(archiveRecords);
+    const vectorJsonlPath = path.join(deps.memoryRoot, "vector", "lancedb_events.jsonl");
+    const vectorJsonlRecords = readJsonl(vectorJsonlPath);
+    const activeVectorRecords = vectorJsonlRecords.filter(record => (record.layer === "active"));
+    const archiveVectorRecords = vectorJsonlRecords.filter(record => (record.layer === "archive"));
+    const syncState = parseJsonFile(path.join(deps.memoryRoot, ".sync_state.json"));
+    const backfillState = parseJsonFile(path.join(deps.memoryRoot, ".vector_backfill_state.json"));
+    const failureCounts = backfillState && typeof backfillState.failureCounts === "object" && backfillState.failureCounts !== null
+      ? backfillState.failureCounts as Record<string, unknown>
+      : {};
+    const pendingRetry = Object.values(failureCounts).filter(value => typeof value === "number" && Number.isFinite(value) && value > 0).length;
+    const lastVectorBackfill = syncState && typeof syncState.lastVectorBackfill === "object" && syncState.lastVectorBackfill !== null
+      ? syncState.lastVectorBackfill
+      : null;
+    const embeddingConnectivity = await probeModelConnection({
+      kind: "embedding",
+      model: deps.embedding?.model || "",
+      apiKey: deps.embedding?.apiKey || "",
+      baseUrl: normalizeBaseUrl(deps.embedding?.baseURL || deps.embedding?.baseUrl),
+      timeoutMs: deps.embedding?.timeoutMs,
+    });
+    const llmConnectivity = await probeModelConnection({
+      kind: "llm",
+      model: deps.llm?.model || "",
+      apiKey: deps.llm?.apiKey || "",
+      baseUrl: normalizeBaseUrl(deps.llm?.baseURL || deps.llm?.baseUrl),
+      timeoutMs: 8000,
+    });
+    const rerankerConnectivity = await probeModelConnection({
+      kind: "reranker",
+      model: deps.reranker?.model || "",
+      apiKey: deps.reranker?.apiKey || "",
+      baseUrl: normalizeBaseUrl(deps.reranker?.baseURL || deps.reranker?.baseUrl),
+      timeoutMs: 8000,
+    });
     const checks = [
       { name: "Engine mode", passed: true, message: "TS engine active" },
       { name: "Active sessions store", passed: fs.existsSync(activePath), message: activePath },
       { name: "Archive sessions store", passed: fs.existsSync(archivePath), message: archivePath },
       { name: "Core rules store", passed: fs.existsSync(path.join(deps.memoryRoot, "CORTEX_RULES.md")), message: "CORTEX_RULES.md checked" },
+      { name: "Embedding model connectivity", passed: embeddingConnectivity.connected, message: embeddingConnectivity.error || "ok" },
+      { name: "LLM model connectivity", passed: llmConnectivity.connected, message: llmConnectivity.error || "ok" },
+      { name: "Reranker model connectivity", passed: rerankerConnectivity.connected, message: rerankerConnectivity.error || "ok" },
     ];
     return {
       success: true,
       data: {
         status: "ok",
+        prompt_versions: PROMPT_VERSIONS,
         checks,
+        layers: {
+          active: {
+            records: activeRecords.length,
+            path: activePath,
+          },
+          archive: {
+            records: archiveRecords.length,
+            path: archivePath,
+          },
+          vector: {
+            active_coverage: activeVector.coverage,
+            archive_coverage: archiveVector.coverage,
+            active_unembedded: activeVector.pending + activeVector.failed,
+            archive_unembedded: archiveVector.pending + archiveVector.failed,
+            chunking: {
+              chunk_size: deps.vectorChunking?.chunkSize ?? 600,
+              chunk_overlap: deps.vectorChunking?.chunkOverlap ?? 100,
+            },
+            vector_jsonl_records: vectorJsonlRecords.length,
+            vector_jsonl_by_layer: {
+              active: activeVectorRecords.length,
+              archive: archiveVectorRecords.length,
+            },
+            last_backfill_summary: lastVectorBackfill,
+            backfill_state: {
+              pending_retry_records: pendingRetry,
+              has_state_file: fs.existsSync(path.join(deps.memoryRoot, ".vector_backfill_state.json")),
+            },
+          },
+          graph_rules: {
+            graph_mutation_log_exists: fs.existsSync(path.join(deps.memoryRoot, "graph", "mutation_log.jsonl")),
+            rules_exists: fs.existsSync(path.join(deps.memoryRoot, "CORTEX_RULES.md")),
+          },
+        },
+        model_connectivity: {
+          embedding: embeddingConnectivity,
+          llm: llmConnectivity,
+          reranker: rerankerConnectivity,
+        },
         recommendations: [],
       },
     };
@@ -631,6 +1320,7 @@ export function createTsEngine(deps: TsEngineDeps): MemoryEngine {
     deleteMemory,
     updateMemory,
     cleanupMemories,
+    backfillEmbeddings,
     runDiagnostics,
     onMessage,
     onSessionEnd,

@@ -10,8 +10,10 @@
 |------|------|
 | 语义检索 | `search_memory` 支持 query + top_k |
 | 事件存储 | `store_event` 将摘要写入归档 |
+| 全文分块向量化 | Active 与 Archive 统一按 `chunk_size/chunk_overlap` 做全文分块向量化 |
 | 上下文注入 | `get_hot_context` / `get_auto_context` |
-| 增量同步 | `sync_memory` 按状态文件增量导入 |
+| 增量同步 | `sync_memory` 按状态文件增量导入，并统一走 LLM 提取后写入事件/图谱 |
+| 向量回填重建 | `backfill_embeddings` 支持 incremental / vector_only / full 三种模式 |
 | 规则演进 | `reflect_memory` 更新 `CORTEX_RULES.md` |
 | 运行诊断 | `diagnostics` 检查本地存储状态 |
 
@@ -24,7 +26,7 @@
 | 会话记忆层 | `sessions/active/sessions.jsonl` | 存储最近会话消息，支撑实时检索与上下文注入 |
 | 事件归档层 | `sessions/archive/sessions.jsonl` | 存储已沉淀事件（摘要、实体、结果），用于长期回顾 |
 | 实体关系层 | 基于归档事件中的 `entities` / `relations` 字段动态构图 | 支撑 `query_graph` 的实体共现与关系查询（派生图谱，不单独落盘） |
-| 向量检索层 | `vector/lancedb`（可用时）或 `vector/lancedb_events.jsonl`（回退） | 存储事件向量，用于语义检索与向量去重 |
+| 向量检索层 | `vector/lancedb`（可用时）或 `vector/lancedb_events.jsonl`（回退） | 存储 active/archive 全文分块向量（含 `source_memory_id` 与 chunk 元信息），用于语义检索与同源融合 |
 | 规则知识层 | `CORTEX_RULES.md` | 存储由反思生成的可复用规则，供后续任务复用 |
 | 运行状态层 | `.sync_state.json` / `.session_end_state.json` / `.rule_store_state.json` / `.dedup_index.json` / `graph/mutation_log.jsonl` | 记录增量同步、session_end 幂等、规则去重、三阶段去重索引、图谱变更审计日志 |
 | 说明与入口层 | `MEMORY.md` | 记忆库说明与使用约定入口 |
@@ -35,9 +37,12 @@
 - 图谱派生：实体关系来自事件层的 `entities` / `relations`，查询时动态生成图结构
 - 图谱治理：写入前按 `schema/graph.schema.yaml` 做 event/relation 规范化与关系规则校验
 - 会话结束写入：message hook 默认仅缓存，会在 `session_end` 后批量抽取并落盘
+- 严格导入门禁：历史导入内容必须经 LLM 提取判定后才写入事件层与图谱层
 - 增量导入：通过状态文件只处理新增会话内容，避免全量重复扫描
 - 幂等去重：对 session_end 事件和规则写入做签名判重，减少重复沉淀
 - 三阶段去重：SimHash 预过滤 → MinHash 精比对 → 向量余弦相似度
+- 全文分块向量化：active/archive 两层统一使用可配置 chunk 策略（默认 `600/100`，语义断句优先）
+- 混合检索：关键词/BM25 + 向量召回统一融合重排，并支持长度归一化防止长文本天然占优
 - 自动演进：可结合 `autoSync`、`autoReflect` 持续把会话经验转化为长期可复用记忆
 - 可观测可诊断：通过 `diagnostics` 与状态文件快速定位数据目录、同步与反思异常
 
@@ -50,29 +55,33 @@
 
 ### 安装步骤
 
+命令前缀说明：
+- 若你是全局安装 OpenClaw，请直接使用 `openclaw ...`
+- 若你使用源码安装的 OpenClaw ，请使用 `pnpm openclaw ...`
+
 快速安装（推荐，显式来源）：
 
 ```bash
 cd ~/openclaw
-pnpm openclaw plugins install clawhub:openclaw-cortex-memory
-pnpm openclaw plugins enable openclaw-cortex-memory
+openclaw plugins install clawhub:openclaw-cortex-memory
+openclaw plugins enable openclaw-cortex-memory
 ```
 
 npm 安装方式：
 
 ```bash
 cd ~/openclaw
-pnpm openclaw plugins install openclaw-cortex-memory@alpha
-pnpm openclaw plugins enable openclaw-cortex-memory
+openclaw plugins install openclaw-cortex-memory@alpha
+openclaw plugins enable openclaw-cortex-memory
 ```
 
 第三种安装方式（当 ClawHub/npm 解析受网络影响时）：
 
 ```bash
-curl -L -o /tmp/cortex.tgz https://registry.npmjs.org/openclaw-cortex-memory/-/openclaw-cortex-memory-0.1.0-Alpha.8.tgz
+curl -L -o /tmp/cortex.tgz https://registry.npmjs.org/openclaw-cortex-memory/-/openclaw-cortex-memory-0.1.0-Alpha.9.tgz
 cd ~/openclaw
-pnpm openclaw plugins install /tmp/cortex.tgz
-pnpm openclaw plugins enable openclaw-cortex-memory
+openclaw plugins install /tmp/cortex.tgz
+openclaw plugins enable openclaw-cortex-memory
 rm -f /tmp/cortex.tgz
 ```
 
@@ -80,9 +89,9 @@ rm -f /tmp/cortex.tgz
 
 ```bash
 cd ~/openclaw
-pnpm openclaw plugins uninstall openclaw-cortex-memory
-pnpm openclaw plugins install clawhub:openclaw-cortex-memory
-pnpm openclaw plugins enable openclaw-cortex-memory
+openclaw plugins uninstall openclaw-cortex-memory
+openclaw plugins install clawhub:openclaw-cortex-memory
+openclaw plugins enable openclaw-cortex-memory
 ```
 
 说明：
@@ -123,27 +132,12 @@ npm install
           "autoReflectIntervalMinutes": 30,
           "readFusion": {
             "enabled": true,
-            "maxCandidates": 10,
             "authoritative": true
           },
           "memoryDecay": {
             "enabled": true,
-            "minFloor": 0.15,
-            "defaultHalfLifeDays": 90,
-            "halfLifeByEventType": {
-              "issue": 30,
-              "fix": 30,
-              "action_item": 30,
-              "decision": 120,
-              "preference": 240,
-              "constraint": 240,
-              "requirement": 240
-            },
             "antiDecay": {
-              "enabled": true,
-              "maxBoost": 1.6,
-              "hitWeight": 0.08,
-              "recentWindowDays": 30
+              "enabled": true
             }
           },
           "embedding": {
@@ -176,6 +170,9 @@ npm install
 
 - `readFusion.enabled`：开启多路召回后 LLM 融合
 - `readFusion.authoritative`：开启后仅返回融合后的权威记忆包
+- `readFusion.channelWeights/channelTopK`：控制各召回通道权重与配额
+- `readFusion.lengthNorm`：长度归一化参数，抑制超长文本得分偏置
+- `vectorChunking.chunkSize/chunkOverlap`：全文分块向量化参数（默认 `600/100`）
 - `memoryDecay.enabled`：开启按 `event_type` 半衰期衰减
 - `memoryDecay.antiDecay.enabled`：开启命中频次反衰减，避免高价值老记忆被过度衰减
 - `autoReflect`：建议在验证稳定后再开启；默认 `false`
@@ -186,7 +183,6 @@ npm install
 |--------|------|------|
 | `embedding.provider` | 是 | 建议使用 `api`（统一第三方接口模式） |
 | `embedding.model` | 是 | 嵌入模型名称 |
-| `embedding.dimensions` | 否 | 向量维度，需与模型匹配 |
 | `embedding.apiKey` | 是 | Embedding API Key（建议 `${EMBEDDING_API_KEY}`） |
 | `embedding.baseURL` | 是 | Embedding API 端点 |
 | `llm.provider` | 是 | 建议使用 `api` |
@@ -203,22 +199,15 @@ npm install
 | `autoReflect` | 否 | 自动触发记忆反思，默认 `false` |
 | `autoReflectIntervalMinutes` | 否 | 自动反思扫描间隔（分钟），默认 `30`，最小 `5` |
 | `readFusion.enabled` | 否 | 启用重排后 LLM 融合，默认 `true` |
-| `readFusion.maxCandidates` | 否 | 融合候选上限，默认 `10` |
 | `readFusion.authoritative` | 否 | 仅返回融合权威记忆包，默认 `true` |
 | `memoryDecay.enabled` | 否 | 启用按 `event_type` 的半衰期衰减，默认 `true` |
-| `memoryDecay.minFloor` | 否 | 衰减系数下限（0~1），默认 `0.15` |
-| `memoryDecay.defaultHalfLifeDays` | 否 | 未配置类型的默认半衰期（天），默认 `90` |
-| `memoryDecay.halfLifeByEventType` | 否 | 各 `event_type` 半衰期覆盖配置（天） |
 | `memoryDecay.antiDecay.enabled` | 否 | 启用命中频次反衰减，默认 `true` |
-| `memoryDecay.antiDecay.maxBoost` | 否 | 反衰减最大增益（>=1），默认 `1.6` |
-| `memoryDecay.antiDecay.hitWeight` | 否 | 命中次数增益系数，默认 `0.08` |
-| `memoryDecay.antiDecay.recentWindowDays` | 否 | 命中新鲜度窗口（天），默认 `30` |
 
 ### 启动
 
 ```bash
-pnpm openclaw config validate
-pnpm openclaw gateway restart
+openclaw config validate
+openclaw gateway restart
 ```
 
 ### 主 Agent 注入说明
@@ -234,9 +223,10 @@ pnpm openclaw gateway restart
 5) 需要实体关联关系时调用 query_graph。
 6) 当任务经历“失败→调整→最终成功”时，优先用 store_event 记录失败原因与成功方案，再调用 reflect_memory 沉淀可复用规则。
 7) 需要导入历史会话时调用 sync_memory。
-8) 出现配置校验失败、记忆读写异常、检索结果异常或数据目录问题时，优先调用 diagnostics。
-9) 同一任务内不要反复调用 store_event 或 reflect_memory；仅在关键节点或任务收尾时触发一次。
-10) 不要臆造历史事实；无法确认时必须先检索。
+8) 当 diagnostics 显示 active/archive 存在未向量化记录，或迁移后需要重建向量层时，调用 backfill_embeddings（按需选择 incremental/vector_only/full）。
+9) 出现配置校验失败、记忆读写异常、检索结果异常或数据目录问题时，优先调用 diagnostics。
+10) 同一任务内不要反复调用 store_event 或 reflect_memory；仅在关键节点或任务收尾时触发一次。
+11) 不要臆造历史事实；无法确认时必须先检索。
 ```
 
 ## 可用工具
@@ -249,9 +239,10 @@ pnpm openclaw gateway restart
 | `get_hot_context` | 获取热上下文（CORTEX_RULES.md + 近期会话） |
 | `get_auto_context` | 自动检索相关记忆 + 热上下文 |
 | `reflect_memory` | 触发记忆反思，将事件转化为规则 |
-| `sync_memory` | 同步 OpenClaw 历史会话（增量） |
+| `sync_memory` | 同步 OpenClaw 历史会话（增量），并通过 LLM 判定后写入事件/图谱 |
+| `backfill_embeddings` | 向量回填/重建（支持 `incremental`、`vector_only`、`full`） |
 | `delete_memory` | 删除指定记忆 |
-| `diagnostics` | 系统诊断 |
+| `diagnostics` | 系统诊断（含 embedding/LLM/reranker 连通性检查） |
 
 ## CLI 命令
 

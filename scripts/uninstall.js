@@ -220,4 +220,10 @@ function main() {
   }
 }
 
-main();
+module.exports = {
+  uninstall,
+};
+
+if (require.main === module) {
+  main();
+}

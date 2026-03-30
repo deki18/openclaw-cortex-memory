@@ -1,6 +1,6 @@
 ---
 name: cortex-memory
-description: 长期记忆系统（纯 TypeScript）。Use when user asks about past conversations, preferences, project history, or needs to remember information across sessions.
+description: 长期记忆系统（纯 TypeScript）。适用于历史对话回溯、偏好记忆、项目上下文延续与跨会话信息复用场景。
 homepage: https://github.com/deki18/openclaw-cortex-memory
 metadata:
   {
@@ -15,20 +15,20 @@ metadata:
   }
 ---
 
-# Cortex Memory - 长期记忆系统
+# Cortex Memory · 长期记忆系统
 
-为 OpenClaw Agent 提供持久化记忆能力，当前为纯 TypeScript 单栈实现。
+为 OpenClaw Agent 提供稳定的跨会话记忆能力。
 
 ## 使用场景
 
-**USE when:**
+**建议使用场景（USE when）:**
 - 用户询问过去的对话内容或决策
 - 需要记住用户偏好、项目信息
 - 跨会话保持上下文
 - 查询实体关系（人物、项目、技术）
 - 存储重要事件或里程碑
 
-**DON'T use when:**
+**不建议使用场景（DON'T use when）:**
 - 仅需当前会话的临时信息
 - 查询实时数据（天气、新闻等）
 
@@ -36,32 +36,36 @@ metadata:
 
 ### 安装
 
+命令前缀说明：
+- 若你是全局安装 OpenClaw，请直接使用 `openclaw ...`
+- 若你使用源码安装的 OpenClaw ，请使用 `pnpm openclaw ...`
+
 快速安装（推荐，显式来源）：
 
 ```bash
 cd ~/openclaw
-pnpm openclaw plugins install clawhub:openclaw-cortex-memory
-pnpm openclaw plugins enable openclaw-cortex-memory
-pnpm openclaw gateway restart
+openclaw plugins install clawhub:openclaw-cortex-memory
+openclaw plugins enable openclaw-cortex-memory
+openclaw gateway restart
 ```
 
 npm 安装方式：
 
 ```bash
 cd ~/openclaw
-pnpm openclaw plugins install openclaw-cortex-memory@alpha
-pnpm openclaw plugins enable openclaw-cortex-memory
-pnpm openclaw gateway restart
+openclaw plugins install openclaw-cortex-memory@alpha
+openclaw plugins enable openclaw-cortex-memory
+openclaw gateway restart
 ```
 
 第三种安装方式（当 ClawHub/npm 解析受网络影响时）：
 
 ```bash
-curl -L -o /tmp/cortex.tgz https://registry.npmjs.org/openclaw-cortex-memory/-/openclaw-cortex-memory-0.1.0-Alpha.8.tgz
+curl -L -o /tmp/cortex.tgz https://registry.npmjs.org/openclaw-cortex-memory/-/openclaw-cortex-memory-0.1.0-Alpha.9.tgz
 cd ~/openclaw
-pnpm openclaw plugins install /tmp/cortex.tgz
-pnpm openclaw plugins enable openclaw-cortex-memory
-pnpm openclaw gateway restart
+openclaw plugins install /tmp/cortex.tgz
+openclaw plugins enable openclaw-cortex-memory
+openclaw gateway restart
 rm -f /tmp/cortex.tgz
 ```
 
@@ -69,10 +73,10 @@ rm -f /tmp/cortex.tgz
 
 ```bash
 cd ~/openclaw
-pnpm openclaw plugins uninstall openclaw-cortex-memory
-pnpm openclaw plugins install clawhub:openclaw-cortex-memory
-pnpm openclaw plugins enable openclaw-cortex-memory
-pnpm openclaw gateway restart
+openclaw plugins uninstall openclaw-cortex-memory
+openclaw plugins install clawhub:openclaw-cortex-memory
+openclaw plugins enable openclaw-cortex-memory
+openclaw gateway restart
 ```
 
 说明：
@@ -88,8 +92,8 @@ git clone https://github.com/deki18/openclaw-cortex-memory.git ~/openclaw-cortex
 cd ~/openclaw-cortex-memory-src
 npm install && npm run build && npm pack
 cd ~/openclaw
-pnpm openclaw plugins install ~/openclaw-cortex-memory-src/openclaw-cortex-memory-0.1.0-Alpha.8.tgz
-pnpm openclaw gateway restart
+openclaw plugins install ~/openclaw-cortex-memory-src/openclaw-cortex-memory-0.1.0-Alpha.9.tgz
+openclaw gateway restart
 ```
 
 ### 本地开发模式（无安装记录）
@@ -121,27 +125,12 @@ npm install
           "autoReflectIntervalMinutes": 30,
           "readFusion": {
             "enabled": true,
-            "maxCandidates": 10,
             "authoritative": true
           },
           "memoryDecay": {
             "enabled": true,
-            "minFloor": 0.15,
-            "defaultHalfLifeDays": 90,
-            "halfLifeByEventType": {
-              "issue": 30,
-              "fix": 30,
-              "action_item": 30,
-              "decision": 120,
-              "preference": 240,
-              "constraint": 240,
-              "requirement": 240
-            },
             "antiDecay": {
-              "enabled": true,
-              "maxBoost": 1.6,
-              "hitWeight": 0.08,
-              "recentWindowDays": 30
+              "enabled": true
             }
           },
           "embedding": {
@@ -187,7 +176,7 @@ openclaw gateway restart
 
 ### 主Agent注入说明
 
-首次接入后，建议把下面这段发给主 Agent，确保它会主动使用记忆工具：
+首次接入后，建议把下面这段发给主 Agent，确保其按统一记忆工作流调用工具：
 
 ```text
 你已接入 Cortex Memory。请遵循以下规则：
@@ -198,9 +187,10 @@ openclaw gateway restart
 5) 需要实体关联关系时调用 query_graph。
 6) 当任务经历“失败→调整→最终成功”时，优先用 store_event 记录失败原因与成功方案，再调用 reflect_memory 沉淀可复用规则。
 7) 需要导入历史会话时调用 sync_memory。
-8) 出现配置校验失败、记忆读写异常、检索结果异常或数据目录问题时，优先调用 diagnostics。
-9) 同一任务内不要反复调用 store_event 或 reflect_memory；仅在关键节点或任务收尾时触发一次。
-10) 不要臆造历史事实；无法确认时必须先检索。
+8) 当 diagnostics 显示 active/archive 存在未向量化记录，或迁移后需要重建向量层时，调用 backfill_embeddings（按需选择 incremental/vector_only/full）。
+9) 出现配置校验失败、记忆读写异常、检索结果异常或数据目录问题时，优先调用 diagnostics。
+10) 同一任务内不要反复调用 store_event 或 reflect_memory；仅在关键节点或任务收尾时触发一次。
+11) 不要臆造历史事实；无法确认时必须先检索。
 ```
 
 ## 可用工具
@@ -264,7 +254,20 @@ openclaw gateway restart
 
 ### sync_memory
 
-增量同步会话记录到本地记忆（无参数）。
+增量同步会话记录，且必须经 LLM 提取判定后才写入事件/图谱记忆（无参数）。
+
+### backfill_embeddings
+
+按层回填或重建向量，支持全文分块向量重建。
+
+**参数：**
+| 参数 | 类型 | 必需 | 说明 |
+|------|------|------|------|
+| layer | string | 否 | `active` / `archive` / `all` |
+| batch_size | number | 否 | 每批处理数量 |
+| max_retries | number | 否 | 失败重试上限 |
+| retry_failed_only | boolean | 否 | 仅处理失败记录 |
+| rebuild_mode | string | 否 | `incremental` / `vector_only` / `full` |
 
 ### delete_memory
 
@@ -277,7 +280,7 @@ openclaw gateway restart
 
 ### diagnostics
 
-运行本地系统诊断，检查数据目录与基础状态。
+运行本地系统诊断，检查数据目录、分层状态与 embedding/LLM/reranker 连通性。
 
 ## 配置选项
 
@@ -285,7 +288,6 @@ openclaw gateway restart
 |------|------|--------|------|
 | embedding.provider | 是 | - | `api`（推荐） |
 | embedding.model | 是 | - | Embedding 模型名称 |
-| embedding.dimensions | 否 | 3072 | 向量维度 |
 | embedding.apiKey | 是 | ${EMBEDDING_API_KEY} | Embedding API Key |
 | embedding.baseURL | 是 | - | Embedding API 端点 |
 | llm.provider | 是 | - | `api`（推荐） |
@@ -302,16 +304,9 @@ openclaw gateway restart
 | autoReflect | 否 | false | 自动触发反思 |
 | autoReflectIntervalMinutes | 否 | 30 | 自动反思扫描间隔（分钟） |
 | readFusion.enabled | 否 | true | 启用检索重排后的 LLM 融合 |
-| readFusion.maxCandidates | 否 | 10 | 融合候选上限 |
 | readFusion.authoritative | 否 | true | 仅返回融合权威记忆包 |
 | memoryDecay.enabled | 否 | true | 启用按事件类型半衰期衰减 |
-| memoryDecay.minFloor | 否 | 0.15 | 衰减系数下限 |
-| memoryDecay.defaultHalfLifeDays | 否 | 90 | 未配置类型默认半衰期（天） |
-| memoryDecay.halfLifeByEventType | 否 | - | 各事件类型半衰期覆盖配置 |
 | memoryDecay.antiDecay.enabled | 否 | true | 启用命中频次反衰减 |
-| memoryDecay.antiDecay.maxBoost | 否 | 1.6 | 反衰减最大增益 |
-| memoryDecay.antiDecay.hitWeight | 否 | 0.08 | 命中次数增益系数 |
-| memoryDecay.antiDecay.recentWindowDays | 否 | 30 | 命中新鲜度窗口（天） |
 
 ## 数据文件
 
