@@ -126,7 +126,6 @@ npm install
         "enabled": true,
         "config": {
           "engineMode": "ts",
-          "dbPath": "<optional-memory-dir>",
           "autoSync": true,
           "autoReflect": false,
           "autoReflectIntervalMinutes": 30,
@@ -281,9 +280,8 @@ npx cortex-memory help                # 查看命令帮助
 3. **重排序**：可选配置 `reranker` 以提升检索精度
 4. **外部传输**：检索与反思会调用你配置的 embedding/llm/reranker endpoint，请使用可信服务并最小化密钥权限
 5. **会话数据**：启用 `autoSync` 时会读取 OpenClaw 会话文件并写入本地记忆目录，生产环境建议先小范围验证
-6. **单栈运行**：当前版本为纯 TS，无 Python 运行时依赖
-7. **历史导入来源**：`sync_memory` 会同时导入 `<openclaw_base>/agents/main/sessions/*.jsonl` 与 `<openclaw_base>/workspace/memory/*.md`
-8. **重复导入防护**：每日总结 `.md` 会按文件内容哈希标记在 `.sync_state.json`，未变化文件不会重复导入
+6. **历史导入来源**：`sync_memory` 会同时导入 `<openclaw_base>/agents/main/sessions/*.jsonl` 与 `<openclaw_base>/workspace/memory/*.md`
+7. **重复导入防护**：每日总结 `.md` 会按文件内容哈希标记在 `.sync_state.json`，未变化文件不会重复导入
 
 ## 许可证
 

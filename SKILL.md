@@ -119,7 +119,6 @@ npm install
         "enabled": true,
         "config": {
           "engineMode": "ts",
-          "dbPath": "<optional-memory-dir>",
           "autoSync": true,
           "autoReflect": false,
           "autoReflectIntervalMinutes": 30,
