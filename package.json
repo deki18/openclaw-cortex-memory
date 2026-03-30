@@ -1,6 +1,6 @@
 {
   "name": "openclaw-cortex-memory",
-  "version": "0.1.0-Alpha.9",
+  "version": "0.1.0-Alpha.10",
   "description": "Long-term memory system for OpenClaw AI Agent",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -57,6 +57,9 @@
     "plugin": true,
     "requiresPython": false,
     "cli": "cortex-memory",
+    "build": {
+      "openclawVersion": "2026.3.22"
+    },
     "compat": {
       "pluginApi": ">=2026.3.22"
     },
