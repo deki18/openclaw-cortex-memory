@@ -216,7 +216,13 @@ npx cortex-memory help                # 查看命令帮助
 
 ---
 
-## 📄 许可证
+## � 致谢
+
+感谢 [memory-lancedb-pro](https://github.com/CortexReach/memory-lancedb-pro) 项目作者，本插件的核心想法借鉴了该项目。
+
+---
+
+## �📄 许可证
 
 MIT License
 
