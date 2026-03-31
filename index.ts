@@ -2029,34 +2029,65 @@ function registerTools(): void {
   }
 }
 
-function sanitizeToolParametersSchemaValue(schema: unknown): unknown {
-  if (Array.isArray(schema)) {
-    return schema.map(item => sanitizeToolParametersSchemaValue(item));
-  }
-  if (!schema || typeof schema !== "object") {
-    return schema;
+function sanitizeToolParametersSchemaValue(schema: unknown): Record<string, unknown> {
+  if (!schema || typeof schema !== "object" || Array.isArray(schema)) {
+    return {};
   }
   const source = schema as Record<string, unknown>;
   const target: Record<string, unknown> = {};
-  for (const [key, value] of Object.entries(source)) {
-    if (key === "patternProperties") {
-      continue;
+  if (typeof source.type === "string") {
+    target.type = source.type;
+  }
+  if (typeof source.description === "string" && source.description.trim()) {
+    target.description = source.description;
+  }
+  if (Array.isArray(source.enum)) {
+    const values = source.enum.filter(item =>
+      typeof item === "string" || typeof item === "number" || typeof item === "boolean" || item === null,
+    );
+    if (values.length > 0) {
+      target.enum = values;
     }
-    if (key === "additionalProperties" && value && typeof value === "object") {
-      target[key] = true;
-      continue;
+  }
+  if (source.properties && typeof source.properties === "object" && !Array.isArray(source.properties)) {
+    const sanitizedProperties: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(source.properties as Record<string, unknown>)) {
+      sanitizedProperties[key] = sanitizeToolParametersSchemaValue(value);
     }
-    target[key] = sanitizeToolParametersSchemaValue(value);
+    target.properties = sanitizedProperties;
+  }
+  if (Array.isArray(source.required)) {
+    const required = source.required.filter(item => typeof item === "string");
+    if (required.length > 0) {
+      target.required = required;
+    }
+  }
+  if (source.items && typeof source.items === "object" && !Array.isArray(source.items)) {
+    target.items = sanitizeToolParametersSchemaValue(source.items);
+  }
+  if (typeof source.additionalProperties === "boolean") {
+    target.additionalProperties = source.additionalProperties;
+  } else if (source.additionalProperties && typeof source.additionalProperties === "object") {
+    target.additionalProperties = true;
   }
   return target;
 }
 
 function sanitizeToolParametersSchema(schema: Record<string, unknown>): Record<string, unknown> {
   const sanitized = sanitizeToolParametersSchemaValue(schema);
-  if (!sanitized || typeof sanitized !== "object" || Array.isArray(sanitized)) {
-    return {};
+  if (sanitized.type !== "object") {
+    sanitized.type = "object";
   }
-  return sanitized as Record<string, unknown>;
+  if (!sanitized.properties || typeof sanitized.properties !== "object" || Array.isArray(sanitized.properties)) {
+    sanitized.properties = {};
+  }
+  if (!Array.isArray(sanitized.required)) {
+    sanitized.required = [];
+  }
+  if (typeof sanitized.additionalProperties !== "boolean") {
+    sanitized.additionalProperties = false;
+  }
+  return sanitized;
 }
 
 function registerToolCompat(tool: RegisteredToolDefinition): void {
