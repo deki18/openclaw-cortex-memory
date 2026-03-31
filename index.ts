@@ -2029,6 +2029,36 @@ function registerTools(): void {
   }
 }
 
+function sanitizeToolParametersSchemaValue(schema: unknown): unknown {
+  if (Array.isArray(schema)) {
+    return schema.map(item => sanitizeToolParametersSchemaValue(item));
+  }
+  if (!schema || typeof schema !== "object") {
+    return schema;
+  }
+  const source = schema as Record<string, unknown>;
+  const target: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(source)) {
+    if (key === "patternProperties") {
+      continue;
+    }
+    if (key === "additionalProperties" && value && typeof value === "object") {
+      target[key] = true;
+      continue;
+    }
+    target[key] = sanitizeToolParametersSchemaValue(value);
+  }
+  return target;
+}
+
+function sanitizeToolParametersSchema(schema: Record<string, unknown>): Record<string, unknown> {
+  const sanitized = sanitizeToolParametersSchemaValue(schema);
+  if (!sanitized || typeof sanitized !== "object" || Array.isArray(sanitized)) {
+    return {};
+  }
+  return sanitized as Record<string, unknown>;
+}
+
 function registerToolCompat(tool: RegisteredToolDefinition): void {
   if (!api) return;
   const execute = async (params: { args?: Record<string, unknown>; context: ToolContext }) =>
@@ -2053,7 +2083,7 @@ function registerToolCompat(tool: RegisteredToolDefinition): void {
   api.registerTool({
     name: tool.name,
     description: tool.description,
-    parameters: tool.parameters,
+    parameters: sanitizeToolParametersSchema(tool.parameters),
     execute,
     handler,
   });

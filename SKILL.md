@@ -65,7 +65,6 @@ curl -L -o /tmp/cortex.tgz https://registry.npmjs.org/openclaw-cortex-memory/-/o
 cd ~/openclaw
 openclaw plugins install /tmp/cortex.tgz
 openclaw plugins enable openclaw-cortex-memory
-openclaw gateway restart
 rm -f /tmp/cortex.tgz
 ```
 
@@ -73,7 +72,7 @@ rm -f /tmp/cortex.tgz
 
 ```bash
 cd ~/openclaw
-openclaw plugins uninstall openclaw-cortex-memory
+rm -rf ~/.openclaw/extensions/openclaw-cortex-memory
 openclaw plugins install clawhub:openclaw-cortex-memory
 openclaw plugins enable openclaw-cortex-memory
 openclaw gateway restart
@@ -84,17 +83,6 @@ openclaw gateway restart
 - 使用 `plugins install` 的安装记录方式，避免 `loaded without install/load-path provenance`。
 - 保持 `plugins.allow` 显式包含 `openclaw-cortex-memory`，避免运行时把插件判定为未绑定信任源。
 - 若 `plugins install openclaw-cortex-memory` 在 ClawHub 解析阶段失败，可使用上述 tgz 方式直接安装。
-
-### 本地打包安装（源码模式）
-
-```bash
-git clone https://github.com/deki18/openclaw-cortex-memory.git ~/openclaw-cortex-memory-src
-cd ~/openclaw-cortex-memory-src
-npm install && npm run build && npm pack
-cd ~/openclaw
-openclaw plugins install ~/openclaw-cortex-memory-src/openclaw-cortex-memory-0.1.0-Alpha.11.tgz
-openclaw gateway restart
-```
 
 ### 本地开发模式（无安装记录）
 

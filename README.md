@@ -89,7 +89,7 @@ rm -f /tmp/cortex.tgz
 
 ```bash
 cd ~/openclaw
-openclaw plugins uninstall openclaw-cortex-memory
+rm -rf ~/.openclaw/extensions/openclaw-cortex-memory
 openclaw plugins install clawhub:openclaw-cortex-memory
 openclaw plugins enable openclaw-cortex-memory
 ```
