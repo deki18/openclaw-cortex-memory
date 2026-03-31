@@ -80,6 +80,7 @@ openclaw plugins enable openclaw-cortex-memory
 ```bash
 curl -L -o /tmp/cortex.tgz https://registry.npmjs.org/openclaw-cortex-memory/-/openclaw-cortex-memory-0.1.0-Alpha.12.tgz
 cd ~/openclaw
+rm -rf ~/.openclaw/extensions/openclaw-cortex-memory
 openclaw plugins install /tmp/cortex.tgz
 openclaw plugins enable openclaw-cortex-memory
 rm -f /tmp/cortex.tgz
