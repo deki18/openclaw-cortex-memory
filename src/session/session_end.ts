@@ -47,6 +47,7 @@ interface SessionEndOptions {
     baseURL?: string;
     baseUrl?: string;
   };
+  requireLlmForWrite?: boolean;
 }
 
 interface SessionRecord {
@@ -343,6 +344,7 @@ export function createSessionEnd(options: SessionEndOptions): {
   const graphSchema = loadGraphSchema(options.projectRoot);
   const activeSessionsPath = path.join(memoryRoot, "sessions", "active", "sessions.jsonl");
   const statePath = path.join(memoryRoot, ".session_end_state.json");
+  const requireLlmForWrite = options.requireLlmForWrite !== false;
   options.logger.info(`session_end_prompt_version=${SESSION_END_PROMPT_VERSION}`);
   if (!fs.existsSync(statePath)) {
     options.logger.warn("session_end_state_missing: first run will rebuild session-end dedup state");
@@ -390,11 +392,23 @@ export function createSessionEnd(options: SessionEndOptions): {
             graphSchema,
           });
         } catch (error) {
-          options.logger.warn(`Session-end LLM extraction failed, fallback to heuristic events: ${error}`);
-          extracted = fallbackEvents(records);
+          if (requireLlmForWrite) {
+            options.logger.warn(`session_end_skip reason=llm_extract_failed session=${sessionId} error=${error}`);
+            skippedReasons.push("llm_extract_failed");
+            extracted = [];
+          } else {
+            options.logger.warn(`Session-end LLM extraction failed, fallback to heuristic events: ${error}`);
+            extracted = fallbackEvents(records);
+          }
         }
       } else {
-        extracted = fallbackEvents(records);
+        if (requireLlmForWrite) {
+          options.logger.warn(`session_end_skip reason=llm_not_configured session=${sessionId}`);
+          skippedReasons.push("llm_not_configured");
+          extracted = [];
+        } else {
+          extracted = fallbackEvents(records);
+        }
       }
       if (recoveryDetection.triggered) {
         extracted.push({

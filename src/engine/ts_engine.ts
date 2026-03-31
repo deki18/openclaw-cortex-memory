@@ -358,9 +358,10 @@ export function createTsEngine(deps: TsEngineDeps): MemoryEngine {
     baseUrl: string;
     timeoutMs?: number;
   }): Promise<{ configured: boolean; connected: boolean; model: string; base_url: string; error: string }> {
+    const defaultTimeoutMs = args.kind === "llm" ? 30000 : 15000;
     const timeoutMs = typeof args.timeoutMs === "number" && Number.isFinite(args.timeoutMs) && args.timeoutMs >= 1000
       ? Math.floor(args.timeoutMs)
-      : 8000;
+      : defaultTimeoutMs;
     if (!args.model || !args.apiKey || !args.baseUrl) {
       return {
         configured: false,
@@ -370,70 +371,86 @@ export function createTsEngine(deps: TsEngineDeps): MemoryEngine {
         error: "not_configured",
       };
     }
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
-    try {
-      let endpoint = args.baseUrl;
-      let payload: Record<string, unknown> = {};
-      if (args.kind === "embedding") {
-        endpoint = args.baseUrl.endsWith("/embeddings") ? args.baseUrl : `${args.baseUrl}/embeddings`;
-        payload = {
-          model: args.model,
-          input: "diagnostics connectivity probe",
-        };
-      } else if (args.kind === "llm") {
-        endpoint = args.baseUrl.endsWith("/chat/completions") ? args.baseUrl : `${args.baseUrl}/chat/completions`;
-        payload = {
-          model: args.model,
-          messages: [{ role: "user", content: "ping" }],
-          max_tokens: 1,
-          temperature: 0,
-        };
-      } else {
-        endpoint = args.baseUrl.endsWith("/rerank") ? args.baseUrl : `${args.baseUrl}/rerank`;
-        payload = {
-          model: args.model,
-          query: "diagnostics",
-          documents: ["diagnostics connectivity probe"],
-          top_n: 1,
-        };
-      }
-      const response = await fetch(endpoint, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          authorization: `Bearer ${args.apiKey}`,
-        },
-        body: JSON.stringify(payload),
-        signal: controller.signal,
-      });
-      clearTimeout(timeoutId);
-      if (!response.ok) {
-        return {
-          configured: true,
-          connected: false,
-          model: args.model,
-          base_url: args.baseUrl,
-          error: `http_${response.status}`,
-        };
-      }
-      return {
-        configured: true,
-        connected: true,
+    let endpoint = args.baseUrl;
+    let payload: Record<string, unknown> = {};
+    if (args.kind === "embedding") {
+      endpoint = args.baseUrl.endsWith("/embeddings") ? args.baseUrl : `${args.baseUrl}/embeddings`;
+      payload = {
         model: args.model,
-        base_url: args.baseUrl,
-        error: "",
+        input: "diagnostics connectivity probe",
       };
-    } catch (error) {
-      clearTimeout(timeoutId);
-      return {
-        configured: true,
-        connected: false,
+    } else if (args.kind === "llm") {
+      endpoint = args.baseUrl.endsWith("/chat/completions") ? args.baseUrl : `${args.baseUrl}/chat/completions`;
+      payload = {
         model: args.model,
-        base_url: args.baseUrl,
-        error: error instanceof Error ? error.message : String(error),
+        messages: [{ role: "user", content: "ping" }],
+        max_tokens: 4,
+        temperature: 0,
+        stream: false,
+      };
+    } else {
+      endpoint = args.baseUrl.endsWith("/rerank") ? args.baseUrl : `${args.baseUrl}/rerank`;
+      payload = {
+        model: args.model,
+        query: "diagnostics",
+        documents: ["diagnostics connectivity probe"],
+        top_n: 1,
       };
     }
+    let lastError = "unknown_error";
+    const maxAttempts = args.kind === "llm" ? 3 : 1;
+    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+      try {
+        const response = await fetch(endpoint, {
+          method: "POST",
+          headers: {
+            accept: "application/json",
+            "content-type": "application/json",
+            authorization: `Bearer ${args.apiKey}`,
+          },
+          body: JSON.stringify(payload),
+          signal: controller.signal,
+        });
+        clearTimeout(timeoutId);
+        if (response.ok) {
+          return {
+            configured: true,
+            connected: true,
+            model: args.model,
+            base_url: args.baseUrl,
+            error: "",
+          };
+        }
+        let details = "";
+        try {
+          const text = (await response.text()).trim();
+          if (text) {
+            details = text.slice(0, 180);
+          }
+        } catch {
+          details = "";
+        }
+        lastError = details ? `http_${response.status}:${details}` : `http_${response.status}`;
+      } catch (error) {
+        const raw = error instanceof Error ? error.message : String(error);
+        if ((error as { name?: string } | null)?.name === "AbortError" || /aborted/i.test(raw)) {
+          lastError = `timeout_${timeoutMs}ms`;
+        } else {
+          lastError = raw;
+        }
+      } finally {
+        clearTimeout(timeoutId);
+      }
+    }
+    return {
+      configured: true,
+      connected: false,
+      model: args.model,
+      base_url: args.baseUrl,
+      error: lastError,
+    };
   }
 
   async function requestEmbedding(args: {

@@ -47,6 +47,7 @@ interface SessionSyncOptions {
   writeStore: {
     writeMemory(args: { text: string; role: string; source: string; sessionId: string }): Promise<{ status: "ok" | "skipped"; reason?: string }>;
   };
+  requireLlmForWrite?: boolean;
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -368,6 +369,9 @@ async function extractGateDecisionsWithLlm(args: {
           "A) active_only：内容是过程信息/上下文片段/未形成稳定结论；或仅记录进行中状态、临时讨论、零散想法。",
           "B) archive_event：内容形成完整可复用事件，需同时满足：有明确对象、有动作/决策、有结果或阶段性结论；summary 需可脱离原上下文理解。",
           "C) skip：内容是噪声、重复、空泛寒暄、无业务价值描述，或无法提取清晰事件主体。",
+          "降噪要求：先剔除与任务无关的寒暄、口头禅、重复表述、无实义感叹词，再做分流判定。",
+          "降噪要求：对同一事实的重复片段做合并去重，保留一次且优先保留信息更完整的表达。",
+          "降噪要求：若内容混杂噪声与有效信息，仅保留有效信息进入 active_text 或 event.summary，不要把噪声带入结果。",
           "archive_event 额外约束：confidence < 0.35 时优先判为 skip；若关系不明确可省略 relations 但不得伪造。",
           "active_only 额外约束：active_text 必须保留关键信息，不得只返回“同上/略”。",
           "输出格式必须是 {\"decisions\":[...]}。",
@@ -438,6 +442,7 @@ export function createSessionSync(options: SessionSyncOptions): {
   const llmModel = options.llm?.model || "";
   const llmApiKey = options.llm?.apiKey || "";
   const llmBaseUrl = normalizeBaseUrl(options.llm?.baseURL || options.llm?.baseUrl);
+  const requireLlmForWrite = options.requireLlmForWrite !== false;
   options.logger.info(`sync_gate_prompt_version=${WRITE_GATE_PROMPT_VERSION}`);
   if (!fs.existsSync(statePath)) {
     options.logger.warn("sync_state_missing: deleting state file triggers full re-import");
@@ -463,6 +468,11 @@ export function createSessionSync(options: SessionSyncOptions): {
       return { imported: 0, skipped: 1, ok: true, llmDecisions: 0, activeOnly: 0, archiveEvent: 0, skipReasons };
     }
     if (!llmModel || !llmApiKey || !llmBaseUrl) {
+      if (requireLlmForWrite) {
+        options.logger.warn(`sync_skip reason=llm_not_configured session=${args.sessionId}`);
+        bumpReason("llm_not_configured");
+        return { imported: 0, skipped: 1, ok: false, llmDecisions: 0, activeOnly: 0, archiveEvent: 0, skipReasons };
+      }
       options.logger.warn(`Sync gate degraded to active_only for ${args.sessionId}: llm_not_configured`);
       const fallbackWrite = await options.writeStore.writeMemory({
         text: args.transcript.slice(-4000),

@@ -51,6 +51,7 @@ interface CortexMemoryConfig {
   reranker: RerankerConfig;
   dbPath?: string;
   autoSync?: boolean;
+  llmRequiredForWrite?: boolean;
   autoReflect?: boolean;
   autoReflectIntervalMinutes?: number;
   readFusion?: {
@@ -192,6 +193,7 @@ const MAX_OPENCLAW_VERSION = "2027.0.0";
 
 const defaultConfig: Partial<CortexMemoryConfig> = {
   autoSync: true,
+  llmRequiredForWrite: true,
   autoReflect: false,
   autoReflectIntervalMinutes: 30,
   readFusion: {
@@ -409,6 +411,7 @@ function resolveEngine(): MemoryEngine {
     dbPath: config.dbPath,
     logger,
     llm: config.llm,
+    requireLlmForWrite: config.llmRequiredForWrite ?? true,
     archiveStore,
     writeStore,
   });
@@ -420,6 +423,7 @@ function resolveEngine(): MemoryEngine {
     syncDailySummaries: sessionSync.syncDailySummaries,
     archiveStore,
     llm: config.llm,
+    requireLlmForWrite: config.llmRequiredForWrite ?? true,
   });
   const ruleStore = createRuleStore({
     projectRoot,
