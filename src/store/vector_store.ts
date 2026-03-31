@@ -137,12 +137,27 @@ export function createVectorStore(options: VectorStoreOptions): {
       if (!db || typeof db.openTable !== "function") {
         return false;
       }
-      const table = await db.openTable("events") as { delete?: (expr: string) => Promise<void> };
-      if (!table || typeof table.delete !== "function") {
+      let table: unknown = null;
+      try {
+        table = await db.openTable("events");
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (
+          /Table\s+'events'\s+was\s+not\s+found/i.test(message) ||
+          /events\.lance[\\/]/i.test(message) ||
+          /_versions/i.test(message)
+        ) {
+          options.logger.debug(`LanceDB events table missing at ${lancedbDir}, skip delete as no-op`);
+          return true;
+        }
+        throw error;
+      }
+      const typedTable = table as { delete?: (expr: string) => Promise<void> };
+      if (!typedTable || typeof typedTable.delete !== "function") {
         return false;
       }
       const safeId = args.sourceMemoryId.replace(/'/g, "''");
-      await table.delete(`layer='${args.layer}' and source_memory_id='${safeId}'`);
+      await typedTable.delete(`layer='${args.layer}' and source_memory_id='${safeId}'`);
       return true;
     } catch (error) {
       options.logger.warn(`LanceDB deleteBySourceMemory failed, fallback to jsonl cleanup: ${error}`);
