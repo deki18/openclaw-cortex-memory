@@ -629,6 +629,10 @@ function checkOpenClawVersion(): Promise<void> {
 }
 
 function findOpenClawConfig(): string | null {
+  const explicitPath = getEnvValue("OPENCLAW_CONFIG_PATH");
+  if (explicitPath && fs.existsSync(explicitPath)) {
+    return explicitPath;
+  }
   const home = getHomeDir();
   const candidates = [
     path.join(home, ".openclaw", "openclaw.json"),
