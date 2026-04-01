@@ -61,8 +61,8 @@ openclaw gateway restart
 第三种安装方式（当 ClawHub/npm 解析受网络影响时）：
 
 ```bash
-curl -L -o /tmp/cortex.tgz https://registry.npmjs.org/openclaw-cortex-memory/-/openclaw-cortex-memory-0.1.0-Alpha.19.tgz
 cd ~/openclaw
+curl -L -o /tmp/cortex.tgz https://registry.npmjs.org/openclaw-cortex-memory/-/openclaw-cortex-memory-0.1.0-Alpha.20.tgz
 openclaw plugins install /tmp/cortex.tgz
 openclaw plugins enable openclaw-cortex-memory
 rm -f /tmp/cortex.tgz

@@ -1107,6 +1107,19 @@ export function createTsEngine(deps: TsEngineDeps): MemoryEngine {
     const vectorJsonlRecords = readJsonl(vectorJsonlPath);
     const activeVectorRecords = vectorJsonlRecords.filter(record => (record.layer === "active"));
     const archiveVectorRecords = vectorJsonlRecords.filter(record => (record.layer === "archive"));
+    const lancedbDir = path.join(deps.memoryRoot, "vector", "lancedb");
+    const lancedbExists = fs.existsSync(lancedbDir);
+    let lancedbRecordCount = 0;
+    if (lancedbExists) {
+      try {
+        const lancedbFiles = fs.readdirSync(lancedbDir).filter(f => f.endsWith(".lance") || f.endsWith(".manifest"));
+        lancedbRecordCount = lancedbFiles.length > 0 ? -1 : 0;
+      } catch {
+        lancedbRecordCount = 0;
+      }
+    }
+    const totalVectorRecords = vectorJsonlRecords.length > 0 ? vectorJsonlRecords.length : (lancedbRecordCount === -1 ? -1 : 0);
+    const vectorStorageType = lancedbExists && lancedbRecordCount === -1 ? "lancedb" : (vectorJsonlRecords.length > 0 ? "jsonl" : "none");
     const syncState = parseJsonFile(path.join(deps.memoryRoot, ".sync_state.json"));
     const backfillState = parseJsonFile(path.join(deps.memoryRoot, ".vector_backfill_state.json"));
     const failureCounts = backfillState && typeof backfillState.failureCounts === "object" && backfillState.failureCounts !== null
@@ -1162,6 +1175,8 @@ export function createTsEngine(deps: TsEngineDeps): MemoryEngine {
             path: archivePath,
           },
           vector: {
+            storage_type: vectorStorageType,
+            lancedb_exists: lancedbExists,
             active_coverage: activeVector.coverage,
             archive_coverage: archiveVector.coverage,
             active_unembedded: activeVector.pending + activeVector.failed,
@@ -1175,6 +1190,7 @@ export function createTsEngine(deps: TsEngineDeps): MemoryEngine {
               active: activeVectorRecords.length,
               archive: archiveVectorRecords.length,
             },
+            total_vector_records: totalVectorRecords,
             last_backfill_summary: lastVectorBackfill,
             backfill_state: {
               pending_retry_records: pendingRetry,
