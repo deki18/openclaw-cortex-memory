@@ -43,6 +43,7 @@ interface RerankerConfig {
 
 interface CortexMemoryConfig {
   enabled?: boolean;
+  fallbackToBuiltin?: boolean;
   embedding: EmbeddingConfig;
   llm: LLMConfig;
   reranker: RerankerConfig;
@@ -131,6 +132,7 @@ interface OpenClawPluginApi {
   off?(event: string, handler: (payload: unknown, context: ToolContext) => Promise<void> | void): void;
   unregisterHook?(event: string): void;
   getLogger?(): Logger;
+  getBuiltinMemory?(): { search: (query: string, topK?: number) => Promise<unknown[]>; store: (text: string, metadata?: Record<string, unknown>) => Promise<string>; delete: (id: string) => Promise<boolean> } | null;
 }
 
 interface UserFriendlyError {
@@ -249,6 +251,7 @@ let isEnabled = false;
 let api: OpenClawPluginApi | null = null;
 let registeredTools: string[] = [];
 let registeredHooks: string[] = [];
+let registeredFallbackTools: string[] = [];
 const registeredHookHandlers = new Map<string, (payload: unknown, context: ToolContext) => Promise<void>>();
 let configWatchInterval: ReturnType<typeof setInterval> | null = null;
 let autoReflectInterval: ReturnType<typeof setInterval> | null = null;
@@ -257,6 +260,7 @@ let lastAutoReflectRunAt = 0;
 let configPath: string | null = null;
 let processHandlersRegistered = false;
 let memoryEngine: MemoryEngine | null = null;
+let builtinMemory: { search: (query: string, topK?: number) => Promise<unknown[]>; store: (text: string, metadata?: Record<string, unknown>) => Promise<string>; delete: (id: string) => Promise<boolean> } | null = null;
 
 type RegisteredToolDefinition = {
   name: string;
@@ -1058,6 +1062,94 @@ function unregisterTools(): void {
   registeredTools = [];
 }
 
+function registerFallbackTools(): void {
+  if (!api || !builtinMemory) return;
+  
+  registerToolCompat({
+    name: "search_memory",
+    description: "Search memory (using builtin system - Cortex Memory disabled)",
+    parameters: {
+      type: "object",
+      properties: {
+        query: { type: "string", description: "Search query" },
+        top_k: { type: "integer", description: "Number of results" },
+      },
+      required: ["query"],
+      additionalProperties: false,
+    },
+    execute: async ({ args, context }: { args?: Record<string, unknown>; context: ToolContext }) => {
+      try {
+        const query = (args?.query as string) || "";
+        const topK = (args?.top_k as number) || 5;
+        const results = await builtinMemory!.search(query, topK);
+        return { success: true, data: results };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        return { success: false, error: `Builtin memory error: ${message}` };
+      }
+    },
+  });
+  registeredFallbackTools.push("search_memory");
+  
+  registerToolCompat({
+    name: "store_event",
+    description: "Store event (using builtin system - Cortex Memory disabled)",
+    parameters: {
+      type: "object",
+      properties: {
+        summary: { type: "string", description: "Event summary" },
+      },
+      required: ["summary"],
+      additionalProperties: false,
+    },
+    execute: async ({ args, context }: { args?: Record<string, unknown>; context: ToolContext }) => {
+      try {
+        const summary = (args?.summary as string) || "";
+        const id = await builtinMemory!.store(summary);
+        return { success: true, data: { id } };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        return { success: false, error: `Builtin memory error: ${message}` };
+      }
+    },
+  });
+  registeredFallbackTools.push("store_event");
+  
+  registerToolCompat({
+    name: "cortex_memory_status",
+    description: "Get the current status of the Cortex Memory plugin",
+    parameters: { 
+      type: "object", 
+      properties: {},
+      required: [],
+      additionalProperties: false,
+    },
+    execute: async (_params: { args?: Record<string, unknown>; context: ToolContext }) => {
+      return {
+        success: true,
+        data: {
+          enabled: isEnabled,
+          fallback_enabled: config?.fallbackToBuiltin ?? true,
+          builtin_memory_available: builtinMemory !== null,
+        }
+      };
+    },
+  });
+  registeredFallbackTools.push("cortex_memory_status");
+}
+
+function unregisterFallbackTools(): void {
+  if (!api || !api.unregisterTool) return;
+  for (const name of registeredFallbackTools) {
+    try {
+      api.unregisterTool(name);
+    } catch (e) {
+      logger.warn(`Failed to unregister fallback tool ${name}: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+  registeredFallbackTools = [];
+}
+
 function registerHooks(): void {
   if (!api) return;
   
@@ -1140,6 +1232,7 @@ export async function enable(): Promise<void> {
   logLifecycle("enable_start");
   
   try {
+    unregisterFallbackTools();
     isEnabled = true;
     registerTools();
     registerHooks();
@@ -1169,8 +1262,14 @@ export async function disable(): Promise<void> {
   isEnabled = false;
   memoryEngine = null;
   
+  if (config?.fallbackToBuiltin && builtinMemory) {
+    logger.info("Falling back to OpenClaw builtin memory system");
+    registerFallbackTools();
+    logLifecycle("fallback_enabled", { fallbackTools: registeredFallbackTools.length });
+  }
+  
   logger.info("Cortex Memory plugin disabled successfully");
-  logLifecycle("disable_success");
+  logLifecycle("disable_success", { fallbackEnabled: registeredFallbackTools.length > 0 });
 }
 
 export function getStatus(): { enabled: boolean } {
@@ -1188,6 +1287,7 @@ export async function unregister(): Promise<void> {
   
   unregisterHooks();
   unregisterTools();
+  unregisterFallbackTools();
   
   isEnabled = false;
   isInitializing = false;
@@ -1196,8 +1296,10 @@ export async function unregister(): Promise<void> {
   config = null;
   autoSearchCacheBySession.clear();
   memoryEngine = null;
+  builtinMemory = null;
   registeredTools = [];
   registeredHooks = [];
+  registeredFallbackTools = [];
   registeredHookHandlers.clear();
   configPath = null;
   
@@ -1277,14 +1379,26 @@ export function register(pluginApi: OpenClawPluginApi, userConfig?: Partial<Cort
       },
     },
     enabled: effectiveConfig.enabled ?? defaultConfig.enabled,
+    fallbackToBuiltin: effectiveConfig.fallbackToBuiltin ?? true,
   } as CortexMemoryConfig;
   memoryEngine = null;
+
+  if (api.getBuiltinMemory) {
+    try {
+      builtinMemory = api.getBuiltinMemory();
+      logger.info("OpenClaw builtin memory system available for fallback");
+    } catch (e) {
+      logger.warn(`Failed to get builtin memory: ${e instanceof Error ? e.message : String(e)}`);
+      builtinMemory = null;
+    }
+  }
 
   const safeConfig = sanitizeForLogging({
     embedding: { provider: config.embedding.provider, model: config.embedding.model },
     llm: { provider: config.llm.provider, model: config.llm.model },
     reranker: { model: config.reranker.model },
     enabled: config.enabled,
+    fallbackToBuiltin: config.fallbackToBuiltin,
   });
 
   checkOpenClawVersion().catch(e => logger.warn(`Version check failed: ${e}`));
