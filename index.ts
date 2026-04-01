@@ -786,7 +786,10 @@ function registerTools(): void {
         additionalProperties: false,
       },
       execute: async (params: { args?: Record<string, unknown>; context: ToolContext }) => {
+        logger.info(`search_memory execute called with params: ${JSON.stringify(params)}`);
+        logger.info(`params.args: ${JSON.stringify(params.args)}`);
         const args = params.args || params;
+        logger.info(`args after extraction: ${JSON.stringify(args)}`);
         return resolveEngine().searchMemory(args as { query: string; top_k?: number }, params.context);
       },
     },
