@@ -1092,6 +1092,17 @@ function unregisterTools(): void {
 function registerFallbackTools(): void {
   if (!api || !builtinMemory) return;
   
+  for (const name of ["search_memory", "store_event", "cortex_memory_status"]) {
+    try {
+      if (api.unregisterTool) {
+        api.unregisterTool(name);
+        logger.info(`Unregistered existing tool ${name} before registering fallback`);
+      }
+    } catch (e) {
+      // ignore
+    }
+  }
+  
   registerToolCompat({
     name: "search_memory",
     description: "Search memory (using builtin system - Cortex Memory disabled)",
@@ -1104,10 +1115,11 @@ function registerFallbackTools(): void {
       required: ["query"],
       additionalProperties: false,
     },
-    execute: async ({ args, context }: { args?: Record<string, unknown>; context: ToolContext }) => {
+    execute: async (params: { args?: Record<string, unknown>; context: ToolContext }) => {
+      const args = (params.args || params) as Record<string, unknown>;
+      const query = (args.query as string) || "";
+      const topK = (args.top_k as number) || 5;
       try {
-        const query = (args?.query as string) || "";
-        const topK = (args?.top_k as number) || 5;
         const results = await builtinMemory!.search(query, topK);
         return { success: true, data: results };
       } catch (error) {
@@ -1129,9 +1141,10 @@ function registerFallbackTools(): void {
       required: ["summary"],
       additionalProperties: false,
     },
-    execute: async ({ args, context }: { args?: Record<string, unknown>; context: ToolContext }) => {
+    execute: async (params: { args?: Record<string, unknown>; context: ToolContext }) => {
+      const args = (params.args || params) as Record<string, unknown>;
+      const summary = (args.summary as string) || "";
       try {
-        const summary = (args?.summary as string) || "";
         const id = await builtinMemory!.store(summary);
         return { success: true, data: { id } };
       } catch (error) {
@@ -1163,6 +1176,8 @@ function registerFallbackTools(): void {
     },
   });
   registeredFallbackTools.push("cortex_memory_status");
+  
+  logger.info(`Registered ${registeredFallbackTools.length} fallback tools`);
 }
 
 function unregisterFallbackTools(): void {
