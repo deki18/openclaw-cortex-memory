@@ -1,8 +1,6 @@
 /// <reference types="node" />
-import { spawn, ChildProcess, execSync } from "child_process";
 import * as path from "path";
 import * as fs from "fs";
-import * as net from "net";
 import type { MemoryEngine } from "./src/engine/memory_engine";
 import { createTsEngine } from "./src/engine/ts_engine";
 import { createReadStore } from "./src/store/read_store";
@@ -15,7 +13,6 @@ import { createRuleStore } from "./src/rules/rule_store";
 import { createReflector } from "./src/reflect/reflector";
 import { createThreeStageDeduplicator } from "./src/dedup/three_stage_deduplicator";
 import { getEnvValue, getHomeDir, getProcessEnvCopy } from "./src/utils/runtime_env";
-import type { EngineMode } from "./src/engine/types";
 
 interface EmbeddingConfig {
   provider: string;
@@ -95,9 +92,6 @@ interface CortexMemoryConfig {
       recentWindowDays?: number;
     };
   };
-  fallbackToBuiltin?: boolean;
-  apiUrl?: string;
-  engineMode?: EngineMode;
 }
 
 interface ToolContext {
@@ -111,12 +105,6 @@ interface ToolResult {
   data?: unknown;
   error?: string;
   errorCode?: string;
-}
-
-interface BuiltinMemory {
-  search: (query: string, limit?: number) => Promise<unknown[]>;
-  store: (content: string, metadata?: Record<string, unknown>) => Promise<string>;
-  delete: (id: string) => Promise<boolean>;
 }
 
 interface Logger {
@@ -143,7 +131,6 @@ interface OpenClawPluginApi {
   off?(event: string, handler: (payload: unknown, context: ToolContext) => Promise<void> | void): void;
   unregisterHook?(event: string): void;
   getLogger?(): Logger;
-  getBuiltinMemory?(): BuiltinMemory;
 }
 
 interface UserFriendlyError {
@@ -153,16 +140,6 @@ interface UserFriendlyError {
 }
 
 const ERROR_CODES: Record<string, UserFriendlyError> = {
-  CONNECTION_REFUSED: {
-    code: "E001",
-    message: "Cannot connect to the memory service",
-    suggestion: "The Python backend may not be running. Try restarting the OpenClaw gateway."
-  },
-  TIMEOUT: {
-    code: "E002",
-    message: "The memory service is not responding",
-    suggestion: "The service may be overloaded. Wait a moment and try again."
-  },
   NOT_FOUND: {
     code: "E003",
     message: "Memory not found",
@@ -172,11 +149,6 @@ const ERROR_CODES: Record<string, UserFriendlyError> = {
     code: "E004",
     message: "Invalid input provided",
     suggestion: "Please check your input parameters and try again."
-  },
-  SERVICE_ERROR: {
-    code: "E005",
-    message: "The memory service encountered an error",
-    suggestion: "Check the service logs for details or try restarting the gateway."
   },
   PLUGIN_DISABLED: {
     code: "E006",
@@ -254,8 +226,6 @@ const defaultConfig: Partial<CortexMemoryConfig> = {
     },
   },
   enabled: true,
-  fallbackToBuiltin: true,
-  engineMode: "ts",
 };
 
 interface CachedSearchResult {
@@ -272,25 +242,20 @@ const HOOK_GUARD_TIMEOUT_MS = 2000;
 
 let config: CortexMemoryConfig | null = null;
 let logger: Logger;
-let pythonProcess: ChildProcess | null = null;
 let isShuttingDown = false;
 let isInitializing = false;
 let isRegistered = false;
 let isEnabled = false;
 let api: OpenClawPluginApi | null = null;
-let builtinMemory: BuiltinMemory | null = null;
 let registeredTools: string[] = [];
 let registeredHooks: string[] = [];
-let registeredFallbackTools: string[] = [];
 const registeredHookHandlers = new Map<string, (payload: unknown, context: ToolContext) => Promise<void>>();
 let configWatchInterval: ReturnType<typeof setInterval> | null = null;
 let autoReflectInterval: ReturnType<typeof setInterval> | null = null;
 let lastAutoReflectArchiveMarker = "";
 let lastAutoReflectRunAt = 0;
 let configPath: string | null = null;
-let pythonStartPromise: Promise<void> | null = null;
 let processHandlersRegistered = false;
-let pythonPidFilePath: string | null = null;
 let memoryEngine: MemoryEngine | null = null;
 
 type RegisteredToolDefinition = {
@@ -299,10 +264,6 @@ type RegisteredToolDefinition = {
   parameters: Record<string, unknown>;
   execute: (params: { args?: Record<string, unknown>; context: ToolContext }) => Promise<ToolResult>;
 };
-
-function shouldUsePythonRuntime(): boolean {
-  return false;
-}
 
 function getMemoryRoot(): string {
   const projectRoot = findProjectRoot();
@@ -365,8 +326,7 @@ function resolveEngine(): MemoryEngine {
   if (!config) {
     throw new Error("Configuration not loaded");
   }
-  const selectedMode: EngineMode = "ts";
-  if (memoryEngine && memoryEngine.mode === "ts") {
+  if (memoryEngine) {
     return memoryEngine;
   }
   const projectRoot = findProjectRoot();
@@ -497,28 +457,56 @@ function createConsoleLogger(): Logger {
 }
 
 function sanitizeForLogging(obj: Record<string, unknown>): Record<string, unknown> {
-  const sanitized: Record<string, unknown> = {};
+  const result: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(obj)) {
-    const isSensitive = SENSITIVE_KEYS.some(k => key.toUpperCase().includes(k));
-    if (isSensitive) {
-      sanitized[key] = "***REDACTED***";
-    } else if (typeof value === "object" && value !== null) {
-      sanitized[key] = sanitizeForLogging(value as Record<string, unknown>);
+    if (SENSITIVE_KEYS.some(k => key.toUpperCase().includes(k))) {
+      result[key] = "***REDACTED***";
+    } else if (typeof value === "object" && value !== null && !Array.isArray(value)) {
+      result[key] = sanitizeForLogging(value as Record<string, unknown>);
     } else {
-      sanitized[key] = value;
+      result[key] = value;
     }
   }
-  return sanitized;
+  return result;
 }
 
-function logLifecycle(event: string, details: Record<string, unknown> = {}): void {
-  const payload = sanitizeForLogging({
-    event,
-    plugin: PLUGIN_ID,
-    ts: new Date().toISOString(),
-    ...details,
-  });
-  logger.info(`[Lifecycle] ${JSON.stringify(payload)}`);
+function findProjectRoot(): string {
+  let dir = __dirname;
+  while (dir !== path.dirname(dir)) {
+    const pkgPath = path.join(dir, "package.json");
+    if (fs.existsSync(pkgPath)) {
+      return dir;
+    }
+    dir = path.dirname(dir);
+  }
+  return process.cwd();
+}
+
+function resolveSessionId(context: ToolContext, payload?: unknown): string {
+  const contextObj = (context || {}) as unknown as Record<string, unknown>;
+  const payloadObj = (payload || {}) as Record<string, unknown>;
+  const candidates = [
+    contextObj.sessionId,
+    contextObj.session_id,
+    payloadObj.sessionId,
+    payloadObj.session_id,
+    payloadObj.id,
+  ];
+  for (const c of candidates) {
+    if (typeof c === "string" && c.trim()) {
+      return c.trim();
+    }
+  }
+  return `fallback:${Date.now().toString(36)}`;
+}
+
+function normalizeIncomingMessage(payload: unknown): { text: string; role: string; source: string } | null {
+  const p = payload as Record<string, unknown>;
+  const text = typeof p.text === "string" ? p.text : (typeof p.content === "string" ? p.content : "");
+  if (!text) return null;
+  const role = typeof p.role === "string" ? p.role : "unknown";
+  const source = typeof p.source === "string" ? p.source : "unknown";
+  return { text, role, source };
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -529,192 +517,142 @@ function asRecord(value: unknown): Record<string, unknown> | null {
 }
 
 function firstString(values: unknown[]): string | undefined {
-  for (const value of values) {
-    if (typeof value === "string" && value.trim()) {
-      return value.trim();
+  for (const v of values) {
+    if (typeof v === "string" && v.trim()) {
+      return v.trim();
     }
   }
   return undefined;
 }
 
-function normalizeIncomingMessage(payload: unknown): { text: string; role: string; source: string } | null {
-  const data = asRecord(payload);
-  if (!data) {
-    return null;
+function validateConfig(cfg: CortexMemoryConfig): string[] {
+  const errors: string[] = [];
+  if (!cfg.embedding?.provider) {
+    errors.push("embedding.provider is required.");
   }
-  const message = asRecord(data.message);
-  const eventData = asRecord(data.data);
-  const update = asRecord(data.update);
-  const updateMessage = update ? asRecord(update.message) : null;
-  const role = firstString([
-    data.role,
-    data.fromRole,
-    data.senderRole,
-    message?.role,
-    eventData?.role,
-    updateMessage?.role,
-  ]) || "user";
-  const source = firstString([
-    data.source,
-    data.platform,
-    data.channel,
-    data.provider,
-    message?.source,
-    eventData?.source,
-  ]) || "message";
-  let text = firstString([
-    data.content,
-    data.text,
-    data.body,
-    data.prompt,
-    data.message,
-    message?.content,
-    message?.text,
-    message?.body,
-    eventData?.content,
-    eventData?.text,
-    updateMessage?.text,
-    updateMessage?.caption,
-  ]);
-  if (!text && Array.isArray(data.messages)) {
-    const merged = data.messages
-      .map(item => {
-        if (typeof item === "string") return item;
-        const msgObj = asRecord(item);
-        if (!msgObj) return "";
-        return firstString([msgObj.content, msgObj.text, msgObj.body]) || "";
-      })
-      .filter(Boolean)
-      .join("\n");
-    text = merged.trim() || undefined;
+  if (!cfg.embedding?.model) {
+    errors.push("embedding.model is required.");
   }
-  if (!text) {
-    return null;
+  if (!cfg.llm?.provider) {
+    errors.push("llm.provider is required.");
   }
-  return { text, role, source };
-}
-
-function resolveSessionId(context?: Partial<ToolContext> | null, payload?: unknown): string {
-  const fromContext = typeof context?.sessionId === "string" ? context.sessionId.trim() : "";
-  if (fromContext) return fromContext;
-  const data = asRecord(payload);
-  const dataChat = data ? asRecord(data.chat) : null;
-  const message = data ? asRecord(data.message) : null;
-  const messageChat = message ? asRecord(message.chat) : null;
-  const eventData = data ? asRecord(data.data) : null;
-  const eventChat = eventData ? asRecord(eventData.chat) : null;
-  const update = data ? asRecord(data.update) : null;
-  const updateMessage = update ? asRecord(update.message) : null;
-  const updateChat = updateMessage ? asRecord(updateMessage.chat) : null;
-  const direct = firstString([
-    data?.sessionId,
-    data?.session_id,
-    data?.conversationId,
-    data?.conversation_id,
-    data?.threadId,
-    data?.thread_id,
-    message?.sessionId,
-    eventData?.sessionId,
-  ]);
-  if (direct) return direct;
-  const chatId = firstString([
-    data?.chatId,
-    data?.chat_id,
-    dataChat?.id,
-    messageChat?.id,
-    eventChat?.id,
-    updateChat?.id,
-  ]);
-  if (chatId) return `chat:${chatId}`;
-  return `fallback:${context?.workspaceId || "default"}:${context?.agentId || "agent"}`;
-}
-
-function compareVersions(a: string, b: string): number {
-  const partsA = a.split(".").map(Number);
-  const partsB = b.split(".").map(Number);
-  for (let i = 0; i < Math.max(partsA.length, partsB.length); i++) {
-    const valA = partsA[i] || 0;
-    const valB = partsB[i] || 0;
-    if (valA < valB) return -1;
-    if (valA > valB) return 1;
+  if (!cfg.llm?.model) {
+    errors.push("llm.model is required.");
   }
-  return 0;
-}
-
-async function checkOpenClawVersion(): Promise<void> {
-  try {
-    const version = getEnvValue("OPENCLAW_VERSION");
-    if (version) {
-      if (compareVersions(version, MIN_OPENCLAW_VERSION) < 0) {
-        throw new Error(`Incompatible OpenClaw version: ${version}. Minimum required: ${MIN_OPENCLAW_VERSION}`);
-      }
-      if (compareVersions(version, MAX_OPENCLAW_VERSION) >= 0) {
-        throw new Error(`Incompatible OpenClaw version: ${version}. Maximum supported: <${MAX_OPENCLAW_VERSION}`);
-      }
-      logger.info(`OpenClaw version check passed: ${version}`);
-    } else {
-      logger.warn("Could not determine OpenClaw version, proceeding with caution");
+  if (cfg.autoReflectIntervalMinutes !== undefined) {
+    if (!Number.isFinite(cfg.autoReflectIntervalMinutes) || cfg.autoReflectIntervalMinutes < 5) {
+      errors.push("autoReflectIntervalMinutes must be >= 5.");
     }
-  } catch (e) {
-    const message = e instanceof Error ? e.message : String(e);
-    logger.warn(`Version check warning: ${message}`);
   }
+  if (cfg.readFusion?.channelWeights) {
+    const weights = cfg.readFusion.channelWeights;
+    for (const [key, value] of Object.entries(weights)) {
+      if (typeof value === "number" && (!Number.isFinite(value) || value < 0)) {
+        errors.push(`readFusion.channelWeights.${key} must be >= 0.`);
+      }
+    }
+  }
+  if (cfg.readFusion?.channelTopK) {
+    const topK = cfg.readFusion.channelTopK;
+    for (const [key, value] of Object.entries(topK)) {
+      if (typeof value === "number" && (!Number.isFinite(value) || value < 1)) {
+        errors.push(`readFusion.channelTopK.${key} must be >= 1.`);
+      }
+    }
+  }
+  if (cfg.vectorChunking?.chunkSize !== undefined) {
+    if (!Number.isFinite(cfg.vectorChunking.chunkSize) || cfg.vectorChunking.chunkSize < 100) {
+      errors.push("vectorChunking.chunkSize must be >= 100.");
+    }
+  }
+  if (cfg.vectorChunking?.chunkOverlap !== undefined) {
+    if (!Number.isFinite(cfg.vectorChunking.chunkOverlap) || cfg.vectorChunking.chunkOverlap < 0) {
+      errors.push("vectorChunking.chunkOverlap must be >= 0.");
+    }
+  }
+  if (cfg.memoryDecay) {
+    if (typeof cfg.memoryDecay.minFloor === "number" && (!Number.isFinite(cfg.memoryDecay.minFloor) || cfg.memoryDecay.minFloor < 0 || cfg.memoryDecay.minFloor > 1)) {
+      errors.push("memoryDecay.minFloor must be between 0 and 1.");
+    }
+    if (typeof cfg.memoryDecay.defaultHalfLifeDays === "number" && (!Number.isFinite(cfg.memoryDecay.defaultHalfLifeDays) || cfg.memoryDecay.defaultHalfLifeDays <= 0)) {
+      errors.push("memoryDecay.defaultHalfLifeDays must be > 0.");
+    }
+    if (cfg.memoryDecay.antiDecay) {
+      const anti = cfg.memoryDecay.antiDecay;
+      if (typeof anti.maxBoost === "number" && (!Number.isFinite(anti.maxBoost) || anti.maxBoost < 1)) {
+        errors.push("memoryDecay.antiDecay.maxBoost must be >= 1.");
+      }
+      if (typeof anti.hitWeight === "number" && (!Number.isFinite(anti.hitWeight) || anti.hitWeight < 0)) {
+        errors.push("memoryDecay.antiDecay.hitWeight must be >= 0.");
+      }
+      if (typeof anti.recentWindowDays === "number" && (!Number.isFinite(anti.recentWindowDays) || anti.recentWindowDays <= 0)) {
+        errors.push("memoryDecay.antiDecay.recentWindowDays must be > 0.");
+      }
+    }
+  }
+  return errors;
 }
 
-function findProjectRoot(): string {
-  if (api && (api as any).rootDir) {
-    return (api as any).rootDir;
-  }
-  let current = process.cwd();
-  while (current !== path.dirname(current)) {
-    if (
-      fs.existsSync(path.join(current, "openclaw.plugin.json")) &&
-      fs.existsSync(path.join(current, "package.json"))
-    ) {
-      return current;
+function checkOpenClawVersion(): Promise<void> {
+  return new Promise((resolve) => {
+    try {
+      const version = (api as any).openclawVersion || (api as any).version;
+      if (!version) {
+        logger.warn("Could not determine OpenClaw version");
+        resolve();
+        return;
+      }
+      const parseVersion = (v: string): number[] => {
+        const parts = v.replace(/[^0-9.]/g, "").split(".").map(Number);
+        return parts.length >= 3 ? parts : [...parts, ...Array(3 - parts.length).fill(0)];
+      };
+      const current = parseVersion(version);
+      const min = parseVersion(MIN_OPENCLAW_VERSION);
+      const max = parseVersion(MAX_OPENCLAW_VERSION);
+      const currentNum = current[0] * 10000 + current[1] * 100 + current[2];
+      const minNum = min[0] * 10000 + min[1] * 100 + min[2];
+      const maxNum = max[0] * 10000 + max[1] * 100 + max[2];
+      if (currentNum < minNum) {
+        logger.warn(`OpenClaw version ${version} is below minimum ${MIN_OPENCLAW_VERSION}. Some features may not work.`);
+      } else if (currentNum >= maxNum) {
+        logger.warn(`OpenClaw version ${version} may not be fully compatible. Maximum tested version is ${MAX_OPENCLAW_VERSION}.`);
+      }
+    } catch (e) {
+      logger.warn(`Version check failed: ${e instanceof Error ? e.message : String(e)}`);
     }
-    current = path.dirname(current);
-  }
-  throw new Error("Cannot find project root directory");
+    resolve();
+  });
 }
 
 function findOpenClawConfig(): string | null {
-  const explicitConfigPath = getEnvValue("OPENCLAW_CONFIG_PATH");
-  const stateDir = getEnvValue("OPENCLAW_STATE_DIR");
-  const basePath = getEnvValue("OPENCLAW_BASE_PATH");
-  const homePath = getHomeDir();
-  const possiblePaths = [
-    explicitConfigPath,
-    stateDir ? path.join(stateDir, "openclaw.json") : "",
-    basePath ? path.join(basePath, "openclaw.json") : "",
-    path.join(process.cwd(), "openclaw.json"),
-    homePath ? path.join(homePath, ".openclaw", "openclaw.json") : "",
+  const home = getHomeDir();
+  const candidates = [
+    path.join(home, ".openclaw", "openclaw.json"),
+    path.join(home, ".openclaw", "config.json"),
   ];
-  
-  for (const p of possiblePaths) {
-    if (p && fs.existsSync(p)) {
-      return p;
+  for (const c of candidates) {
+    if (fs.existsSync(c)) {
+      return c;
     }
   }
   return null;
 }
 
 function loadPluginEnabledState(): boolean {
-  if (!configPath || !fs.existsSync(configPath)) {
-    return true;
-  }
-  
   try {
-    const content = fs.readFileSync(configPath, "utf-8");
-    const openclawConfig = JSON.parse(content);
-    const pluginEntry = openclawConfig?.plugins?.entries?.[PLUGIN_ID];
-    if (pluginEntry && typeof pluginEntry === "object") {
-      return pluginEntry.enabled !== false;
+    if (!configPath) return true;
+    const raw = fs.readFileSync(configPath, "utf-8");
+    const cfg = JSON.parse(raw);
+    const entry = cfg?.plugins?.entries?.[PLUGIN_ID];
+    if (entry && typeof entry.enabled === "boolean") {
+      return entry.enabled;
     }
-    const legacyPluginConfig = openclawConfig?.plugins?.["cortex-memory"];
-    return legacyPluginConfig?.enabled !== false;
-  } catch (e) {
-    logger.warn(`Failed to load config state: ${e}`);
+    const allow = cfg?.plugins?.allow;
+    if (Array.isArray(allow)) {
+      return allow.includes(PLUGIN_ID);
+    }
+    return true;
+  } catch {
     return true;
   }
 }
@@ -723,20 +661,20 @@ function startConfigWatcher(): void {
   if (configWatchInterval) {
     clearInterval(configWatchInterval);
   }
-  
-  let lastEnabledState = isEnabled;
-  
   configWatchInterval = setInterval(() => {
-    const newState = loadPluginEnabledState();
-    if (newState !== lastEnabledState) {
-      lastEnabledState = newState;
-      if (newState && !isEnabled) {
-        logger.info("Detected config change: enabling Cortex Memory plugin");
-        enable();
-      } else if (!newState && isEnabled) {
-        logger.info("Detected config change: disabling Cortex Memory plugin");
-        disable();
+    try {
+      if (!configPath || !fs.existsSync(configPath)) return;
+      const currentEnabled = loadPluginEnabledState();
+      if (currentEnabled !== isEnabled) {
+        logger.info(`Plugin enabled state changed from ${isEnabled} to ${currentEnabled}`);
+        if (currentEnabled) {
+          enable().catch(e => logger.error(`Failed to enable: ${e}`));
+        } else {
+          disable().catch(e => logger.error(`Failed to disable: ${e}`));
+        }
       }
+    } catch (e) {
+      logger.debug(`Config watch error: ${e}`);
     }
   }, 5000);
 }
@@ -749,42 +687,33 @@ function stopConfigWatcher(): void {
 }
 
 function startAutoReflectScheduler(): void {
-  if (!config?.autoReflect || autoReflectInterval) {
+  if (!config?.autoReflect) {
     return;
   }
-  const intervalMinutes = Math.max(5, Math.floor(config.autoReflectIntervalMinutes ?? 30));
-  const intervalMs = intervalMinutes * 60 * 1000;
-  autoReflectInterval = setInterval(() => {
-    if (!isEnabled) {
-      return;
-    }
-    const schedulerContext: ToolContext = {
-      agentId: "cortex-memory-scheduler",
-      workspaceId: "system",
-    };
-    const marker = getArchiveMarker();
-    const now = Date.now();
-    if (marker === "missing" || marker === "error") {
-      return;
-    }
-    if (marker === lastAutoReflectArchiveMarker) {
-      return;
-    }
-    if (now - lastAutoReflectRunAt < intervalMs) {
-      return;
-    }
-    resolveEngine().reflectMemory({}, schedulerContext)
-      .then(result => {
+  const intervalMinutes = Math.max(5, config.autoReflectIntervalMinutes ?? 30);
+  if (autoReflectInterval) {
+    clearInterval(autoReflectInterval);
+  }
+  lastAutoReflectArchiveMarker = getArchiveMarker();
+  lastAutoReflectRunAt = Date.now();
+  autoReflectInterval = setInterval(async () => {
+    if (!isEnabled) return;
+    const currentMarker = getArchiveMarker();
+    if (currentMarker !== lastAutoReflectArchiveMarker) {
+      lastAutoReflectArchiveMarker = currentMarker;
+      try {
+        const result = await resolveEngine().reflectMemory({}, { agentId: "scheduler", workspaceId: "default" });
         if (result.success) {
-          lastAutoReflectArchiveMarker = marker;
-          lastAutoReflectRunAt = now;
-          logger.info("Scheduled reflection complete");
+          logger.info("Auto-reflect completed successfully");
         } else {
-          logger.warn(`Auto-reflect failed: ${result.error ?? "unknown_error"}`);
+          logger.warn(`Auto-reflect failed: ${result.error}`);
         }
-      })
-      .catch(error => logger.warn(`Auto-reflect failed: ${String(error)}`));
-  }, intervalMs);
+      } catch (e) {
+        logger.error(`Auto-reflect error: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
+  }, intervalMinutes * 60 * 1000);
+  logger.info(`Auto-reflect scheduler started (interval: ${intervalMinutes} minutes)`);
 }
 
 function stopAutoReflectScheduler(): void {
@@ -794,1031 +723,8 @@ function stopAutoReflectScheduler(): void {
   }
 }
 
-function validateConfig(cfg: CortexMemoryConfig): string[] {
-  const errors: string[] = [];
-  
-  if (!cfg.embedding?.provider || !cfg.embedding?.model) {
-    errors.push("embedding.provider and embedding.model are required. Please configure them in openclaw.json");
-  }
-  if (!cfg.embedding?.apiKey || !cfg.embedding?.baseURL) {
-    errors.push("embedding.apiKey and embedding.baseURL are required. Please configure third-party embedding endpoint credentials.");
-  }
-  if (typeof cfg.embedding?.timeoutMs === "number" && (!Number.isFinite(cfg.embedding.timeoutMs) || cfg.embedding.timeoutMs < 1000)) {
-    errors.push("embedding.timeoutMs must be a number >= 1000.");
-  }
-  if (typeof cfg.embedding?.maxRetries === "number" && (!Number.isFinite(cfg.embedding.maxRetries) || cfg.embedding.maxRetries < 1 || cfg.embedding.maxRetries > 8)) {
-    errors.push("embedding.maxRetries must be between 1 and 8.");
-  }
-  if (!cfg.llm?.provider || !cfg.llm?.model) {
-    errors.push("llm.provider and llm.model are required. Please configure them in openclaw.json");
-  }
-  if (!cfg.llm?.apiKey || !cfg.llm?.baseURL) {
-    errors.push("llm.apiKey and llm.baseURL are required. Please configure third-party LLM endpoint credentials.");
-  }
-  if (!cfg.reranker?.model) {
-    errors.push("reranker.model is required. Please configure it in openclaw.json");
-  }
-  if (!cfg.reranker?.apiKey || !cfg.reranker?.baseURL) {
-    errors.push("reranker.apiKey and reranker.baseURL are required. Please configure third-party reranker endpoint credentials.");
-  }
-  if (typeof cfg.autoReflectIntervalMinutes === "number" && (!Number.isFinite(cfg.autoReflectIntervalMinutes) || cfg.autoReflectIntervalMinutes < 5)) {
-    errors.push("autoReflectIntervalMinutes must be a number >= 5.");
-  }
-  if (cfg.readFusion && typeof cfg.readFusion.maxCandidates === "number" && (!Number.isFinite(cfg.readFusion.maxCandidates) || cfg.readFusion.maxCandidates < 2)) {
-    errors.push("readFusion.maxCandidates must be a number >= 2.");
-  }
-  if (cfg.readFusion?.channelWeights) {
-    for (const [key, value] of Object.entries(cfg.readFusion.channelWeights)) {
-      if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
-        errors.push(`readFusion.channelWeights.${key} must be a number > 0.`);
-        break;
-      }
-    }
-  }
-  if (cfg.readFusion?.channelTopK) {
-    for (const [key, value] of Object.entries(cfg.readFusion.channelTopK)) {
-      if (typeof value !== "number" || !Number.isFinite(value) || value < 1) {
-        errors.push(`readFusion.channelTopK.${key} must be a number >= 1.`);
-        break;
-      }
-    }
-  }
-  if (typeof cfg.readFusion?.minLexicalHits === "number" && (!Number.isFinite(cfg.readFusion.minLexicalHits) || cfg.readFusion.minLexicalHits < 0)) {
-    errors.push("readFusion.minLexicalHits must be a number >= 0.");
-  }
-  if (typeof cfg.readFusion?.minSemanticHits === "number" && (!Number.isFinite(cfg.readFusion.minSemanticHits) || cfg.readFusion.minSemanticHits < 0)) {
-    errors.push("readFusion.minSemanticHits must be a number >= 0.");
-  }
-  if (cfg.readFusion?.lengthNorm) {
-    const ln = cfg.readFusion.lengthNorm;
-    if (typeof ln.pivotChars === "number" && (!Number.isFinite(ln.pivotChars) || ln.pivotChars <= 0)) {
-      errors.push("readFusion.lengthNorm.pivotChars must be > 0.");
-    }
-    if (typeof ln.strength === "number" && (!Number.isFinite(ln.strength) || ln.strength <= 0)) {
-      errors.push("readFusion.lengthNorm.strength must be > 0.");
-    }
-    if (typeof ln.minFactor === "number" && (!Number.isFinite(ln.minFactor) || ln.minFactor <= 0 || ln.minFactor > 1)) {
-      errors.push("readFusion.lengthNorm.minFactor must be within (0,1].");
-    }
-  }
-  if (cfg.vectorChunking) {
-    if (typeof cfg.vectorChunking.chunkSize === "number" && (!Number.isFinite(cfg.vectorChunking.chunkSize) || cfg.vectorChunking.chunkSize < 200)) {
-      errors.push("vectorChunking.chunkSize must be >= 200.");
-    }
-    if (typeof cfg.vectorChunking.chunkOverlap === "number" && (!Number.isFinite(cfg.vectorChunking.chunkOverlap) || cfg.vectorChunking.chunkOverlap < 0)) {
-      errors.push("vectorChunking.chunkOverlap must be >= 0.");
-    }
-    if (
-      typeof cfg.vectorChunking.chunkSize === "number" &&
-      typeof cfg.vectorChunking.chunkOverlap === "number" &&
-      cfg.vectorChunking.chunkOverlap >= cfg.vectorChunking.chunkSize
-    ) {
-      errors.push("vectorChunking.chunkOverlap must be smaller than chunkSize.");
-    }
-  }
-  if (cfg.memoryDecay) {
-    if (typeof cfg.memoryDecay.minFloor === "number" && (!Number.isFinite(cfg.memoryDecay.minFloor) || cfg.memoryDecay.minFloor < 0 || cfg.memoryDecay.minFloor > 1)) {
-      errors.push("memoryDecay.minFloor must be within [0,1].");
-    }
-    if (typeof cfg.memoryDecay.defaultHalfLifeDays === "number" && (!Number.isFinite(cfg.memoryDecay.defaultHalfLifeDays) || cfg.memoryDecay.defaultHalfLifeDays <= 0)) {
-      errors.push("memoryDecay.defaultHalfLifeDays must be > 0.");
-    }
-    const mapping = cfg.memoryDecay.halfLifeByEventType;
-    if (mapping && typeof mapping === "object") {
-      for (const [key, value] of Object.entries(mapping)) {
-        if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
-          errors.push(`memoryDecay.halfLifeByEventType.${key} must be > 0.`);
-          break;
-        }
-      }
-    }
-    const anti = cfg.memoryDecay.antiDecay;
-    if (anti) {
-      if (typeof anti.maxBoost === "number" && (!Number.isFinite(anti.maxBoost) || anti.maxBoost < 1)) {
-        errors.push("memoryDecay.antiDecay.maxBoost must be >= 1.");
-      }
-      if (typeof anti.hitWeight === "number" && (!Number.isFinite(anti.hitWeight) || anti.hitWeight < 0)) {
-        errors.push("memoryDecay.antiDecay.hitWeight must be >= 0.");
-      }
-      if (typeof anti.recentWindowDays === "number" && (!Number.isFinite(anti.recentWindowDays) || anti.recentWindowDays <= 0)) {
-        errors.push("memoryDecay.antiDecay.recentWindowDays must be > 0.");
-      }
-    }
-  }
-  
-  return errors;
-}
-
-function getApiHostAndPort(): { host: string; port: number } {
-  const parsed = new URL(getBaseUrl());
-  const host = parsed.hostname || "127.0.0.1";
-  const port = Number(parsed.port || (parsed.protocol === "https:" ? 443 : 80));
-  return { host, port };
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
-
-function isPortListening(host: string, port: number, timeoutMs = 700): Promise<boolean> {
-  return new Promise(resolve => {
-    const socket = new net.Socket();
-    let settled = false;
-    const finalize = (value: boolean) => {
-      if (settled) return;
-      settled = true;
-      socket.destroy();
-      resolve(value);
-    };
-    socket.setTimeout(timeoutMs);
-    socket.once("connect", () => finalize(true));
-    socket.once("timeout", () => finalize(false));
-    socket.once("error", () => finalize(false));
-    socket.connect(port, host);
-  });
-}
-
-function writePythonPid(pid: number): void {
-  if (!pythonPidFilePath) return;
-  try {
-    fs.writeFileSync(pythonPidFilePath, String(pid), "utf-8");
-  } catch (e) {
-    logger.warn(`Failed to write Python pid file: ${e instanceof Error ? e.message : String(e)}`);
-  }
-}
-
-function clearPythonPidFile(): void {
-  if (!pythonPidFilePath) return;
-  try {
-    if (fs.existsSync(pythonPidFilePath)) {
-      fs.unlinkSync(pythonPidFilePath);
-    }
-  } catch (e) {
-    logger.warn(`Failed to clear Python pid file: ${e instanceof Error ? e.message : String(e)}`);
-  }
-}
-
-function readPythonPid(): number | null {
-  if (!pythonPidFilePath || !fs.existsSync(pythonPidFilePath)) return null;
-  try {
-    const raw = fs.readFileSync(pythonPidFilePath, "utf-8").trim();
-    const pid = Number(raw);
-    return Number.isInteger(pid) && pid > 0 ? pid : null;
-  } catch {
-    return null;
-  }
-}
-
-function killProcessByPid(pid: number): void {
-  if (!pid) return;
-  try {
-    if (process.platform === "win32") {
-      execSync(`taskkill /pid ${pid} /f /t`, { stdio: "ignore" });
-      return;
-    }
-    try {
-      process.kill(pid, "SIGTERM");
-    } catch {}
-    try {
-      process.kill(-pid, "SIGTERM");
-    } catch {}
-    setTimeout(() => {
-      try {
-        process.kill(pid, "SIGKILL");
-      } catch {}
-      try {
-        process.kill(-pid, "SIGKILL");
-      } catch {}
-    }, 2000);
-  } catch (e) {
-    logger.warn(`Failed to kill process ${pid}: ${e instanceof Error ? e.message : String(e)}`);
-  }
-}
-
-function freePortWithSystemTools(port: number): void {
-  try {
-    if (process.platform === "win32") {
-      const output = execSync(`netstat -ano | findstr :${port}`, { encoding: "utf-8", stdio: ["pipe", "pipe", "ignore"] });
-      const pids = output
-        .split(/\r?\n/)
-        .filter(line => line.includes("LISTENING"))
-        .map(line => {
-          const parts = line.trim().split(/\s+/);
-          return Number(parts[parts.length - 1]);
-        })
-        .filter(pid => Number.isInteger(pid) && pid > 0);
-      for (const pid of pids) {
-        killProcessByPid(pid);
-      }
-      return;
-    }
-    const output = execSync(`sh -lc "lsof -ti tcp:${port} 2>/dev/null || true"`, { encoding: "utf-8", stdio: ["pipe", "pipe", "ignore"] });
-    const pids = output
-      .split(/\r?\n/)
-      .map(line => Number(line.trim()))
-      .filter(pid => Number.isInteger(pid) && pid > 0);
-    for (const pid of pids) {
-      killProcessByPid(pid);
-    }
-  } catch {
-    // ignore
-  }
-}
-
-async function checkPortInUse(): Promise<boolean> {
-  const apiUrl = getBaseUrl();
-  try {
-    const response = await fetch(`${apiUrl}/health`, { signal: AbortSignal.timeout(1000) });
-    return response.ok;
-  } catch {
-    return false;
-  }
-}
-
-async function startPythonService(): Promise<void> {
-  if (pythonStartPromise) {
-    return pythonStartPromise;
-  }
-  pythonStartPromise = startPythonServiceInternal().finally(() => {
-    pythonStartPromise = null;
-  });
-  return pythonStartPromise;
-}
-
-async function startPythonServiceInternal(): Promise<void> {
-  if (!config) {
-    throw new Error("Configuration not loaded");
-  }
-  const projectRoot = findProjectRoot();
-  pythonPidFilePath = path.join(projectRoot, ".cortex-memory-python.pid");
-  const { host, port } = getApiHostAndPort();
-
-  const stalePid = readPythonPid();
-  if (stalePid && (!pythonProcess || pythonProcess.pid !== stalePid)) {
-    logger.info(`Found stale Python pid ${stalePid}, trying to stop it...`);
-    killProcessByPid(stalePid);
-    await sleep(800);
-    clearPythonPidFile();
-  }
-
-  const healthyRunning = await checkPortInUse();
-  if (healthyRunning) {
-    logger.info("Python service already running, shutting down old instance...");
-    await shutdownPythonApi();
-    await sleep(1000);
-  }
-
-  const occupied = await isPortListening(host, port);
-  if (occupied) {
-    logger.warn(`Port ${port} is still occupied after graceful shutdown, forcing cleanup...`);
-    freePortWithSystemTools(port);
-    await sleep(1000);
-  }
-  if (await isPortListening(host, port)) {
-    throw new Error(`Port ${port} is already in use by another process. Please stop that process and retry.`);
-  }
-
-  const venvDir = path.join(projectRoot, "venv");
-  
-  const pythonCmd = process.platform === "win32"
-    ? path.join(venvDir, "Scripts", "python.exe")
-    : path.join(venvDir, "bin", "python");
-
-  if (!fs.existsSync(pythonCmd)) {
-    throw new Error("Python environment not found. Please run 'npm install' first.");
-  }
-
-  const errors = validateConfig(config);
-  if (errors.length > 0) {
-    throw new Error(`Configuration errors:\n${errors.join("\n")}`);
-  }
-
-  logger.info("Starting Cortex Memory Python service...");
-
-  const env: Record<string, string> = {
-    ...getProcessEnvCopy(),
-    CORTEX_MEMORY_EMBEDDING_PROVIDER: config.embedding.provider,
-    CORTEX_MEMORY_EMBEDDING_MODEL: config.embedding.model,
-    CORTEX_MEMORY_LLM_PROVIDER: config.llm.provider,
-    CORTEX_MEMORY_LLM_MODEL: config.llm.model,
-    CORTEX_MEMORY_RERANKER_PROVIDER: config.reranker.provider || "",
-    CORTEX_MEMORY_RERANKER_MODEL: config.reranker.model,
-    CORTEX_MEMORY_DB_PATH: config.dbPath || path.join(
-      getHomeDir(),
-      ".openclaw", "agents", "main", "lancedb_store"
-    ),
-  };
-
-  if (config.embedding.apiKey) {
-    env.CORTEX_MEMORY_EMBEDDING_API_KEY = config.embedding.apiKey;
-  }
-  if (config.embedding.baseURL) {
-    env.CORTEX_MEMORY_EMBEDDING_BASE_URL = config.embedding.baseURL;
-  }
-  if (config.embedding.dimensions) {
-    env.CORTEX_MEMORY_EMBEDDING_DIMENSIONS = String(config.embedding.dimensions);
-  }
-  if (config.llm.apiKey) {
-    env.CORTEX_MEMORY_LLM_API_KEY = config.llm.apiKey;
-  }
-  if (config.llm.baseURL) {
-    env.CORTEX_MEMORY_LLM_BASE_URL = config.llm.baseURL;
-  }
-  if (config.reranker.apiKey) {
-    env.CORTEX_MEMORY_RERANKER_API_KEY = config.reranker.apiKey;
-  }
-  if (config.reranker.baseURL) {
-    env.CORTEX_MEMORY_RERANKER_ENDPOINT = config.reranker.baseURL;
-  }
-
-  return new Promise((resolve, reject) => {
-    pythonProcess = spawn(pythonCmd, ["-m", "api.server"], {
-      cwd: projectRoot,
-      detached: false,
-      windowsHide: true,
-      env: { ...env, PYTHONWARNINGS: "ignore::RuntimeWarning" },
-    });
-    if (pythonProcess.pid) {
-      writePythonPid(pythonProcess.pid);
-    }
-
-    let started = false;
-    let stderrBuffer = "";
-    let settled = false;
-    let startupTimeout: ReturnType<typeof setTimeout> | null = null;
-
-    const resolveOnce = () => {
-      if (settled) return;
-      settled = true;
-      started = true;
-      if (startupTimeout) {
-        clearTimeout(startupTimeout);
-        startupTimeout = null;
-      }
-      resolve();
-    };
-
-    const rejectOnce = (error: Error) => {
-      if (settled) return;
-      settled = true;
-      if (startupTimeout) {
-        clearTimeout(startupTimeout);
-        startupTimeout = null;
-      }
-      reject(error);
-    };
-
-    pythonProcess.stdout?.on("data", (data: Buffer) => {
-      const output = data.toString();
-      if (!output.toLowerCase().includes("key") && !output.toLowerCase().includes("token")) {
-        logger.info(`[Python] ${output.trim()}`);
-      }
-      if (output.includes("Cortex Memory API started") || output.includes("Application startup complete")) {
-        resolveOnce();
-      }
-    });
-
-    pythonProcess.stderr?.on("data", (data: Buffer) => {
-      const output = data.toString();
-      stderrBuffer += output;
-      if (!output.toLowerCase().includes("key") && !output.toLowerCase().includes("token")) {
-        logger.warn(`[Python] ${output.trim()}`);
-      }
-      if (
-        output.includes("Cortex Memory API started") ||
-        output.includes("Application startup complete") ||
-        output.includes("Uvicorn running on")
-      ) {
-        resolveOnce();
-      }
-    });
-
-    pythonProcess.on("error", (error: Error) => {
-      logger.error("Failed to start Python service:", error.message);
-      rejectOnce(error);
-    });
-
-    pythonProcess.on("exit", (code: number | null) => {
-      clearPythonPidFile();
-      pythonProcess = null;
-      if (!started && code !== 0 && !isShuttingDown) {
-        rejectOnce(new Error(`Python service exited with code ${code}. Stderr: ${stderrBuffer.slice(-500)}`));
-      }
-    });
-
-    startupTimeout = setTimeout(() => {
-      if (!started) {
-        const tail = stderrBuffer ? `\nLast stderr: ${stderrBuffer.slice(-500)}` : "";
-        killPythonProcess();
-        rejectOnce(new Error(`Timeout waiting for Python service to start (300s)${tail}`));
-      }
-    }, 300000);
-  });
-}
-
-async function shutdownPythonApi(): Promise<void> {
-  const apiUrl = getBaseUrl();
-  try {
-    await fetch(`${apiUrl}/shutdown`, { method: "POST", signal: AbortSignal.timeout(2000) });
-    await new Promise(resolve => setTimeout(resolve, 500));
-  } catch {
-    // ignore
-  }
-}
-
-function killPythonProcess(): void {
-  const directPid = pythonProcess?.pid ?? null;
-  const pidFromFile = readPythonPid();
-  const pid = directPid || pidFromFile;
-  if (!pid) return;
-  try {
-    killProcessByPid(pid);
-  } catch (e) {
-    const message = e instanceof Error ? e.message : String(e);
-    logger.warn(`Failed to kill Python process: ${message}`);
-  } finally {
-    pythonProcess = null;
-    clearPythonPidFile();
-  }
-}
-
-async function stopPythonServiceAsync(): Promise<void> {
-  if (pythonStartPromise) {
-    try {
-      await pythonStartPromise;
-    } catch {
-      // ignore
-    }
-  }
-  await shutdownPythonApi();
-  killPythonProcess();
-}
-
-function stopPythonService(): void {
-  stopPythonServiceAsync();
-}
-
-function getBaseUrl(): string {
-  return config?.apiUrl ?? "http://localhost:8765";
-}
-
-async function waitForService(maxAttempts = 30): Promise<void> {
-  const apiUrl = getBaseUrl();
-  for (let i = 0; i < maxAttempts; i++) {
-    try {
-      const response = await fetch(`${apiUrl}/health`, { signal: AbortSignal.timeout(1000) });
-      if (response.ok) return;
-    } catch {}
-    await new Promise(resolve => setTimeout(resolve, 1000));
-  }
-  throw new Error("Service failed to become ready");
-}
-
-function formatApiError(error: unknown): string {
-  const message = error instanceof Error ? error.message : String(error);
-  const lower = message.toLowerCase();
-  
-  if (lower.includes("econnrefused") || lower.includes("enotfound") || lower.includes("fetch failed")) {
-    const err = ERROR_CODES.CONNECTION_REFUSED;
-    return `${err.message} (${err.code}). ${err.suggestion}`;
-  }
-  if (lower.includes("abort") || lower.includes("timed out")) {
-    const err = ERROR_CODES.TIMEOUT;
-    return `${err.message} (${err.code}). ${err.suggestion}`;
-  }
-  if (lower.includes("404") || lower.includes("not found")) {
-    const err = ERROR_CODES.NOT_FOUND;
-    return `${err.message} (${err.code}). ${err.suggestion}`;
-  }
-  if (lower.includes("400") || lower.includes("invalid")) {
-    const err = ERROR_CODES.INVALID_INPUT;
-    return `${err.message} (${err.code}). ${err.suggestion}`;
-  }
-  
-  const err = ERROR_CODES.SERVICE_ERROR;
-  return `${err.message} (${err.code}). Details: ${message}`;
-}
-
-interface PendingRequest<T> {
-  promise: Promise<T>;
-}
-
-const pendingRequests: Map<string, PendingRequest<unknown>> = new Map();
-const requestDebounceMs = 100;
-
-function getRequestKey(endpoint: string, method: string, body?: unknown): string {
-  const bodyHash = body ? JSON.stringify(body).slice(0, 100) : "";
-  return `${method}:${endpoint}:${bodyHash}`;
-}
-
-async function apiCallWithRetry<T>(
-  endpoint: string,
-  method: "GET" | "POST" | "DELETE" | "PATCH" = "GET",
-  body?: unknown,
-  options?: {
-    maxRetries?: number;
-    baseDelay?: number;
-    timeout?: number;
-    skipDebounce?: boolean;
-  }
-): Promise<T> {
-  const { maxRetries = 3, baseDelay = 1000, timeout = 30000, skipDebounce = false } = options || {};
-  
-  if (!skipDebounce) {
-    const requestKey = getRequestKey(endpoint, method, body);
-    const pending = pendingRequests.get(requestKey);
-    if (pending) {
-      logger.debug(`Reusing pending request for ${endpoint}`);
-      return pending.promise as Promise<T>;
-    }
-
-    const requestPromise = apiCallInternal<T>(endpoint, method, body, maxRetries, baseDelay, timeout)
-      .finally(() => {
-        setTimeout(() => pendingRequests.delete(requestKey), requestDebounceMs);
-      });
-
-    pendingRequests.set(requestKey, {
-      promise: requestPromise
-    });
-
-    return await requestPromise;
-  }
-  
-  return apiCallInternal<T>(endpoint, method, body, maxRetries, baseDelay, timeout);
-}
-
-async function apiCallInternal<T>(
-  endpoint: string,
-  method: "GET" | "POST" | "DELETE" | "PATCH",
-  body: unknown,
-  maxRetries: number,
-  baseDelay: number,
-  timeout: number
-): Promise<T> {
-  let lastError: Error | null = null;
-  
-  for (let attempt = 0; attempt < maxRetries; attempt++) {
-    try {
-      return await apiCall<T>(endpoint, method, body, timeout);
-    } catch (error) {
-      lastError = error instanceof Error ? error : new Error(String(error));
-      const isRetryable = lastError.message.includes("E001") || 
-                          lastError.message.includes("E002") ||
-                          lastError.message.includes("timeout") ||
-                          lastError.message.includes("ECONNREFUSED") ||
-                          lastError.message.includes("ENOTFOUND");
-      
-      if (attempt < maxRetries - 1 && isRetryable) {
-        const delay = baseDelay * Math.pow(2, attempt);
-        logger.warn(`API call failed (attempt ${attempt + 1}/${maxRetries}), retrying in ${delay}ms: ${lastError.message.split(".")[0]}`);
-        await new Promise(resolve => setTimeout(resolve, delay));
-      }
-    }
-  }
-  
-  throw lastError;
-}
-
-async function apiCall<T>(
-  endpoint: string,
-  method: "GET" | "POST" | "DELETE" | "PATCH" = "GET",
-  body?: unknown,
-  timeout: number = 30000
-): Promise<T> {
-  const url = `${getBaseUrl()}${endpoint}`;
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), timeout);
-  const options: RequestInit = {
-    method,
-    headers: { "Content-Type": "application/json" },
-    signal: controller.signal,
-  };
-  if (body) options.body = JSON.stringify(body);
-
-  try {
-    const response = await fetch(url, options);
-    const text = await response.text();
-    if (!response.ok) {
-      try {
-        const errorData = JSON.parse(text);
-        throw new Error(errorData.error || errorData.detail || `HTTP ${response.status}`);
-      } catch {
-        throw new Error(`HTTP ${response.status}: ${text || response.statusText}`);
-      }
-    }
-    if (!text) return {} as T;
-    try { return JSON.parse(text) as T; } 
-    catch { throw new Error("Invalid JSON response"); }
-  } catch (error) {
-    throw new Error(formatApiError(error));
-  } finally {
-    clearTimeout(timeoutId);
-  }
-}
-
-async function searchMemoryWithFallback(args: { query: string; top_k?: number }, context: ToolContext): Promise<ToolResult> {
-  if (!args || !args.query) {
-    logger.error(`search_memory called with invalid args: ${JSON.stringify(args)}`);
-    return { success: false, error: ERROR_CODES.INVALID_INPUT.message + " Missing 'query' parameter.", errorCode: ERROR_CODES.INVALID_INPUT.code };
-  }
-  
-  if (!isEnabled) {
-    if (config?.fallbackToBuiltin && builtinMemory) {
-      logger.info("Using builtin memory (plugin disabled)");
-      try {
-        const results = await builtinMemory.search(args.query, args.top_k || 3);
-        return { success: true, data: results };
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        return { success: false, error: `Builtin memory error: ${message}` };
-      }
-    }
-    return { success: false, error: ERROR_CODES.PLUGIN_DISABLED.message, errorCode: ERROR_CODES.PLUGIN_DISABLED.code };
-  }
-  
-  try {
-    const result = await apiCallWithRetry<{ results: unknown[] }>("/search", "POST", {
-      query: args.query,
-      top_k: args.top_k || 3,
-    });
-    return { success: true, data: result.results };
-  } catch (error) {
-    const message = formatApiError(error);
-    logger.error(`search_memory failed: ${message}`);
-    return { success: false, error: message };
-  }
-}
-
-async function storeEventWithFallback(
-  args: {
-    summary: string;
-    entities?: Array<{ id?: string; name?: string; type?: string }>;
-    outcome?: string;
-    relations?: Array<{ source: string; target: string; type: string }>;
-  },
-  context: ToolContext
-): Promise<ToolResult> {
-  if (!isEnabled) {
-    if (config?.fallbackToBuiltin && builtinMemory) {
-      logger.info("Using builtin memory (plugin disabled)");
-      try {
-        const id = await builtinMemory.store(args.summary, { 
-          entities: args.entities, 
-          outcome: args.outcome,
-          relations: args.relations 
-        });
-        return { success: true, data: { event_id: id } };
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        return { success: false, error: `Builtin memory error: ${message}` };
-      }
-    }
-    return { success: false, error: ERROR_CODES.PLUGIN_DISABLED.message, errorCode: ERROR_CODES.PLUGIN_DISABLED.code };
-  }
-  
-  try {
-    const result = await apiCallWithRetry<{ event_id: string }>("/event", "POST", {
-      summary: args.summary,
-      entities: args.entities,
-      outcome: args.outcome,
-      relations: args.relations,
-    });
-    return { success: true, data: result };
-  } catch (error) {
-    const message = formatApiError(error);
-    logger.error(`store_event failed: ${message}`);
-    return { success: false, error: message };
-  }
-}
-
-async function queryGraph(args: { entity: string }, _context: ToolContext): Promise<ToolResult> {
-  if (!args || !args.entity) {
-    logger.error(`query_graph called with invalid args: ${JSON.stringify(args)}`);
-    return { success: false, error: ERROR_CODES.INVALID_INPUT.message + " Missing 'entity' parameter.", errorCode: ERROR_CODES.INVALID_INPUT.code };
-  }
-  
-  if (!isEnabled) {
-    return { success: false, error: ERROR_CODES.PLUGIN_DISABLED.message, errorCode: ERROR_CODES.PLUGIN_DISABLED.code };
-  }
-  
-  try {
-    const result = await apiCallWithRetry<{ graph: unknown }>("/graph/query", "POST", { entity: args.entity });
-    return { success: true, data: result.graph };
-  } catch (error) {
-    const message = formatApiError(error);
-    logger.error(`query_graph failed: ${message}`);
-    return { success: false, error: message };
-  }
-}
-
-async function getHotContext(args: { limit?: number }, _context: ToolContext): Promise<ToolResult> {
-  if (!isEnabled) {
-    return { success: false, error: ERROR_CODES.PLUGIN_DISABLED.message, errorCode: ERROR_CODES.PLUGIN_DISABLED.code };
-  }
-  
-  try {
-    const limit = typeof args.limit === "number" && args.limit > 0 ? Math.floor(args.limit) : 20;
-    const result = await apiCallWithRetry<{ context: unknown[] }>(`/hot-context?limit=${limit}`, "GET");
-    return { success: true, data: result.context };
-  } catch (error) {
-    const message = formatApiError(error);
-    logger.error(`get_hot_context failed: ${message}`);
-    return { success: false, error: message };
-  }
-}
-
-async function getAutoContext(args: { include_hot?: boolean }, context: ToolContext): Promise<ToolResult> {
-  if (!isEnabled) {
-    return { success: false, error: ERROR_CODES.PLUGIN_DISABLED.message, errorCode: ERROR_CODES.PLUGIN_DISABLED.code };
-  }
-  
-  const now = Date.now();
-  const result: {
-    auto_search?: {
-      query: string;
-      results: unknown[];
-      age_seconds: number;
-    };
-    hot_context?: unknown[];
-  } = {};
-  const sessionId = resolveSessionId(context);
-  
-  clearStaleAutoSearchCache(now);
-  const sessionCache = autoSearchCacheBySession.get(sessionId);
-  if (sessionCache) {
-    result.auto_search = {
-      query: sessionCache.query,
-      results: sessionCache.results,
-      age_seconds: Math.floor((now - sessionCache.timestamp) / 1000),
-    };
-  }
-  
-  if (args.include_hot !== false) {
-    try {
-      const hotResult = await apiCallWithRetry<{ context: unknown[] }>("/hot-context", "GET");
-      result.hot_context = hotResult.context;
-    } catch (error) {
-      logger.debug(`Failed to get hot context: ${formatApiError(error)}`);
-    }
-  }
-  
-  if (!result.auto_search && !result.hot_context) {
-    return { 
-      success: true, 
-      data: { 
-        message: "No session-scoped auto-search results cached and hot context unavailable",
-        suggestion: "Send a user message in this session or call get_hot_context."
-      } 
-    };
-  }
-  
-  return { success: true, data: result };
-}
-
-async function reflectMemory(_args: Record<string, unknown>, _context: ToolContext): Promise<ToolResult> {
-  if (!isEnabled) {
-    return { success: false, error: ERROR_CODES.PLUGIN_DISABLED.message, errorCode: ERROR_CODES.PLUGIN_DISABLED.code };
-  }
-  
-  try {
-    await apiCallWithRetry("/reflect", "POST", undefined, {
-      timeout: 120000,
-      maxRetries: 2,
-    });
-    return { success: true };
-  } catch (error) {
-    const message = formatApiError(error);
-    logger.error(`reflect_memory failed: ${message}`);
-    return { success: false, error: message };
-  }
-}
-
-async function syncMemory(_args: Record<string, unknown>, _context: ToolContext): Promise<ToolResult> {
-  if (!isEnabled) {
-    return { success: false, error: ERROR_CODES.PLUGIN_DISABLED.message, errorCode: ERROR_CODES.PLUGIN_DISABLED.code };
-  }
-  
-  try {
-    await apiCallWithRetry("/sync", "POST", undefined, {
-      timeout: 300000,
-      maxRetries: 2,
-    });
-    return { success: true };
-  } catch (error) {
-    const message = formatApiError(error);
-    logger.error(`sync_memory failed: ${message}`);
-    return { success: false, error: message };
-  }
-}
-
-async function promoteMemory(_args: Record<string, unknown>, _context: ToolContext): Promise<ToolResult> {
-  if (!isEnabled) {
-    return { success: false, error: ERROR_CODES.PLUGIN_DISABLED.message, errorCode: ERROR_CODES.PLUGIN_DISABLED.code };
-  }
-  
-  try {
-    await apiCallWithRetry("/promote", "POST", undefined, {
-      timeout: 120000,
-      maxRetries: 2,
-    });
-    return { success: true };
-  } catch (error) {
-    const message = formatApiError(error);
-    logger.error(`promote_memory failed: ${message}`);
-    return { success: false, error: message };
-  }
-}
-
-async function deleteMemory(args: { memory_id: string }, _context: ToolContext): Promise<ToolResult> {
-  if (!isEnabled) {
-    if (config?.fallbackToBuiltin && builtinMemory) {
-      try {
-        const success = await builtinMemory.delete(args.memory_id);
-        return { success };
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        return { success: false, error: `Builtin memory error: ${message}` };
-      }
-    }
-    return { success: false, error: ERROR_CODES.PLUGIN_DISABLED.message, errorCode: ERROR_CODES.PLUGIN_DISABLED.code };
-  }
-  
-  try {
-    await apiCallWithRetry(`/memory/${args.memory_id}`, "DELETE");
-    return { success: true };
-  } catch (error) {
-    const message = formatApiError(error);
-    logger.error(`delete_memory failed: ${message}`);
-    return { success: false, error: message };
-  }
-}
-
-async function updateMemory(args: { memory_id: string; text?: string; type?: string; weight?: number }, _context: ToolContext): Promise<ToolResult> {
-  if (!isEnabled) {
-    return { success: false, error: ERROR_CODES.PLUGIN_DISABLED.message, errorCode: ERROR_CODES.PLUGIN_DISABLED.code };
-  }
-  
-  try {
-    await apiCallWithRetry(`/memory/${args.memory_id}`, "PATCH", {
-      text: args.text,
-      type: args.type,
-      weight: args.weight,
-    });
-    return { success: true };
-  } catch (error) {
-    const message = formatApiError(error);
-    logger.error(`update_memory failed: ${message}`);
-    return { success: false, error: message };
-  }
-}
-
-async function cleanupMemories(args: { days_old?: number; memory_type?: string }, _context: ToolContext): Promise<ToolResult> {
-  if (!isEnabled) {
-    return { success: false, error: ERROR_CODES.PLUGIN_DISABLED.message, errorCode: ERROR_CODES.PLUGIN_DISABLED.code };
-  }
-  
-  try {
-    const result = await apiCallWithRetry<{ deleted_count: number }>("/cleanup", "POST", {
-      days_old: args.days_old || 90,
-      memory_type: args.memory_type,
-    });
-    return { success: true, data: { deletedCount: result.deleted_count } };
-  } catch (error) {
-    const message = formatApiError(error);
-    logger.error(`cleanup_memories failed: ${message}`);
-    return { success: false, error: message };
-  }
-}
-
-async function runDiagnostics(_args: Record<string, unknown>, _context: ToolContext): Promise<ToolResult> {
-  if (!isEnabled) {
-    return { 
-      success: true, 
-      data: { 
-        status: "disabled", 
-        message: "Cortex Memory plugin is disabled",
-        suggestion: "Enable the plugin using 'openclaw plugins enable cortex-memory'"
-      } 
-    };
-  }
-  
-  try {
-    const result = await apiCallWithRetry<{
-      status: string;
-      checks: Array<{ name: string; passed: boolean; message: string }>;
-      recommendations: string[];
-    }>("/doctor", "GET");
-    return { success: true, data: result };
-  } catch (error) {
-    const message = formatApiError(error);
-    logger.error(`diagnostics failed: ${message}`);
-    return { success: false, error: message };
-  }
-}
-
-async function getPluginStatus(_args: Record<string, unknown>, _context: ToolContext): Promise<ToolResult> {
-  return {
-    success: true,
-    data: {
-      enabled: isEnabled,
-      service_running: pythonProcess !== null,
-      fallback_enabled: config?.fallbackToBuiltin ?? true,
-      builtin_memory_available: builtinMemory !== null,
-      engine_mode: config?.engineMode ?? "python",
-    }
-  };
-}
-
-async function onMessagePythonHandler(payload: unknown, context: ToolContext): Promise<void> {
-  if (!isEnabled) return;
-  const normalized = normalizeIncomingMessage(payload);
-  if (!normalized) return;
-  const { text, role, source } = normalized;
-  const sessionId = resolveSessionId(context, payload);
-  
-  try {
-    const writeResult = await apiCallWithRetry<{ status?: string; memory_id?: string; reason?: string; error_code?: string }>("/write", "POST", { 
-      text, 
-      source,
-      role,
-      session_id: sessionId
-    });
-    if (writeResult.status === "ok") {
-      logger.info(`Stored ${role} message for session ${sessionId}`);
-    } else {
-      logger.debug(`Write skipped for session ${sessionId}: ${writeResult.reason || writeResult.status || "unknown"}`);
-    }
-  } catch (error) {
-    logger.warn(`Failed to store message: ${formatApiError(error)}`);
-  }
-  
-  if (role === "user" && text.length > 5) {
-    try {
-      const searchResult = await apiCallWithRetry<{ results: unknown[]; skipped?: boolean; reason?: string }>("/search", "POST", {
-        query: text,
-        top_k: 3,
-        session_id: sessionId,
-      });
-      
-      if (searchResult.results && searchResult.results.length > 0) {
-        setSessionAutoSearchCache(sessionId, text, searchResult.results);
-        logger.info(`Auto-search cached ${searchResult.results.length} results for context`);
-      } else if (searchResult.skipped) {
-        logger.debug(`Auto-search skipped for session ${sessionId}: ${searchResult.reason || "query filtered"}`);
-      }
-    } catch (error) {
-      logger.debug(`Auto-search skipped: ${formatApiError(error)}`);
-    }
-  }
-}
-
-async function onSessionEndPythonHandler(payload: unknown, context: ToolContext): Promise<void> {
-  if (!isEnabled) return;
-  const sessionId = resolveSessionId(context, payload);
-  
-  try {
-    const endResult = await apiCallWithRetry<{ events_generated: number }>(
-      "/session-end", 
-      "POST",
-      {
-        session_id: sessionId,
-        sync_records: config?.autoSync ?? true,
-      }
-    );
-    logger.info(`Session ${sessionId} ended, generated ${endResult.events_generated} events`);
-  } catch (error) {
-    logger.warn(`Failed to end session: ${formatApiError(error)}`);
-  }
-}
-
-async function onTimerPythonHandler(payload: unknown, _context: ToolContext): Promise<void> {
-  if (!isEnabled) return;
-  
-  const data = payload as { action?: string };
-  const action = data.action;
-  try {
-    if (action === "sync") {
-      await apiCallWithRetry("/sync", "POST", undefined, {
-        timeout: 300000,
-        maxRetries: 2,
-      });
-      logger.info("Scheduled sync complete");
-    } else if (action === "reflect" || (config?.autoReflect && !action)) {
-      await apiCallWithRetry("/reflect", "POST", undefined, {
-        timeout: 120000,
-        maxRetries: 2,
-      });
-      logger.info("Scheduled reflection complete");
-    } else if (action === "promote") {
-      await apiCallWithRetry("/promote", "POST", undefined, {
-        timeout: 120000,
-        maxRetries: 2,
-      });
-      logger.info("Scheduled promotion complete");
-    }
-  } catch (error) {
-    logger.warn(`Timer action failed: ${formatApiError(error)}`);
-  }
+function logLifecycle(event: string, data?: Record<string, unknown>): void {
+  logger.info(`[Lifecycle] ${event}${data ? `: ${JSON.stringify(sanitizeForLogging(data))}` : ""}`);
 }
 
 async function onMessageHandler(payload: unknown, context: ToolContext): Promise<void> {
@@ -1886,7 +792,7 @@ function registerTools(): void {
       },
       execute: async (params: { args?: Record<string, unknown>; context: ToolContext }) => {
         const args = params.args || params;
-        return resolveEngine().storeEvent(args as Parameters<typeof storeEventWithFallback>[0], params.context);
+        return resolveEngine().storeEvent(args as { summary: string; entities?: Array<{ id?: string; name?: string; type?: string }>; outcome?: string; relations?: Array<{ source: string; target: string; type: string }> }, params.context);
       },
     },
     {
@@ -2209,28 +1115,16 @@ function setupProcessHandlers(): void {
     isShuttingDown = true;
     logger.info(`Received ${signal}, shutting down...`);
     stopConfigWatcher();
-    if (!shouldUsePythonRuntime()) {
-      process.exit(0);
-      return;
-    }
-    shutdownPythonApi().then(() => {
-      killPythonProcess();
-      process.exit(0);
-    }).catch(() => {
-      killPythonProcess();
-      process.exit(0);
-    });
+    process.exit(0);
   };
 
   process.on("exit", () => {
-    killPythonProcess();
     stopConfigWatcher();
   });
   process.on("SIGINT", () => gracefulShutdown("SIGINT"));
   process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));
   process.on("uncaughtException", (err) => {
     logger.error("Uncaught exception:", err.message);
-    killPythonProcess();
     stopConfigWatcher();
     process.exit(1);
   });
@@ -2246,11 +1140,6 @@ export async function enable(): Promise<void> {
   logLifecycle("enable_start");
   
   try {
-    unregisterFallbackTools();
-    if (shouldUsePythonRuntime()) {
-      await startPythonService();
-      await waitForService();
-    }
     isEnabled = true;
     registerTools();
     registerHooks();
@@ -2276,91 +1165,17 @@ export async function disable(): Promise<void> {
   
   unregisterHooks();
   unregisterTools();
-  unregisterFallbackTools();
   stopAutoReflectScheduler();
-  if (shouldUsePythonRuntime()) {
-    await stopPythonServiceAsync();
-  }
   isEnabled = false;
   memoryEngine = null;
   
-  if (config?.fallbackToBuiltin && builtinMemory) {
-    logger.info("Falling back to OpenClaw builtin memory system");
-    registerFallbackTools();
-    logLifecycle("fallback_enabled", { fallbackTools: registeredFallbackTools.length });
-  }
-  
   logger.info("Cortex Memory plugin disabled successfully");
-  logLifecycle("disable_success", { fallbackEnabled: registeredFallbackTools.length > 0 });
+  logLifecycle("disable_success");
 }
 
-function registerFallbackTools(): void {
-  if (!api || !builtinMemory) return;
-  
-  registerToolCompat({
-    name: "search_memory",
-    description: "Search memory (using builtin system - Cortex Memory disabled)",
-    parameters: {
-      type: "object",
-      properties: {
-        query: { type: "string", description: "Search query" },
-        top_k: { type: "integer", description: "Number of results" },
-      },
-      required: ["query"],
-      additionalProperties: false,
-    },
-    execute: async ({ args, context }: { args?: Record<string, unknown>; context: ToolContext }) =>
-      searchMemoryWithFallback((args || {}) as { query: string; top_k?: number }, context),
-  });
-  registeredFallbackTools.push("search_memory");
-  
-  registerToolCompat({
-    name: "store_event",
-    description: "Store event (using builtin system - Cortex Memory disabled)",
-    parameters: {
-      type: "object",
-      properties: {
-        summary: { type: "string", description: "Event summary" },
-      },
-      required: ["summary"],
-      additionalProperties: false,
-    },
-    execute: async ({ args, context }: { args?: Record<string, unknown>; context: ToolContext }) =>
-      storeEventWithFallback((args || {}) as { summary: string }, context),
-  });
-  registeredFallbackTools.push("store_event");
-  
-  registerToolCompat({
-    name: "cortex_memory_status",
-    description: "Get the current status of the Cortex Memory plugin",
-    parameters: { 
-      type: "object", 
-      properties: {},
-      required: [],
-      additionalProperties: false,
-    },
-    execute: async ({ args, context }: { args?: Record<string, unknown>; context: ToolContext }) =>
-      getPluginStatus(args || {}, context),
-  });
-  registeredFallbackTools.push("cortex_memory_status");
-}
-
-function unregisterFallbackTools(): void {
-  if (!api || !api.unregisterTool) return;
-  for (const name of registeredFallbackTools) {
-    try {
-      api.unregisterTool(name);
-    } catch (e) {
-      logger.warn(`Failed to unregister fallback tool ${name}: ${e instanceof Error ? e.message : String(e)}`);
-    }
-  }
-  registeredFallbackTools = [];
-}
-
-export function getStatus(): { enabled: boolean; serviceRunning: boolean } {
+export function getStatus(): { enabled: boolean } {
   return {
-    enabled: isEnabled,
-    serviceRunning: pythonProcess !== null
+    enabled: isEnabled
   };
 }
 
@@ -2373,13 +1188,6 @@ export async function unregister(): Promise<void> {
   
   unregisterHooks();
   unregisterTools();
-  unregisterFallbackTools();
-  
-  if (shouldUsePythonRuntime()) {
-    await stopPythonServiceAsync();
-  } else {
-    killPythonProcess();
-  }
   
   isEnabled = false;
   isInitializing = false;
@@ -2387,13 +1195,10 @@ export async function unregister(): Promise<void> {
   api = null;
   config = null;
   autoSearchCacheBySession.clear();
-  builtinMemory = null;
   memoryEngine = null;
   registeredTools = [];
   registeredHooks = [];
-  registeredFallbackTools = [];
   registeredHookHandlers.clear();
-  stopAutoReflectScheduler();
   configPath = null;
   
   logger.info("Cortex Memory plugin unregistered successfully");
@@ -2472,29 +1277,14 @@ export function register(pluginApi: OpenClawPluginApi, userConfig?: Partial<Cort
       },
     },
     enabled: effectiveConfig.enabled ?? defaultConfig.enabled,
-    fallbackToBuiltin: effectiveConfig.fallbackToBuiltin ?? defaultConfig.fallbackToBuiltin,
-    apiUrl: effectiveConfig.apiUrl ?? "http://localhost:8765",
-    engineMode: "ts",
   } as CortexMemoryConfig;
   memoryEngine = null;
-  
-  if (api.getBuiltinMemory) {
-    try {
-      builtinMemory = api.getBuiltinMemory();
-      logger.info("OpenClaw builtin memory system available for fallback");
-    } catch (e) {
-      logger.warn(`Failed to get builtin memory: ${e instanceof Error ? e.message : String(e)}`);
-      builtinMemory = null;
-    }
-  }
-  
+
   const safeConfig = sanitizeForLogging({
     embedding: { provider: config.embedding.provider, model: config.embedding.model },
     llm: { provider: config.llm.provider, model: config.llm.model },
     reranker: { model: config.reranker.model },
     enabled: config.enabled,
-    fallbackToBuiltin: config.fallbackToBuiltin,
-    engineMode: config.engineMode,
   });
 
   checkOpenClawVersion().catch(e => logger.warn(`Version check failed: ${e}`));
@@ -2515,39 +1305,12 @@ export function register(pluginApi: OpenClawPluginApi, userConfig?: Partial<Cort
   logger.info("Cortex Memory plugin registered successfully");
   logger.info(`Cortex Memory engine mode: ${resolveEngine().mode}`);
   logLifecycle("register_success", {
-    engineMode: config.engineMode,
     enabled: isEnabled,
-    hasBuiltinFallback: Boolean(builtinMemory),
   });
 
   if (isEnabled) {
     registerTools();
     registerHooks();
     startAutoReflectScheduler();
-    initializeAsync().catch(error => {
-      const message = error instanceof Error ? error.message : String(error);
-      logger.error(`Failed to initialize Cortex Memory: ${message}`);
-      
-      if (config?.fallbackToBuiltin && builtinMemory) {
-        unregisterHooks();
-        unregisterTools();
-        logger.info("Falling back to builtin memory");
-        isEnabled = false;
-        registerFallbackTools();
-        logLifecycle("fallback_after_init_error", { fallbackTools: registeredFallbackTools.length, error: message });
-      }
-    });
-  } else if (config?.fallbackToBuiltin && builtinMemory) {
-    registerFallbackTools();
-    logLifecycle("fallback_registered_on_start", { fallbackTools: registeredFallbackTools.length });
   }
-}
-
-async function initializeAsync(): Promise<void> {
-  if (!shouldUsePythonRuntime()) {
-    return;
-  }
-  await startPythonService();
-  await waitForService();
-  logger.info("Cortex Memory Python service started successfully");
 }
