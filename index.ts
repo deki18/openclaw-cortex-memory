@@ -594,8 +594,8 @@ function normalizeIncomingMessage(payload: unknown): { text: string; role: strin
   return { text, role, source };
 }
 
-function resolveSessionId(context: ToolContext, payload?: unknown): string {
-  const fromContext = typeof context.sessionId === "string" ? context.sessionId.trim() : "";
+function resolveSessionId(context?: Partial<ToolContext> | null, payload?: unknown): string {
+  const fromContext = typeof context?.sessionId === "string" ? context.sessionId.trim() : "";
   if (fromContext) return fromContext;
   const data = asRecord(payload);
   const dataChat = data ? asRecord(data.chat) : null;
@@ -626,7 +626,7 @@ function resolveSessionId(context: ToolContext, payload?: unknown): string {
     updateChat?.id,
   ]);
   if (chatId) return `chat:${chatId}`;
-  return `fallback:${context.workspaceId || "default"}:${context.agentId || "agent"}`;
+  return `fallback:${context?.workspaceId || "default"}:${context?.agentId || "agent"}`;
 }
 
 function compareVersions(a: string, b: string): number {
@@ -2092,31 +2092,50 @@ function sanitizeToolParametersSchema(schema: Record<string, unknown>): Record<s
 
 function registerToolCompat(tool: RegisteredToolDefinition): void {
   if (!api) return;
-  const execute = async (params: { args?: Record<string, unknown>; context: ToolContext }) =>
-    tool.execute({
-      args: params?.args || {},
-      context: params.context,
-    });
-  const handler = async (...params: unknown[]) => {
-    const first = params[0] as any;
-    const second = params[1] as any;
-    if (first && typeof first === "object" && "context" in first) {
-      return execute({
-        args: (first.args as Record<string, unknown>) || {},
-        context: first.context as ToolContext,
-      });
+  const normalizeContext = (value: unknown): ToolContext => {
+    const contextObj = asRecord(value) || {};
+    return {
+      agentId: firstString([contextObj.agentId, contextObj.agent_id]) || "unknown-agent",
+      workspaceId: firstString([contextObj.workspaceId, contextObj.workspace_id]) || "default",
+      sessionId: firstString([contextObj.sessionId, contextObj.session_id]) || undefined,
+    };
+  };
+  const normalizeInvocation = (first: unknown, second?: unknown): { args: Record<string, unknown>; context: ToolContext } => {
+    const firstObj = asRecord(first);
+    if (firstObj && ("context" in firstObj || "args" in firstObj)) {
+      const explicitArgs = asRecord(firstObj.args);
+      if (explicitArgs) {
+        return {
+          args: explicitArgs,
+          context: normalizeContext(firstObj.context),
+        };
+      }
+      const directArgs = { ...firstObj };
+      delete directArgs.context;
+      delete directArgs.args;
+      return {
+        args: directArgs,
+        context: normalizeContext(firstObj.context),
+      };
     }
-    return execute({
-      args: (first as Record<string, unknown>) || {},
-      context: (second || {}) as ToolContext,
+    return {
+      args: firstObj || {},
+      context: normalizeContext(second),
+    };
+  };
+  const invoke = async (...params: unknown[]) => {
+    const normalized = normalizeInvocation(params[0], params[1]);
+    return tool.execute({
+      args: normalized.args,
+      context: normalized.context,
     });
   };
   api.registerTool({
     name: tool.name,
     description: tool.description,
     parameters: sanitizeToolParametersSchema(tool.parameters),
-    execute,
-    handler,
+    execute: invoke,
+    handler: invoke,
   });
 }
 

@@ -1197,15 +1197,33 @@ export function createTsEngine(deps: TsEngineDeps): MemoryEngine {
   }
 
   async function searchMemory(args: SearchMemoryArgs, context: ToolContext): Promise<ToolResult> {
-    if (!args || !args.query) {
+    const argsRecord = asRecord(args) || {};
+    const argsInput = asRecord(argsRecord.input);
+    const queryCandidate = [
+      typeof args.query === "string" ? args.query : "",
+      typeof argsRecord.query === "string" ? String(argsRecord.query) : "",
+      typeof argsRecord.q === "string" ? String(argsRecord.q) : "",
+      typeof argsRecord.keyword === "string" ? String(argsRecord.keyword) : "",
+      typeof argsInput?.query === "string" ? String(argsInput.query) : "",
+      typeof argsInput?.q === "string" ? String(argsInput.q) : "",
+    ].find(item => item.trim());
+    const query = queryCandidate ? queryCandidate.trim() : "";
+    if (!query) {
       return {
         success: false,
         error: "Invalid input provided. Missing 'query' parameter.",
       };
     }
+    const topKRaw = [
+      typeof args.top_k === "number" ? args.top_k : undefined,
+      typeof argsRecord.top_k === "number" ? Number(argsRecord.top_k) : undefined,
+      typeof argsRecord.topK === "number" ? Number(argsRecord.topK) : undefined,
+      typeof argsInput?.top_k === "number" ? Number(argsInput.top_k) : undefined,
+      typeof argsInput?.topK === "number" ? Number(argsInput.topK) : undefined,
+    ].find(value => typeof value === "number" && Number.isFinite(value));
     const result = await deps.readStore.searchMemory({
-      query: args.query,
-      topK: typeof args.top_k === "number" && args.top_k > 0 ? Math.floor(args.top_k) : 3,
+      query,
+      topK: typeof topKRaw === "number" && topKRaw > 0 ? Math.floor(topKRaw) : 3,
     });
     return { success: true, data: result.results };
   }
@@ -1217,10 +1235,19 @@ export function createTsEngine(deps: TsEngineDeps): MemoryEngine {
   }
 
   async function getAutoContext(args: GetAutoContextArgs, context: ToolContext): Promise<ToolResult> {
-    const sessionId = deps.resolveSessionId(context);
+    const argsRecord = asRecord(args) || {};
+    const argsInput = asRecord(argsRecord.input);
+    const includeHotRaw = [
+      typeof args.include_hot === "boolean" ? args.include_hot : undefined,
+      typeof argsRecord.include_hot === "boolean" ? Boolean(argsRecord.include_hot) : undefined,
+      typeof argsRecord.includeHot === "boolean" ? Boolean(argsRecord.includeHot) : undefined,
+      typeof argsInput?.include_hot === "boolean" ? Boolean(argsInput.include_hot) : undefined,
+      typeof argsInput?.includeHot === "boolean" ? Boolean(argsInput.includeHot) : undefined,
+    ].find(value => typeof value === "boolean");
+    const sessionId = deps.resolveSessionId((context || {}) as ToolContext);
     const cached = deps.getCachedAutoSearch(sessionId);
     const result = await deps.readStore.getAutoContext({
-      includeHot: args.include_hot !== false,
+      includeHot: includeHotRaw !== false,
       sessionId,
       cachedAutoSearch: cached ?? undefined,
     });
