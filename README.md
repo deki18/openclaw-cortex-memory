@@ -66,7 +66,7 @@ openclaw plugins enable openclaw-cortex-memory
 **本地包安装方式（当 ClawHub/npm 解析受网络影响时）:**
 
 ```bash
-curl -L -o /tmp/cortex.tgz https://registry.npmjs.org/openclaw-cortex-memory/-/openclaw-cortex-memory-0.1.0-Alpha.16.tgz
+curl -L -o /tmp/cortex.tgz https://registry.npmjs.org/openclaw-cortex-memory/-/openclaw-cortex-memory-0.1.0-Alpha.17.tgz
 cd ~/openclaw
 openclaw plugins install /tmp/cortex.tgz
 openclaw plugins enable openclaw-cortex-memory

@@ -1032,10 +1032,12 @@ function registerToolCompat(tool: RegisteredToolDefinition): void {
     };
   };
   const normalizeInvocation = (first: unknown, second?: unknown): { args: Record<string, unknown>; context: ToolContext } => {
+    logger.info(`normalizeInvocation called with first=${JSON.stringify(first)}, second=${JSON.stringify(second)}`);
     const firstObj = asRecord(first);
     if (firstObj && ("context" in firstObj || "args" in firstObj)) {
       const explicitArgs = asRecord(firstObj.args);
       if (explicitArgs) {
+        logger.info(`normalizeInvocation: found explicit args in firstObj.args: ${JSON.stringify(explicitArgs)}`);
         return {
           args: explicitArgs,
           context: normalizeContext(firstObj.context),
@@ -1044,18 +1046,22 @@ function registerToolCompat(tool: RegisteredToolDefinition): void {
       const directArgs = { ...firstObj };
       delete directArgs.context;
       delete directArgs.args;
+      logger.info(`normalizeInvocation: using directArgs from firstObj: ${JSON.stringify(directArgs)}`);
       return {
         args: directArgs,
         context: normalizeContext(firstObj.context),
       };
     }
+    logger.info(`normalizeInvocation: using firstObj as args: ${JSON.stringify(firstObj)}`);
     return {
       args: firstObj || {},
       context: normalizeContext(second),
     };
   };
   const invoke = async (...params: unknown[]) => {
+    logger.info(`invoke called for tool ${tool.name} with params: ${JSON.stringify(params)}`);
     const normalized = normalizeInvocation(params[0], params[1]);
+    logger.info(`invoke: normalized args=${JSON.stringify(normalized.args)}, context=${JSON.stringify(normalized.context)}`);
     return tool.execute({
       args: normalized.args,
       context: normalized.context,
