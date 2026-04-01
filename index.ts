@@ -1031,9 +1031,18 @@ function registerToolCompat(tool: RegisteredToolDefinition): void {
       sessionId: firstString([contextObj.sessionId, contextObj.session_id]) || undefined,
     };
   };
-  const normalizeInvocation = (first: unknown, second?: unknown): { args: Record<string, unknown>; context: ToolContext } => {
-    logger.info(`normalizeInvocation called with first=${JSON.stringify(first)}, second=${JSON.stringify(second)}`);
+  const normalizeInvocation = (...params: unknown[]): { args: Record<string, unknown>; context: ToolContext } => {
+    logger.info(`normalizeInvocation called with params: ${JSON.stringify(params)}`);
+    
+    const first = params[0];
+    const second = params[1];
+    const third = params[2];
+    const fourth = params[3];
+    
     const firstObj = asRecord(first);
+    const secondObj = asRecord(second);
+    const thirdObj = asRecord(third);
+    
     if (firstObj && ("context" in firstObj || "args" in firstObj)) {
       const explicitArgs = asRecord(firstObj.args);
       if (explicitArgs) {
@@ -1052,6 +1061,23 @@ function registerToolCompat(tool: RegisteredToolDefinition): void {
         context: normalizeContext(firstObj.context),
       };
     }
+    
+    if (typeof first === "string" && secondObj) {
+      logger.info(`normalizeInvocation: first is string (tool call ID), second is args: ${JSON.stringify(secondObj)}`);
+      return {
+        args: secondObj,
+        context: normalizeContext(third),
+      };
+    }
+    
+    if (secondObj && Object.keys(secondObj).length > 0) {
+      logger.info(`normalizeInvocation: using second as args: ${JSON.stringify(secondObj)}`);
+      return {
+        args: secondObj,
+        context: normalizeContext(third),
+      };
+    }
+    
     logger.info(`normalizeInvocation: using firstObj as args: ${JSON.stringify(firstObj)}`);
     return {
       args: firstObj || {},
@@ -1060,7 +1086,7 @@ function registerToolCompat(tool: RegisteredToolDefinition): void {
   };
   const invoke = async (...params: unknown[]) => {
     logger.info(`invoke called for tool ${tool.name} with params: ${JSON.stringify(params)}`);
-    const normalized = normalizeInvocation(params[0], params[1]);
+    const normalized = normalizeInvocation(...params);
     logger.info(`invoke: normalized args=${JSON.stringify(normalized.args)}, context=${JSON.stringify(normalized.context)}`);
     return tool.execute({
       args: normalized.args,
