@@ -633,6 +633,20 @@ function findOpenClawConfig(): string | null {
   if (explicitPath && fs.existsSync(explicitPath)) {
     return explicitPath;
   }
+  const stateDir = getEnvValue("OPENCLAW_STATE_DIR");
+  if (stateDir) {
+    const stateConfig = path.join(stateDir, "openclaw.json");
+    if (fs.existsSync(stateConfig)) {
+      return stateConfig;
+    }
+  }
+  const basePath = getEnvValue("OPENCLAW_BASE_PATH");
+  if (basePath) {
+    const baseConfig = path.join(basePath, "openclaw.json");
+    if (fs.existsSync(baseConfig)) {
+      return baseConfig;
+    }
+  }
   const home = getHomeDir();
   const candidates = [
     path.join(home, ".openclaw", "openclaw.json"),
