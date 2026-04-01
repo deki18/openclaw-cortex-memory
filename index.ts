@@ -1034,33 +1034,42 @@ function registerToolCompat(tool: RegisteredToolDefinition): void {
   const normalizeInvocation = (...params: unknown[]): { args: Record<string, unknown>; context: ToolContext } => {
     logger.info(`normalizeInvocation called with params: ${JSON.stringify(params)}`);
     
-    const first = params[0];
-    const second = params[1];
-    const third = params[2];
-    const fourth = params[3];
-    
-    const firstObj = asRecord(first);
-    const secondObj = asRecord(second);
-    const thirdObj = asRecord(third);
-    
-    if (firstObj && ("context" in firstObj || "args" in firstObj)) {
-      const explicitArgs = asRecord(firstObj.args);
-      if (explicitArgs) {
-        logger.info(`normalizeInvocation: found explicit args in firstObj.args: ${JSON.stringify(explicitArgs)}`);
+    if (params.length === 1) {
+      const first = params[0];
+      const firstObj = asRecord(first);
+      if (firstObj && ("context" in firstObj || "args" in firstObj)) {
+        const explicitArgs = asRecord(firstObj.args);
+        if (explicitArgs) {
+          logger.info(`normalizeInvocation: single param with explicit args: ${JSON.stringify(explicitArgs)}`);
+          return {
+            args: explicitArgs,
+            context: normalizeContext(firstObj.context),
+          };
+        }
+        const directArgs = { ...firstObj };
+        delete directArgs.context;
+        delete directArgs.args;
+        logger.info(`normalizeInvocation: single param with direct args: ${JSON.stringify(directArgs)}`);
         return {
-          args: explicitArgs,
+          args: directArgs,
           context: normalizeContext(firstObj.context),
         };
       }
-      const directArgs = { ...firstObj };
-      delete directArgs.context;
-      delete directArgs.args;
-      logger.info(`normalizeInvocation: using directArgs from firstObj: ${JSON.stringify(directArgs)}`);
-      return {
-        args: directArgs,
-        context: normalizeContext(firstObj.context),
-      };
+      if (firstObj) {
+        logger.info(`normalizeInvocation: single param as args: ${JSON.stringify(firstObj)}`);
+        return {
+          args: firstObj,
+          context: normalizeContext(undefined),
+        };
+      }
     }
+    
+    const first = params[0];
+    const second = params[1];
+    const third = params[2];
+    
+    const firstObj = asRecord(first);
+    const secondObj = asRecord(second);
     
     if (typeof first === "string" && secondObj) {
       logger.info(`normalizeInvocation: first is string (tool call ID), second is args: ${JSON.stringify(secondObj)}`);
@@ -1070,15 +1079,34 @@ function registerToolCompat(tool: RegisteredToolDefinition): void {
       };
     }
     
-    if (secondObj && Object.keys(secondObj).length > 0) {
-      logger.info(`normalizeInvocation: using second as args: ${JSON.stringify(secondObj)}`);
+    if (firstObj && ("context" in firstObj || "args" in firstObj)) {
+      const explicitArgs = asRecord(firstObj.args);
+      if (explicitArgs) {
+        logger.info(`normalizeInvocation: first has explicit args: ${JSON.stringify(explicitArgs)}`);
+        return {
+          args: explicitArgs,
+          context: normalizeContext(firstObj.context),
+        };
+      }
+      const directArgs = { ...firstObj };
+      delete directArgs.context;
+      delete directArgs.args;
+      logger.info(`normalizeInvocation: first has direct args: ${JSON.stringify(directArgs)}`);
       return {
-        args: secondObj,
-        context: normalizeContext(third),
+        args: directArgs,
+        context: normalizeContext(firstObj.context),
       };
     }
     
-    logger.info(`normalizeInvocation: using firstObj as args: ${JSON.stringify(firstObj)}`);
+    if (firstObj && Object.keys(firstObj).length > 0) {
+      logger.info(`normalizeInvocation: first is args, second is context: ${JSON.stringify(firstObj)}`);
+      return {
+        args: firstObj,
+        context: normalizeContext(second),
+      };
+    }
+    
+    logger.info(`normalizeInvocation: fallback to firstObj as args: ${JSON.stringify(firstObj)}`);
     return {
       args: firstObj || {},
       context: normalizeContext(second),
