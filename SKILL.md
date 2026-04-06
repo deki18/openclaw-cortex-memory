@@ -65,6 +65,12 @@ metadata:
 先用最小配置跑通：`embedding`、`llm`、`reranker` + `autoSync`。
 高级项（`readFusion`、`memoryDecay`、`vectorChunking`、`writePolicy`、`readTuning`）都有默认值，不需要一开始就调整。
 
+## 安全与端点声明
+
+- 本插件需要外部端点：`/embeddings`、`/chat/completions`、`/rerank`
+- 凭证来源：环境变量或插件配置中的 `*.apiKey`
+- 仅发送推理所需文本片段，不主动上传本地配置文件全集或环境变量全集
+
 ## 关键事实
 
 - `backfill_embeddings` 已实现且已注册。

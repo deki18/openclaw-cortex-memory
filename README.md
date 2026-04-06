@@ -138,6 +138,32 @@ openclaw gateway restart
 }
 ```
 
+## 外部端点与凭证声明（审查说明）
+
+本插件是本地长期记忆系统，但以下能力依赖用户自配置的外部模型端点：
+
+- `embedding`：向量化（`/embeddings`）
+- `llm`：写入门控、规则反思、读融合（`/chat/completions`）
+- `reranker`：候选重排序（`/rerank`）
+
+对应凭证要求：
+
+- 环境变量（可选）：`EMBEDDING_API_KEY`、`LLM_API_KEY`、`RERANKER_API_KEY`
+- 插件配置（常用）：`embedding.apiKey`、`llm.apiKey`、`reranker.apiKey`
+- 端点配置：`embedding.baseURL`、`llm.baseURL`、`reranker.baseURL`
+
+### 网络发送的数据边界
+
+- 会发送：用于模型推理的文本片段（如 query、候选摘要、转写片段、待向量化文本）
+- 不会主动发送：本地配置文件原文、系统环境变量全集、插件状态文件全集
+- 凭证使用方式：仅作为 `Authorization: Bearer` 请求头调用你配置的端点
+
+### 风险与建议
+
+- 你应只配置可信模型网关，密钥权限最小化（建议专用 key）
+- 生产环境建议启用网关审计与请求日志脱敏
+- 如不希望联网推理，不要配置外部端点/密钥（相关能力将降级或跳过）
+
 <details>
 <summary>高级配置（默认已内置，不懂可以不改）</summary>
 

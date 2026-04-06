@@ -63,6 +63,28 @@
       "message_received",
       "session_end"
     ],
+    "requires": {
+      "credentials": true,
+      "network": true,
+      "env": [
+        "EMBEDDING_API_KEY",
+        "LLM_API_KEY",
+        "RERANKER_API_KEY"
+      ],
+      "config": [
+        "embedding.apiKey",
+        "llm.apiKey",
+        "reranker.apiKey",
+        "embedding.baseURL",
+        "llm.baseURL",
+        "reranker.baseURL"
+      ],
+      "externalEndpoints": [
+        "embedding API endpoint (OpenAI-compatible /embeddings)",
+        "LLM API endpoint (OpenAI-compatible /chat/completions)",
+        "reranker API endpoint (/rerank)"
+      ]
+    },
     "build": {
       "openclawVersion": "2026.4.5",
       "pluginSdkVersion": "2026.4.5"

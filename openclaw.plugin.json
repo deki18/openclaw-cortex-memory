@@ -18,6 +18,27 @@
     "channels": false,
     "memory": true
   },
+  "runtimeRequirements": {
+    "requiresCredentials": true,
+    "requiresNetwork": true,
+    "credentialSources": {
+      "env": [
+        "EMBEDDING_API_KEY",
+        "LLM_API_KEY",
+        "RERANKER_API_KEY"
+      ],
+      "pluginConfig": [
+        "embedding.apiKey",
+        "llm.apiKey",
+        "reranker.apiKey"
+      ]
+    },
+    "externalEndpoints": {
+      "embedding": "OpenAI-compatible /embeddings endpoint",
+      "llm": "OpenAI-compatible /chat/completions endpoint",
+      "reranker": "Reranker /rerank endpoint"
+    }
+  },
   "hooks": [
     "message_received",
     "session_end"
