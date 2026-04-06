@@ -1,8 +1,10 @@
-﻿import * as crypto from "crypto";
+import * as crypto from "crypto";
 import * as fs from "fs";
 import * as path from "path";
+import { postJsonWithTimeout } from "../net/http_post";
 import type { GraphQualityMode } from "../graph/ontology";
 import { validateLlmJsonOutput, validateArchiveEvent } from "../quality/llm_output_validator";
+import { getEnvValue, getHomeDir } from "../utils/runtime_env";
 
 interface LoggerLike {
   debug: (message: string, ...args: unknown[]) => void;
@@ -168,19 +170,19 @@ function gatherDailySummaryFiles(openclawBasePath: string): string[] {
 }
 
 function inferOpenclawBasePath(projectRoot: string): string {
-  const configPath = process.env.OPENCLAW_CONFIG_PATH;
+  const configPath = getEnvValue("OPENCLAW_CONFIG_PATH");
   if (configPath && fs.existsSync(configPath)) {
     return path.dirname(configPath);
   }
-  const stateDir = process.env.OPENCLAW_STATE_DIR;
+  const stateDir = getEnvValue("OPENCLAW_STATE_DIR");
   if (stateDir && fs.existsSync(stateDir)) {
     return stateDir;
   }
-  const basePath = process.env.OPENCLAW_BASE_PATH;
+  const basePath = getEnvValue("OPENCLAW_BASE_PATH");
   if (basePath && fs.existsSync(basePath)) {
     return basePath;
   }
-  const home = process.env.USERPROFILE || process.env.HOME || "";
+  const home = getHomeDir();
   if (home) {
     const defaultPath = path.join(home, ".openclaw");
     if (fs.existsSync(defaultPath)) {
@@ -540,24 +542,18 @@ async function extractGateDecisionsWithLlm(args: {
   };
   let lastError: unknown = null;
   for (let attempt = 0; attempt < 3; attempt += 1) {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 25000);
+    const response = await postJsonWithTimeout({
+      endpoint,
+      apiKey: args.llm.apiKey,
+      body,
+      timeoutMs: 25000,
+    });
+    if (!response.ok) {
+      lastError = new Error(response.status > 0 ? `sync_llm_http_${response.status}` : (response.error || "sync_llm_network_error"));
+      continue;
+    }
     try {
-      const response = await fetch(endpoint, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          authorization: `Bearer ${args.llm.apiKey}`,
-        },
-        body: JSON.stringify(body),
-        signal: controller.signal,
-      });
-      clearTimeout(timeoutId);
-      if (!response.ok) {
-        lastError = new Error(`sync_llm_http_${response.status}`);
-        continue;
-      }
-      const json = await response.json() as { choices?: Array<{ message?: { content?: string } }> };
+      const json = (response.json || {}) as { choices?: Array<{ message?: { content?: string } }> };
       const content = json?.choices?.[0]?.message?.content || "";
       if (!content.trim()) {
         lastError = new Error("sync_llm_empty");
@@ -565,7 +561,6 @@ async function extractGateDecisionsWithLlm(args: {
       }
       return parseLlmGateDecisions(content, args.logger);
     } catch (error) {
-      clearTimeout(timeoutId);
       lastError = error;
     }
   }

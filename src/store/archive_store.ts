@@ -1,5 +1,6 @@
 import * as fs from "fs";
 import * as path from "path";
+import { postJsonWithTimeout } from "../net/http_post";
 import {
   buildCanonicalId,
   loadGraphSchema,
@@ -150,31 +151,24 @@ async function requestEmbedding(args: {
     : 4;
   let lastError: unknown = null;
   for (let attempt = 0; attempt < maxRetries; attempt += 1) {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+    const response = await postJsonWithTimeout({
+      endpoint,
+      apiKey: args.apiKey,
+      body,
+      timeoutMs,
+    });
+    if (!response.ok) {
+      lastError = new Error(response.status > 0 ? `embedding_http_${response.status}` : (response.error || "embedding_network_error"));
+      continue;
+    }
     try {
-      const response = await fetch(endpoint, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          authorization: `Bearer ${args.apiKey}`,
-        },
-        body: JSON.stringify(body),
-        signal: controller.signal,
-      });
-      clearTimeout(timeoutId);
-      if (!response.ok) {
-        lastError = new Error(`embedding_http_${response.status}`);
-        continue;
-      }
-      const json = await response.json() as { data?: Array<{ embedding?: number[] }> };
+      const json = (response.json || {}) as { data?: Array<{ embedding?: number[] }> };
       const embedding = json?.data?.[0]?.embedding;
       if (Array.isArray(embedding) && embedding.length > 0) {
         return embedding.filter(item => Number.isFinite(item));
       }
       lastError = new Error("embedding_empty");
     } catch (error) {
-      clearTimeout(timeoutId);
       lastError = error;
     }
     if (attempt < maxRetries - 1) {

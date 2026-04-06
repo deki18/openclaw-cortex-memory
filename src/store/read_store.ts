@@ -1,6 +1,7 @@
 ﻿import * as fs from "fs";
 import * as path from "path";
 import { createRequire } from "module";
+import { postJsonWithTimeout } from "../net/http_post";
 
 interface LoggerLike {
   debug: (message: string, ...args: unknown[]) => void;
@@ -804,31 +805,24 @@ async function requestEmbedding(args: {
   }
   let lastError: unknown = null;
   for (let attempt = 0; attempt < 3; attempt += 1) {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 10000);
+    const response = await postJsonWithTimeout({
+      endpoint,
+      apiKey: args.apiKey,
+      body,
+      timeoutMs: 10000,
+    });
+    if (!response.ok) {
+      lastError = new Error(response.status > 0 ? `embedding_http_${response.status}` : (response.error || "embedding_network_error"));
+      continue;
+    }
     try {
-      const response = await fetch(endpoint, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          authorization: `Bearer ${args.apiKey}`,
-        },
-        body: JSON.stringify(body),
-        signal: controller.signal,
-      });
-      clearTimeout(timeoutId);
-      if (!response.ok) {
-        lastError = new Error(`embedding_http_${response.status}`);
-        continue;
-      }
-      const json = await response.json() as { data?: Array<{ embedding?: number[] }> };
+      const json = (response.json || {}) as { data?: Array<{ embedding?: number[] }> };
       const embedding = json?.data?.[0]?.embedding;
       if (Array.isArray(embedding) && embedding.length > 0) {
         return embedding.filter(item => Number.isFinite(item));
       }
       lastError = new Error("embedding_empty");
     } catch (error) {
-      clearTimeout(timeoutId);
       lastError = error;
     }
   }
@@ -855,24 +849,18 @@ async function requestRerank(args: {
   };
   let lastError: unknown = null;
   for (let attempt = 0; attempt < 2; attempt += 1) {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 12000);
+    const response = await postJsonWithTimeout({
+      endpoint,
+      apiKey: args.apiKey,
+      body,
+      timeoutMs: 12000,
+    });
+    if (!response.ok) {
+      lastError = new Error(response.status > 0 ? `rerank_http_${response.status}` : (response.error || "rerank_network_error"));
+      continue;
+    }
     try {
-      const response = await fetch(endpoint, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          authorization: `Bearer ${args.apiKey}`,
-        },
-        body: JSON.stringify(body),
-        signal: controller.signal,
-      });
-      clearTimeout(timeoutId);
-      if (!response.ok) {
-        lastError = new Error(`rerank_http_${response.status}`);
-        continue;
-      }
-      const json = await response.json() as {
+      const json = (response.json || {}) as {
         results?: Array<{ index?: number; relevance_score?: number; score?: number }>;
         data?: Array<{ index?: number; relevance_score?: number; score?: number }>;
       };
@@ -895,7 +883,6 @@ async function requestRerank(args: {
       }
       lastError = new Error("rerank_map_empty");
     } catch (error) {
-      clearTimeout(timeoutId);
       lastError = error;
     }
   }
@@ -1266,26 +1253,18 @@ async function requestFusion(args: {
   };
   let lastError: unknown = null;
   for (let attempt = 0; attempt < 2; attempt += 1) {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 20000);
+    const response = await postJsonWithTimeout({
+      endpoint,
+      apiKey: args.llm.apiKey,
+      body,
+      timeoutMs: 20000,
+    });
+    if (!response.ok) {
+      lastError = new Error(response.status > 0 ? `fusion_http_${response.status}` : (response.error || "fusion_network_error"));
+      continue;
+    }
     try {
-      const response = await fetch(endpoint, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          authorization: `Bearer ${args.llm.apiKey}`,
-        },
-        body: JSON.stringify(body),
-        signal: controller.signal,
-      });
-      clearTimeout(timeoutId);
-      if (!response.ok) {
-        lastError = new Error(`fusion_http_${response.status}`);
-        continue;
-      }
-      const json = await response.json() as {
-        choices?: Array<{ message?: { content?: string } }>;
-      };
+      const json = (response.json || {}) as { choices?: Array<{ message?: { content?: string } }> };
       const content = json?.choices?.[0]?.message?.content?.trim() || "";
       if (!content) {
         lastError = new Error("fusion_empty");
@@ -1325,7 +1304,6 @@ async function requestFusion(args: {
           : 0.5,
       };
     } catch (error) {
-      clearTimeout(timeoutId);
       lastError = error;
     }
   }

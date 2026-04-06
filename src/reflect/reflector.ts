@@ -1,6 +1,7 @@
 import * as fs from "fs";
 import * as path from "path";
 import * as crypto from "crypto";
+import { postJsonWithTimeout } from "../net/http_post";
 
 interface LoggerLike {
   debug: (message: string, ...args: unknown[]) => void;
@@ -281,33 +282,24 @@ async function requestRuleFromLlm(args: {
   };
   let lastError: unknown = null;
   for (let attempt = 0; attempt < 3; attempt += 1) {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 15000);
+    const response = await postJsonWithTimeout({
+      endpoint,
+      apiKey: args.apiKey,
+      body,
+      timeoutMs: 15000,
+    });
+    if (!response.ok) {
+      lastError = new Error(response.status > 0 ? `llm_http_${response.status}` : (response.error || "llm_network_error"));
+      continue;
+    }
     try {
-      const response = await fetch(endpoint, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          authorization: `Bearer ${args.apiKey}`,
-        },
-        body: JSON.stringify(body),
-        signal: controller.signal,
-      });
-      clearTimeout(timeoutId);
-      if (!response.ok) {
-        lastError = new Error(`llm_http_${response.status}`);
-        continue;
-      }
-      const json = await response.json() as {
-        choices?: Array<{ message?: { content?: string } }>;
-      };
+      const json = (response.json || {}) as { choices?: Array<{ message?: { content?: string } }> };
       const content = json?.choices?.[0]?.message?.content?.trim() || "";
       if (content) {
         return content.slice(0, 500);
       }
       lastError = new Error("llm_empty");
     } catch (error) {
-      clearTimeout(timeoutId);
       lastError = error;
     }
   }

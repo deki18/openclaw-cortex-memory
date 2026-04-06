@@ -1,6 +1,7 @@
 import * as fs from "fs";
 import * as path from "path";
 import { loadGraphSchema, normalizeRelationType } from "../graph/ontology";
+import { postJsonWithTimeout } from "../net/http_post";
 import { validateJsonlLine } from "../quality/llm_output_validator";
 import type { MemoryEngine } from "./memory_engine";
 import type { ReadStore } from "../store/read_store";
@@ -419,48 +420,29 @@ export function createTsEngine(deps: TsEngineDeps): MemoryEngine {
     let lastError = "unknown_error";
     const maxAttempts = args.kind === "llm" ? 3 : 1;
     for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
-      try {
-        const response = await fetch(endpoint, {
-          method: "POST",
-          headers: {
-            accept: "application/json",
-            "content-type": "application/json",
-            authorization: `Bearer ${args.apiKey}`,
-          },
-          body: JSON.stringify(payload),
-          signal: controller.signal,
-        });
-        clearTimeout(timeoutId);
-        if (response.ok) {
-          return {
-            configured: true,
-            connected: true,
-            model: args.model,
-            base_url: args.baseUrl,
-            error: "",
-          };
-        }
-        let details = "";
-        try {
-          const text = (await response.text()).trim();
-          if (text) {
-            details = text.slice(0, 180);
-          }
-        } catch {
-          details = "";
-        }
+      const response = await postJsonWithTimeout({
+        endpoint,
+        apiKey: args.apiKey,
+        body: payload,
+        timeoutMs,
+        headers: { accept: "application/json" },
+      });
+      if (response.ok) {
+        return {
+          configured: true,
+          connected: true,
+          model: args.model,
+          base_url: args.baseUrl,
+          error: "",
+        };
+      }
+      if (response.aborted) {
+        lastError = `timeout_${timeoutMs}ms`;
+      } else if (response.status > 0) {
+        const details = (response.text || "").trim().slice(0, 180);
         lastError = details ? `http_${response.status}:${details}` : `http_${response.status}`;
-      } catch (error) {
-        const raw = error instanceof Error ? error.message : String(error);
-        if ((error as { name?: string } | null)?.name === "AbortError" || /aborted/i.test(raw)) {
-          lastError = `timeout_${timeoutMs}ms`;
-        } else {
-          lastError = raw;
-        }
-      } finally {
-        clearTimeout(timeoutId);
+      } else {
+        lastError = response.error || "network_error";
       }
     }
     return {
@@ -497,31 +479,24 @@ export function createTsEngine(deps: TsEngineDeps): MemoryEngine {
       : 4;
     let lastError: unknown = null;
     for (let attempt = 0; attempt < maxRetries; attempt += 1) {
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+      const response = await postJsonWithTimeout({
+        endpoint,
+        apiKey: args.apiKey,
+        body,
+        timeoutMs,
+      });
+      if (!response.ok) {
+        lastError = new Error(response.status > 0 ? `embedding_http_${response.status}` : (response.error || "embedding_network_error"));
+        continue;
+      }
       try {
-        const response = await fetch(endpoint, {
-          method: "POST",
-          headers: {
-            "content-type": "application/json",
-            authorization: `Bearer ${args.apiKey}`,
-          },
-          body: JSON.stringify(body),
-          signal: controller.signal,
-        });
-        clearTimeout(timeoutId);
-        if (!response.ok) {
-          lastError = new Error(`embedding_http_${response.status}`);
-          continue;
-        }
-        const json = await response.json() as { data?: Array<{ embedding?: number[] }> };
+        const json = (response.json || {}) as { data?: Array<{ embedding?: number[] }> };
         const embedding = json?.data?.[0]?.embedding;
         if (Array.isArray(embedding) && embedding.length > 0) {
           return embedding.filter(item => Number.isFinite(item));
         }
         lastError = new Error("embedding_empty");
       } catch (error) {
-        clearTimeout(timeoutId);
         lastError = error;
       }
       if (attempt < maxRetries - 1) {
