@@ -750,9 +750,21 @@ function validateConfig(cfg: CortexMemoryConfig): string[] {
 function checkOpenClawVersion(): Promise<void> {
   return new Promise((resolve) => {
     try {
-      const version = (api as any).openclawVersion || (api as any).version;
+      const apiObj = api as any;
+      const candidates = [
+        apiObj?.openclawVersion,
+        apiObj?.gatewayVersion,
+        apiObj?.coreVersion,
+        apiObj?.openclaw?.version,
+      ].filter((value): value is string => typeof value === "string" && value.trim().length > 0);
+      const version = candidates.find((value) => {
+        const major = Number(value.replace(/[^0-9.]/g, "").split(".")[0] || "0");
+        // OpenClaw release versions are calendar-like (e.g. 2026.x.x),
+        // while plugin/package versions like 0.x should be ignored.
+        return Number.isFinite(major) && major >= 2000;
+      }) || "";
       if (!version) {
-        logger.warn("Could not determine OpenClaw version");
+        logger.debug("Could not determine OpenClaw gateway version from API, skip version compatibility check");
         resolve();
         return;
       }
