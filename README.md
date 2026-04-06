@@ -80,6 +80,24 @@ openclaw plugins enable openclaw-cortex-memory
 openclaw gateway restart
 ```
 
+### 卸载
+
+```bash
+cd ~/openclaw
+openclaw plugins disable openclaw-cortex-memory
+openclaw plugins uninstall openclaw-cortex-memory
+openclaw gateway restart
+```
+
+如需卸载插件但保留记忆数据：
+
+```bash
+cd ~/openclaw
+openclaw plugins disable openclaw-cortex-memory
+openclaw plugins uninstall openclaw-cortex-memory --keep-data
+openclaw gateway restart
+```
+
 ### 最小配置（推荐先跑起来）
 
 ```json
