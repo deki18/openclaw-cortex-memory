@@ -21,6 +21,7 @@ export interface SearchMemoryArgs {
 export interface StoreEventArgs {
   summary: string;
   entities?: Array<{ id?: string; name?: string; type?: string }>;
+  entity_types?: Record<string, string>;
   outcome?: string;
   relations?: Array<{ source: string; target: string; type: string }>;
 }

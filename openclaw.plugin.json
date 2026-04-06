@@ -78,6 +78,13 @@
               ]
             }
           },
+          "entity_types": {
+            "type": "object",
+            "description": "Entity type map, key is entity name and value is type",
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
           "outcome": {
             "type": "string",
             "description": "Event outcome"
@@ -101,6 +108,12 @@
                     },
                     "type": {
                       "type": "string"
+                    },
+                    "evidence_span": {
+                      "type": "string"
+                    },
+                    "confidence": {
+                      "type": "number"
                     }
                   },
                   "required": ["source", "target"],
@@ -197,6 +210,39 @@
       }
     },
     {
+      "name": "backfill_embeddings",
+      "description": "Backfill missing embeddings for active/archive records",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "layer": {
+            "type": "string",
+            "enum": ["active", "archive", "all"],
+            "description": "Target layer to backfill"
+          },
+          "batch_size": {
+            "type": "integer",
+            "description": "Batch size per processing window"
+          },
+          "max_retries": {
+            "type": "integer",
+            "description": "Max retry count for failed records"
+          },
+          "retry_failed_only": {
+            "type": "boolean",
+            "description": "Only retry failed records"
+          },
+          "rebuild_mode": {
+            "type": "string",
+            "enum": ["incremental", "vector_only", "full"],
+            "description": "Rebuild mode"
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      }
+    },
+    {
       "name": "delete_memory",
       "description": "Delete a memory by ID",
       "parameters": {
@@ -230,17 +276,6 @@
         "description": "Enable or disable Cortex Memory plugin",
         "default": true
       },
-      "apiUrl": {
-        "type": "string",
-        "description": "URL of the memory service API",
-        "default": "http://localhost:8765"
-      },
-      "engineMode": {
-        "type": "string",
-        "description": "Memory engine mode",
-        "enum": ["ts"],
-        "default": "ts"
-      },
       "dbPath": {
         "type": "string",
         "description": "Path to the memory database directory"
@@ -259,6 +294,12 @@
         "type": "integer",
         "description": "Auto reflection scan interval in minutes",
         "default": 30
+      },
+      "graphQualityMode": {
+        "type": "string",
+        "description": "Graph extraction quality gate mode",
+        "enum": ["off", "warn", "strict"],
+        "default": "warn"
       },
       "embedding": {
         "type": "object",
@@ -381,6 +422,106 @@
             "type": "boolean",
             "description": "Return only fused authoritative memory package to agent",
             "default": true
+          },
+          "channelWeights": {
+            "type": "object",
+            "description": "Channel score multiplier overrides",
+            "properties": {
+              "rules": { "type": "number" },
+              "archive": { "type": "number" },
+              "vector": { "type": "number" },
+              "graph": { "type": "number" }
+            },
+            "additionalProperties": false
+          },
+          "channelTopK": {
+            "type": "object",
+            "description": "Per-channel pre-merge candidate quotas",
+            "properties": {
+              "rules": { "type": "integer" },
+              "archive": { "type": "integer" },
+              "vector": { "type": "integer" },
+              "graph": { "type": "integer" }
+            },
+            "additionalProperties": false
+          },
+          "minLexicalHits": {
+            "type": "integer",
+            "description": "Ensure lexical-hit coverage in final ranked set"
+          },
+          "minSemanticHits": {
+            "type": "integer",
+            "description": "Ensure semantic-hit coverage in final ranked set"
+          },
+          "lengthNorm": {
+            "type": "object",
+            "description": "Length normalization settings for semantic score",
+            "properties": {
+              "enabled": { "type": "boolean", "default": true },
+              "pivotChars": { "type": "integer", "default": 1200 },
+              "strength": { "type": "number", "default": 0.75 },
+              "minFactor": { "type": "number", "default": 0.45 }
+            },
+            "additionalProperties": false
+          }
+        },
+        "additionalProperties": false
+      },
+      "vectorChunking": {
+        "type": "object",
+        "description": "Vector chunking controls for active/archive full-text chunk embeddings",
+        "properties": {
+          "chunkSize": {
+            "type": "integer",
+            "description": "Chunk size in characters",
+            "default": 600
+          },
+          "chunkOverlap": {
+            "type": "integer",
+            "description": "Chunk overlap in characters",
+            "default": 100
+          },
+          "evidenceMaxChunks": {
+            "type": "integer",
+            "description": "Maximum evidence chunks per archive event",
+            "default": 2
+          }
+        },
+        "additionalProperties": false
+      },
+      "writePolicy": {
+        "type": "object",
+        "description": "Write-path quality thresholds and limits",
+        "properties": {
+          "archiveMinConfidence": {
+            "type": "number",
+            "description": "Minimum confidence for archiving events",
+            "default": 0.35
+          },
+          "archiveMinQualityScore": {
+            "type": "number",
+            "description": "Minimum quality score for archive events",
+            "default": 0.4
+          },
+          "activeMinQualityScore": {
+            "type": "number",
+            "description": "Minimum quality score for active records",
+            "default": 0.45
+          },
+          "activeDedupTailLines": {
+            "type": "integer",
+            "description": "Active-layer dedup tail line window",
+            "default": 200
+          },
+          "activeTextMaxChars": {
+            "type": "integer",
+            "description": "Maximum chars for active text payload",
+            "default": 4000
+          },
+          "archiveSourceTextMaxChars": {
+            "type": "integer",
+            "description": "Maximum chars for archive source_text payload",
+            "default": 8000
           }
         },
         "additionalProperties": false
@@ -435,6 +576,61 @@
                 "description": "Recent hit window in days for freshness contribution",
                 "default": 30
               }
+            },
+            "additionalProperties": false
+          }
+        },
+        "additionalProperties": false
+      },
+      "readTuning": {
+        "type": "object",
+        "description": "Read-path ranking and recency tuning",
+        "properties": {
+          "scoring": {
+            "type": "object",
+            "properties": {
+              "lexicalWeight": { "type": "number", "default": 0.2 },
+              "bm25Scale": { "type": "number", "default": 2 },
+              "semanticWeight": { "type": "number", "default": 0.3 },
+              "recencyWeight": { "type": "number", "default": 0.1 },
+              "qualityWeight": { "type": "number", "default": 0.15 },
+              "typeMatchWeight": { "type": "number", "default": 0.15 },
+              "graphMatchWeight": { "type": "number", "default": 0.1 }
+            },
+            "additionalProperties": false
+          },
+          "rrf": {
+            "type": "object",
+            "properties": {
+              "k": { "type": "integer", "default": 60 },
+              "weight": { "type": "number", "default": 1.5 }
+            },
+            "additionalProperties": false
+          },
+          "recency": {
+            "type": "object",
+            "properties": {
+              "buckets": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "maxAgeHours": { "type": "number" },
+                    "score": { "type": "number" },
+                    "bonus": { "type": "number" }
+                  },
+                  "required": ["maxAgeHours", "score", "bonus"],
+                  "additionalProperties": false
+                }
+              }
+            },
+            "additionalProperties": false
+          },
+          "autoContext": {
+            "type": "object",
+            "properties": {
+              "queryMaxChars": { "type": "integer", "default": 80 },
+              "lightweightSearch": { "type": "boolean", "default": true }
             },
             "additionalProperties": false
           }

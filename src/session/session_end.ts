@@ -1,10 +1,5 @@
-import * as fs from "fs";
+﻿import * as fs from "fs";
 import * as path from "path";
-import {
-  loadGraphSchema,
-  normalizeEventType,
-  validateRelations,
-} from "../graph/ontology";
 
 interface LoggerLike {
   debug: (message: string, ...args: unknown[]) => void;
@@ -18,38 +13,6 @@ interface SessionEndState {
   recovery: Record<string, { signature: string; detectedAt: string }>;
 }
 
-interface SessionEndOptions {
-  projectRoot: string;
-  dbPath?: string;
-  logger: LoggerLike;
-  syncMemory: () => Promise<{ imported: number; skipped: number; filesProcessed: number }>;
-  syncDailySummaries?: () => Promise<{ imported: number; skipped: number; filesProcessed: number }>;
-  archiveStore: {
-    storeEvents(events: Array<{
-      event_type: string;
-      summary: string;
-      entities?: string[];
-      relations?: Array<{ source: string; target: string; type: string }>;
-      entity_types?: Record<string, string>;
-      outcome?: string;
-      session_id: string;
-      source_file: string;
-      confidence?: number;
-      source_event_id?: string;
-      actor?: string;
-      canonical_id?: string;
-    }>): Promise<{ stored: Array<{ id: string }>; skipped: Array<{ summary: string; reason: string }> }>;
-  };
-  llm?: {
-    provider: string;
-    model: string;
-    apiKey?: string;
-    baseURL?: string;
-    baseUrl?: string;
-  };
-  requireLlmForWrite?: boolean;
-}
-
 interface SessionRecord {
   id?: string;
   session_id?: string;
@@ -58,23 +21,22 @@ interface SessionRecord {
   timestamp?: string;
 }
 
-interface StructuredEvent {
-  event_type: string;
-  summary: string;
-  entities?: string[];
-  relations?: Array<{ source: string; target: string; type: string }>;
-  entity_types?: Record<string, string>;
-  outcome?: string;
-  confidence?: number;
-  source_event_id?: string;
-  actor?: string;
+interface SessionEndOptions {
+  projectRoot: string;
+  dbPath?: string;
+  logger: LoggerLike;
+  syncMemory: () => Promise<{ imported: number; skipped: number; filesProcessed: number }>;
+  syncDailySummaries?: () => Promise<{ imported: number; skipped: number; filesProcessed: number }>;
+  routeTranscript?: (args: { sessionId: string; sourceFile: string; transcript: string }) => Promise<{
+    imported: number;
+    skipped: number;
+    ok: boolean;
+    llmDecisions: number;
+    activeOnly: number;
+    archiveEvent: number;
+    skipReasons: Record<string, number>;
+  }>;
 }
-
-const SESSION_END_PROMPT_VERSION = "session-end-write.v1.1.0";
-const SESSION_END_REGRESSION_SAMPLES = [
-  "样例A: “排查后发现依赖冲突并修复，构建恢复成功” => event_type=fix",
-  "样例B: “提出几个想法但无决策结果” => 不应提取 archive_event",
-];
 
 function readState(filePath: string): SessionEndState {
   try {
@@ -108,11 +70,6 @@ function writeState(filePath: string, state: SessionEndState): void {
   fs.writeFileSync(filePath, JSON.stringify(state, null, 2), "utf-8");
 }
 
-function normalizeBaseUrl(value?: string): string {
-  if (!value) return "";
-  return value.endsWith("/") ? value.slice(0, -1) : value;
-}
-
 function loadActiveSessionRecords(activePath: string, sessionId: string): SessionRecord[] {
   if (!fs.existsSync(activePath)) {
     return [];
@@ -130,16 +87,9 @@ function loadActiveSessionRecords(activePath: string, sessionId: string): Sessio
   return records;
 }
 
-function summarize(records: SessionRecord[]): { summary: string; entities: string[]; outcome: string; signature: string } {
-  const messageCount = records.length;
-  const userCount = records.filter(r => r.role === "user").length;
-  const assistantCount = records.filter(r => r.role === "assistant").length;
-  const lastMessages = records.slice(Math.max(0, records.length - 3)).map(r => r.content || "").filter(Boolean);
-  const summary = `Session ended with ${messageCount} messages. User: ${userCount}, assistant: ${assistantCount}. Recent: ${lastMessages.join(" | ")}`.slice(0, 500);
-  const entities = ["session_end", "message_summary"];
-  const outcome = "success";
+function summarize(records: SessionRecord[]): { signature: string } {
   const signature = records.map(r => `${r.id || ""}:${r.timestamp || ""}:${r.content || ""}`).join("||");
-  return { summary, entities, outcome, signature };
+  return { signature };
 }
 
 function preprocess(records: SessionRecord[]): Array<{ role: string; content: string; timestamp: string }> {
@@ -150,149 +100,6 @@ function preprocess(records: SessionRecord[]): Array<{ role: string; content: st
       timestamp: typeof record.timestamp === "string" && record.timestamp.trim() ? record.timestamp : new Date().toISOString(),
     }))
     .filter(item => item.content.length > 0);
-}
-
-function fallbackEvents(records: SessionRecord[]): StructuredEvent[] {
-  const base = summarize(records);
-  return [
-    {
-      event_type: "conversation_summary",
-      summary: base.summary,
-      entities: base.entities,
-      outcome: base.outcome,
-      confidence: 0.6,
-    },
-  ];
-}
-
-function parseLlmJsonArray(raw: string, graphSchema: ReturnType<typeof loadGraphSchema>): StructuredEvent[] {
-  const trimmed = raw.trim();
-  const fence = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/i);
-  const candidate = fence?.[1]?.trim() || trimmed;
-  const parsed = JSON.parse(candidate) as unknown;
-  if (!Array.isArray(parsed)) {
-    return [];
-  }
-  const events: StructuredEvent[] = [];
-  for (const item of parsed) {
-    if (typeof item !== "object" || item === null) {
-      continue;
-    }
-    const obj = item as Record<string, unknown>;
-    const eventType = typeof obj.event_type === "string" ? normalizeEventType(obj.event_type, graphSchema) : "";
-    const summary = typeof obj.summary === "string" ? obj.summary.trim() : "";
-    if (!eventType || !summary) {
-      continue;
-    }
-    const entities = Array.isArray(obj.entities)
-      ? obj.entities.map(value => (typeof value === "string" ? value.trim() : "")).filter(Boolean)
-      : [];
-    const relations = Array.isArray(obj.relations)
-      ? obj.relations
-          .map(value => {
-            if (typeof value !== "object" || value === null) return null;
-            const relation = value as Record<string, unknown>;
-            const source = typeof relation.source === "string" ? relation.source.trim() : "";
-            const target = typeof relation.target === "string" ? relation.target.trim() : "";
-            const type = typeof relation.type === "string" ? relation.type.trim() : "related_to";
-            if (!source || !target) return null;
-            return { source, target, type };
-          })
-          .filter((value): value is { source: string; target: string; type: string } => Boolean(value))
-      : [];
-    events.push({
-      event_type: eventType,
-      summary,
-      entities,
-      relations,
-      entity_types: typeof obj.entity_types === "object" && obj.entity_types !== null
-        ? Object.fromEntries(Object.entries(obj.entity_types as Record<string, unknown>).filter(([, value]) => typeof value === "string").map(([key, value]) => [key, String(value)]))
-        : undefined,
-      outcome: typeof obj.outcome === "string" ? obj.outcome.trim() : "",
-      confidence: typeof obj.confidence === "number"
-        ? Math.max(0, Math.min(1, obj.confidence))
-        : undefined,
-    });
-  }
-  return events;
-}
-
-async function extractEventsWithLlm(args: {
-  llm: {
-    model: string;
-    apiKey: string;
-    baseUrl: string;
-  };
-  records: Array<{ role: string; content: string; timestamp: string }>;
-  graphSchema: ReturnType<typeof loadGraphSchema>;
-}): Promise<StructuredEvent[]> {
-  const endpoint = args.llm.baseUrl.endsWith("/chat/completions")
-    ? args.llm.baseUrl
-    : `${args.llm.baseUrl}/chat/completions`;
-  const transcript = args.records
-    .map(item => `${item.timestamp} [${item.role}] ${item.content}`)
-    .join("\n")
-    .slice(-12000);
-  const schemaPrompt = [
-    `prompt_version=${SESSION_END_PROMPT_VERSION}`,
-    "请从下面会话中提取多个可长期记忆事件，按 JSON 数组输出。",
-    "每个元素字段：event_type, summary, entities[], relations[], entity_types, outcome, confidence。",
-    "entity_types 是对象，键为实体名，值为类型（如 Task/Issue/Fix/Plan/Milestone/Project/Person/Team/Concept）。",
-    `event_type 只能取：${args.graphSchema.eventTypes.join(", ")}。`,
-    "summary 要单句、可复用、非流水账；relations 为 {source,target,type}。",
-    ...SESSION_END_REGRESSION_SAMPLES,
-    "只输出 JSON，不要解释。",
-  ].join("\n");
-  const body = {
-    model: args.llm.model,
-    temperature: 0.1,
-    response_format: { type: "json_object" },
-    messages: [
-      { role: "system", content: "你是会话记忆抽取器。输出必须是 JSON。结构需稳定可解析。" },
-      { role: "user", content: `${schemaPrompt}\n\n会话记录:\n${transcript}\n\n输出格式: {\"events\": [...]}` },
-    ],
-  };
-  let lastError: unknown = null;
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 25000);
-    try {
-      const response = await fetch(endpoint, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          authorization: `Bearer ${args.llm.apiKey}`,
-        },
-        body: JSON.stringify(body),
-        signal: controller.signal,
-      });
-      clearTimeout(timeoutId);
-      if (!response.ok) {
-        lastError = new Error(`llm_extract_http_${response.status}`);
-        continue;
-      }
-      const json = await response.json() as {
-        choices?: Array<{ message?: { content?: string } }>;
-      };
-      const content = json?.choices?.[0]?.message?.content || "";
-      if (!content.trim()) {
-        lastError = new Error("llm_extract_empty");
-        continue;
-      }
-      const wrapped = JSON.parse(content) as { events?: unknown[] };
-      const events = Array.isArray(wrapped.events)
-        ? parseLlmJsonArray(JSON.stringify(wrapped.events), args.graphSchema)
-        : parseLlmJsonArray(content, args.graphSchema);
-      if (events.length > 0) {
-        return events;
-      }
-      lastError = new Error("llm_extract_parse_failed");
-    } catch (error) {
-      clearTimeout(timeoutId);
-      lastError = error;
-    }
-  }
-  throw lastError instanceof Error ? lastError : new Error(String(lastError || "llm_extract_failed"));
 }
 
 function detectFailureToSuccess(records: SessionRecord[]): {
@@ -341,11 +148,10 @@ export function createSessionEnd(options: SessionEndOptions): {
   onSessionEnd(args: { sessionId: string; syncRecords: boolean; messages?: SessionRecord[] }): Promise<{ events_generated: number; sync_result?: { imported: number; skipped: number; filesProcessed: number }; daily_summary_sync_result?: { imported: number; skipped: number; filesProcessed: number }; stored_ids?: string[]; skipped_reasons?: string[] }>;
 } {
   const memoryRoot = options.dbPath ? path.resolve(options.dbPath) : path.join(options.projectRoot, "data", "memory");
-  const graphSchema = loadGraphSchema(options.projectRoot);
   const activeSessionsPath = path.join(memoryRoot, "sessions", "active", "sessions.jsonl");
   const statePath = path.join(memoryRoot, ".session_end_state.json");
-  const requireLlmForWrite = options.requireLlmForWrite !== false;
-  options.logger.info(`session_end_prompt_version=${SESSION_END_PROMPT_VERSION}`);
+
+  options.logger.info(`session_end_route_mode=${typeof options.routeTranscript === "function" ? "shared_sync_gate" : "legacy_extract"}`);
   if (!fs.existsSync(statePath)) {
     options.logger.warn("session_end_state_missing: first run will rebuild session-end dedup state");
   }
@@ -374,98 +180,45 @@ export function createSessionEnd(options: SessionEndOptions): {
     const { signature } = summarize(records);
     const recoveryDetection = detectFailureToSuccess(records);
     const previous = state.sessions[sessionId];
+
     let generated = 0;
     const storedIds: string[] = [];
     const skippedReasons: string[] = [];
 
     if (!previous || previous.signature !== signature) {
       const normalizedRecords = preprocess(records);
-      let extracted: StructuredEvent[] = [];
-      const llmModel = options.llm?.model || "";
-      const llmApiKey = options.llm?.apiKey || "";
-      const llmBaseUrl = normalizeBaseUrl(options.llm?.baseURL || options.llm?.baseUrl);
-      if (llmModel && llmApiKey && llmBaseUrl) {
-        try {
-          extracted = await extractEventsWithLlm({
-            llm: { model: llmModel, apiKey: llmApiKey, baseUrl: llmBaseUrl },
-            records: normalizedRecords,
-            graphSchema,
-          });
-        } catch (error) {
-          if (requireLlmForWrite) {
-            options.logger.warn(`session_end_skip reason=llm_extract_failed session=${sessionId} error=${error}`);
-            skippedReasons.push("llm_extract_failed");
-            extracted = [];
-          } else {
-            options.logger.warn(`Session-end LLM extraction failed, fallback to heuristic events: ${error}`);
-            extracted = fallbackEvents(records);
+      let transcript = normalizedRecords
+        .map(item => `[${item.role}] ${item.content}`)
+        .join("\n")
+        .trim();
+
+      if (recoveryDetection.triggered) {
+        const recoveryLine = `Recovered from failure to success in session ${sessionId}: ${recoveryDetection.failureSample} -> ${recoveryDetection.successSample}`;
+        transcript = `${transcript}\n[system] ${recoveryLine}`.trim();
+      }
+
+      if (options.routeTranscript) {
+        const routed = await options.routeTranscript({
+          sessionId,
+          sourceFile: `session_end:${sessionId}`,
+          transcript,
+        });
+        generated = routed.archiveEvent;
+        for (const [reason, count] of Object.entries(routed.skipReasons || {})) {
+          for (let i = 0; i < count; i += 1) {
+            skippedReasons.push(reason);
           }
         }
       } else {
-        if (requireLlmForWrite) {
-          options.logger.warn(`session_end_skip reason=llm_not_configured session=${sessionId}`);
-          skippedReasons.push("llm_not_configured");
-          extracted = [];
-        } else {
-          extracted = fallbackEvents(records);
-        }
+        skippedReasons.push("route_transcript_not_configured");
       }
-      if (recoveryDetection.triggered) {
-        extracted.push({
-          event_type: "fix",
-          summary: `Recovered from failure to success in session ${sessionId}`,
-          entities: ["failure_recovery", "session_learning"],
-          relations: [],
-          outcome: "success_after_failure",
-          confidence: 0.8,
-        });
-      }
-      extracted = extracted
-        .map(item => {
-          const entities = Array.isArray(item.entities)
-            ? [...new Set(item.entities.map(name => name.trim()).filter(Boolean))]
-            : [];
-          const relationValidation = validateRelations({
-            relations: Array.isArray(item.relations) ? item.relations : [],
-            entities,
-            entityTypes: item.entity_types,
-            schema: graphSchema,
-          });
-          return {
-            ...item,
-            event_type: normalizeEventType(item.event_type, graphSchema),
-            entities,
-            relations: relationValidation.accepted,
-          };
-        })
-        .filter(item => item.summary.trim().length > 0);
-      const result = await options.archiveStore.storeEvents(
-        extracted.map(item => ({
-          event_type: item.event_type,
-          summary: item.summary,
-          entities: item.entities,
-          relations: item.relations,
-          entity_types: item.entity_types,
-          outcome: item.outcome,
-          confidence: item.confidence,
-          session_id: sessionId,
-          source_file: `session_end:${sessionId}`,
-          source_event_id: item.source_event_id || "",
-          actor: item.actor || "session_end_llm",
-        })),
-      );
-      for (const record of result.stored) {
-        storedIds.push(record.id);
-      }
-      for (const skip of result.skipped) {
-        skippedReasons.push(skip.reason);
-      }
+
       state.sessions[sessionId] = { signature, endedAt: new Date().toISOString() };
-      generated = result.stored.length;
       options.logger.info(`TS session_end generated ${generated} events for session ${sessionId}`);
     } else {
       options.logger.debug(`TS session_end skipped duplicate event for session ${sessionId}`);
     }
+
     if (recoveryDetection.triggered) {
       state.recovery[sessionId] = {
         signature: recoveryDetection.signature,

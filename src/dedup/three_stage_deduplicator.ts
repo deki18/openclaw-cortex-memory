@@ -186,9 +186,9 @@ export function createThreeStageDeduplicator(options: DeduplicatorOptions): {
 } {
   const statePath = path.join(options.memoryRoot, ".dedup_index.json");
   const maxItems = 8000;
+  const state: DedupState = readState(statePath);
 
   function check(input: DedupInput): DedupResult {
-    const state = readState(statePath);
     const simhash = computeSimhash(input.summary);
     const minhash = computeMinhash(input.summary);
     const recent = state.items.slice(-2000);
@@ -219,7 +219,6 @@ export function createThreeStageDeduplicator(options: DeduplicatorOptions): {
   }
 
   function append(input: DedupInput): void {
-    const state = readState(statePath);
     const item: DedupStateItem = {
       id: input.id,
       summary: input.summary.slice(0, 500),

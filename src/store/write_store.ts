@@ -1,6 +1,7 @@
 import * as crypto from "crypto";
 import * as fs from "fs";
 import * as path from "path";
+import { validateJsonlLine } from "../quality/llm_output_validator";
 
 interface LoggerLike {
   debug: (message: string, ...args: unknown[]) => void;
@@ -44,6 +45,10 @@ interface WriteStoreOptions {
     chunkSize?: number;
     chunkOverlap?: number;
   };
+  writePolicy?: {
+    activeMinQualityScore?: number;
+    activeDedupTailLines?: number;
+  };
   vectorStore?: {
     upsert(record: {
       id: string;
@@ -54,9 +59,10 @@ interface WriteStoreOptions {
       layer: "active" | "archive";
       source_memory_id: string;
       source_memory_canonical_id?: string;
+      source_field?: "summary" | "evidence";
       outcome?: string;
       entities?: string[];
-      relations?: Array<{ source: string; target: string; type: string }>;
+      relations?: Array<{ source: string; target: string; type: string; evidence_span?: string; confidence?: number }>;
       embedding: number[];
       quality_score: number;
       char_count: number;
@@ -312,13 +318,19 @@ export function createWriteStore(options: WriteStoreOptions): { writeMemory(args
     }
 
     const quality = scoreQuality(cleaned);
-    if (quality.level === "low") {
+    const activeMinQualityScore = typeof options.writePolicy?.activeMinQualityScore === "number"
+      ? Math.max(0, Math.min(1, options.writePolicy.activeMinQualityScore))
+      : 0.45;
+    if (quality.score < activeMinQualityScore) {
       return { status: "skipped", reason: "low_quality", error_code: "E204", quality };
     }
 
     const textHash = computeHash(cleaned);
     try {
-      const tailLines = safeReadTailLines(activeSessionsPath, 200);
+      const dedupTailLines = typeof options.writePolicy?.activeDedupTailLines === "number"
+        ? Math.max(20, Math.min(5000, Math.floor(options.writePolicy.activeDedupTailLines)))
+        : 200;
+      const tailLines = safeReadTailLines(activeSessionsPath, dedupTailLines);
       for (const line of tailLines) {
         try {
           const parsed = JSON.parse(line) as Record<string, unknown>;
@@ -428,7 +440,12 @@ export function createWriteStore(options: WriteStoreOptions): { writeMemory(args
     }
 
     ensureDirForFile(activeSessionsPath);
-    fs.appendFileSync(activeSessionsPath, `${JSON.stringify(record)}\n`, "utf-8");
+    const recordLine = JSON.stringify(record);
+    fs.appendFileSync(activeSessionsPath, `${recordLine}\n`, "utf-8");
+    const validation = validateJsonlLine(recordLine);
+    if (!validation.valid && validation.errors.length > 0) {
+      options.logger.warn(`active_write_integrity_check_failed errors=${validation.errors.join("|")}`);
+    }
     if (record.vector_chunks_total && record.vector_chunks_total > 0) {
       options.logger.info(`active_vector_chunks source=${record.id} ok=${record.vector_chunks_ok || 0}/${record.vector_chunks_total}`);
     }

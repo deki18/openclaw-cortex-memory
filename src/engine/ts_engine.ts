@@ -1,6 +1,7 @@
 import * as fs from "fs";
 import * as path from "path";
 import { loadGraphSchema, normalizeRelationType } from "../graph/ontology";
+import { validateJsonlLine } from "../quality/llm_output_validator";
 import type { MemoryEngine } from "./memory_engine";
 import type { ReadStore } from "../store/read_store";
 import type { WriteMemoryResult } from "../store/write_store";
@@ -19,9 +20,9 @@ import type {
 } from "./types";
 
 const PROMPT_VERSIONS = {
-  write_gate: "write-gate.v1.1.0",
-  session_end_write: "session-end-write.v1.1.0",
-  read_fusion: "read-fusion.v1.1.0",
+  write_gate: "write-gate.v1.2.0",
+  session_end_write: "session-end-write.v1.2.0",
+  read_fusion: "read-fusion.v1.2.0",
 };
 
 interface TsEngineDeps {
@@ -39,9 +40,10 @@ interface TsEngineDeps {
       layer: "active" | "archive";
       source_memory_id: string;
       source_memory_canonical_id?: string;
+      source_field?: "summary" | "evidence";
       outcome?: string;
       entities?: string[];
-      relations?: Array<{ source: string; target: string; type: string }>;
+      relations?: Array<{ source: string; target: string; type: string; evidence_span?: string; confidence?: number }>;
       embedding: number[];
       quality_score: number;
       char_count: number;
@@ -58,16 +60,33 @@ interface TsEngineDeps {
       event_type: string;
       summary: string;
       entities?: string[];
-      relations?: Array<{ source: string; target: string; type: string }>;
+      relations?: Array<{ source: string; target: string; type: string; evidence_span?: string; confidence?: number }>;
       entity_types?: Record<string, string>;
       outcome?: string;
       session_id: string;
       source_file: string;
+      source_text?: string;
       confidence?: number;
       source_event_id?: string;
       actor?: string;
       canonical_id?: string;
     }>): Promise<{ stored: Array<{ id: string }>; skipped: Array<{ summary: string; reason: string }> }>;
+  };
+  graphMemoryStore?: {
+    append(input: {
+      sourceEventId: string;
+      sourceLayer: "archive_event" | "active_only";
+      archiveEventId?: string;
+      sessionId: string;
+      sourceFile?: string;
+      eventType?: string;
+      entities?: string[];
+      entity_types?: Record<string, string>;
+      relations?: Array<{ source: string; target: string; type: string; evidence_span?: string; confidence?: number }>;
+      gateSource: "sync" | "session_end" | "manual";
+      confidence?: number;
+      sourceText?: string;
+    }): Promise<{ success: boolean; reason?: string }>;
   };
   sessionSync: {
     syncMemory(): Promise<{ imported: number; skipped: number; filesProcessed: number }>;
@@ -545,6 +564,22 @@ export function createTsEngine(deps: TsEngineDeps): MemoryEngine {
             return "";
           }).filter(Boolean)
         : [];
+      const entityTypesFromEntities: Record<string, string> = {};
+      if (Array.isArray(entityInput)) {
+        for (const item of entityInput) {
+          if (!item || typeof item !== "object") {
+            continue;
+          }
+          const entityObj = item as { name?: string; id?: string; type?: string };
+          const entityName = typeof entityObj.name === "string" && entityObj.name.trim()
+            ? entityObj.name.trim()
+            : (typeof entityObj.id === "string" ? entityObj.id.trim() : "");
+          const entityType = typeof entityObj.type === "string" ? entityObj.type.trim() : "";
+          if (entityName && entityType) {
+            entityTypesFromEntities[entityName] = entityType;
+          }
+        }
+      }
       const relationInput = Array.isArray(rawArgs.relations)
         ? rawArgs.relations
         : Array.isArray((rawArgs.input as Record<string, unknown> | undefined)?.relations)
@@ -564,15 +599,17 @@ export function createTsEngine(deps: TsEngineDeps): MemoryEngine {
                 return { source, target, type };
               }
               if (!item || typeof item !== "object") return null;
-              const relation = item as { source?: string; target?: string; type?: string };
+              const relation = item as { source?: string; target?: string; type?: string; evidence_span?: string; confidence?: number };
               if (!relation.source || !relation.target) return null;
               return {
                 source: relation.source.trim(),
                 target: relation.target.trim(),
                 type: normalizeRelationType(relation.type || "related_to", graphSchema),
+                evidence_span: typeof relation.evidence_span === "string" ? relation.evidence_span.trim() : undefined,
+                confidence: typeof relation.confidence === "number" ? Math.max(0, Math.min(1, relation.confidence)) : undefined,
               };
             })
-            .filter((item): item is { source: string; target: string; type: string } => Boolean(item))
+            .filter((item): item is { source: string; target: string; type: string; evidence_span?: string; confidence?: number } => Boolean(item))
         : [];
       const outcomeValue = typeof rawArgs.outcome === "string"
         ? rawArgs.outcome
@@ -581,24 +618,63 @@ export function createTsEngine(deps: TsEngineDeps): MemoryEngine {
           : typeof (rawArgs.event as Record<string, unknown> | undefined)?.outcome === "string"
             ? String((rawArgs.event as Record<string, unknown>).outcome)
             : "";
+      const entityTypesInput = typeof rawArgs.entity_types === "object" && rawArgs.entity_types !== null
+        ? rawArgs.entity_types as Record<string, unknown>
+        : typeof (rawArgs.input as Record<string, unknown> | undefined)?.entity_types === "object"
+          ? (rawArgs.input as Record<string, unknown>).entity_types as Record<string, unknown>
+          : typeof (rawArgs.event as Record<string, unknown> | undefined)?.entity_types === "object"
+            ? (rawArgs.event as Record<string, unknown>).entity_types as Record<string, unknown>
+            : {};
+      const entityTypes: Record<string, string> = {};
+      for (const [key, value] of Object.entries(entityTypesInput)) {
+        if (typeof value === "string") {
+          entityTypes[key.trim()] = value.trim();
+        }
+      }
+      for (const [key, value] of Object.entries(entityTypesFromEntities)) {
+        if (!entityTypes[key] && value) {
+          entityTypes[key] = value;
+        }
+      }
       const result = await deps.archiveStore.storeEvents([
         {
           event_type: "manual_event",
           summary: normalizedSummary,
           entities,
           relations,
+          entity_types: entityTypes,
           outcome: outcomeValue,
           session_id: "manual",
           source_file: "ts_store_event",
           confidence: 1,
-          source_event_id: "",
+          source_event_id: `manual:${Date.now().toString(36)}`,
           actor: "manual_tool",
         },
       ]);
       if (result.stored.length === 0) {
         return { success: false, error: result.skipped[0]?.reason || "store_event_skipped" };
       }
-      return { success: true, data: { event_id: result.stored[0].id } };
+      const storedId = result.stored[0].id;
+      if (deps.graphMemoryStore && entities.length > 0 && Object.keys(entityTypes).length > 0 && relations.length > 0) {
+        const graphResult = await deps.graphMemoryStore.append({
+          sourceEventId: storedId,
+          sourceLayer: "archive_event",
+          archiveEventId: storedId,
+          sessionId: "manual",
+          sourceFile: "ts_store_event",
+          eventType: "manual_event",
+          entities,
+          entity_types: entityTypes,
+          relations,
+          gateSource: "manual",
+          confidence: 1,
+          sourceText: normalizedSummary,
+        });
+        if (!graphResult.success) {
+          deps.logger.info(`store_event graph_skip_reason=${graphResult.reason} source_event_id=${storedId}`);
+        }
+      }
+      return { success: true, data: { event_id: storedId } };
     } catch (error) {
       return { success: false, error: String(error) };
     }
@@ -617,8 +693,7 @@ export function createTsEngine(deps: TsEngineDeps): MemoryEngine {
       : "both";
     const pathTo = typeof args.path_to === "string" && args.path_to.trim() ? args.path_to.trim() : "";
     const maxDepth = Math.max(2, Math.min(4, typeof args.max_depth === "number" ? Math.floor(args.max_depth) : 3));
-    const { archivePath } = memoryFiles();
-    const records = readJsonl(archivePath);
+    const graphMemoryPath = path.join(deps.memoryRoot, "graph", "memory.jsonl");
     const nodes = new Map<string, { id: string; type: string }>();
     const edges: Array<{ source: string; target: string; type: string }> = [];
     const adjacency = new Map<string, Array<{ next: string; edge: { source: string; target: string; type: string } }>>();
@@ -661,9 +736,10 @@ export function createTsEngine(deps: TsEngineDeps): MemoryEngine {
       }
     }
 
-    for (const record of records) {
+    const graphRecords = fs.existsSync(graphMemoryPath) ? readJsonl(graphMemoryPath) : [];
+    for (const record of graphRecords) {
       const entities = Array.isArray(record.entities) ? record.entities : [];
-      const named = entities.map(e => (typeof e === "string" ? e.trim() : "")).filter(Boolean);
+      const named = entities.map((e: string) => (typeof e === "string" ? e.trim() : "")).filter(Boolean);
       const relations = Array.isArray(record.relations) ? record.relations : [];
       let explicitMatched = false;
       for (const relationRaw of relations) {
@@ -718,7 +794,7 @@ export function createTsEngine(deps: TsEngineDeps): MemoryEngine {
       }
     }
 
-    let path: Array<{ source: string; target: string; type: string }> = [];
+    let graphPath: Array<{ source: string; target: string; type: string }> = [];
     if (pathTo) {
       const visited = new Set<string>();
       const queue: Array<{ node: string; depth: number; pathEdges: Array<{ source: string; target: string; type: string }> }> = [
@@ -728,7 +804,7 @@ export function createTsEngine(deps: TsEngineDeps): MemoryEngine {
         const current = queue.shift();
         if (!current) break;
         if (current.node === pathTo) {
-          path = current.pathEdges;
+          graphPath = current.pathEdges;
           break;
         }
         if (current.depth >= maxDepth) {
@@ -759,7 +835,7 @@ export function createTsEngine(deps: TsEngineDeps): MemoryEngine {
         edges,
         path_to: pathTo || "",
         max_depth: maxDepth,
-        path,
+        path: graphPath,
         relation_type_distribution: [...relationTypeDistribution.entries()].map(([type, count]) => ({ type, count })),
       },
     };
@@ -1159,6 +1235,146 @@ export function createTsEngine(deps: TsEngineDeps): MemoryEngine {
       { name: "LLM model connectivity", passed: llmConnectivity.connected, message: llmConnectivity.error || "ok" },
       { name: "Reranker model connectivity", passed: rerankerConnectivity.connected, message: rerankerConnectivity.error || "ok" },
     ];
+    const qualityCheck = {
+      active: { total: 0, valid: 0, invalid: 0, issues: [] as Array<{ line: number; errors: string[] }> },
+      archive: { total: 0, valid: 0, invalid: 0, issues: [] as Array<{ line: number; errors: string[] }> },
+    };
+    if (fs.existsSync(activePath)) {
+      const content = fs.readFileSync(activePath, "utf-8");
+      const lines = content.split(/\r?\n/).filter(l => l.trim());
+      qualityCheck.active.total = lines.length;
+      for (let i = 0; i < lines.length; i++) {
+        const validation = validateJsonlLine(lines[i]);
+        if (validation.valid) {
+          qualityCheck.active.valid++;
+        } else {
+          qualityCheck.active.invalid++;
+          if (qualityCheck.active.issues.length < 5) {
+            qualityCheck.active.issues.push({ line: i + 1, errors: validation.errors });
+          }
+        }
+      }
+    }
+    if (fs.existsSync(archivePath)) {
+      const content = fs.readFileSync(archivePath, "utf-8");
+      const lines = content.split(/\r?\n/).filter(l => l.trim());
+      qualityCheck.archive.total = lines.length;
+      for (let i = 0; i < lines.length; i++) {
+        const validation = validateJsonlLine(lines[i]);
+        if (validation.valid) {
+          qualityCheck.archive.valid++;
+        } else {
+          qualityCheck.archive.invalid++;
+          if (qualityCheck.archive.issues.length < 5) {
+            qualityCheck.archive.issues.push({ line: i + 1, errors: validation.errors });
+          }
+        }
+      }
+    }
+    const totalInvalid = qualityCheck.active.invalid + qualityCheck.archive.invalid;
+    if (totalInvalid > 0) {
+      checks.push({ name: "Data integrity", passed: false, message: `${totalInvalid} invalid records found` });
+    } else {
+      checks.push({ name: "Data integrity", passed: true, message: "All records valid" });
+    }
+    const graphMemoryPath = path.join(deps.memoryRoot, "graph", "memory.jsonl");
+    const graphRecords = readJsonl(graphMemoryPath);
+    function stringField(record: Record<string, unknown>, key: string): string {
+      const value = record[key];
+      return typeof value === "string" ? value.trim() : "";
+    }
+    const activeFieldIssues = {
+      missing_id: 0,
+      missing_timestamp: 0,
+      missing_layer: 0,
+      missing_text_payload: 0,
+    };
+    for (const record of activeRecords) {
+      if (!stringField(record, "id")) activeFieldIssues.missing_id += 1;
+      if (!stringField(record, "timestamp")) activeFieldIssues.missing_timestamp += 1;
+      if (stringField(record, "layer") !== "active") activeFieldIssues.missing_layer += 1;
+      const hasPayload = [
+        stringField(record, "content"),
+        stringField(record, "summary"),
+        stringField(record, "text"),
+        stringField(record, "message"),
+      ].some(Boolean);
+      if (!hasPayload) activeFieldIssues.missing_text_payload += 1;
+    }
+    const archiveFieldIssues = {
+      missing_id: 0,
+      missing_timestamp: 0,
+      missing_layer: 0,
+      missing_summary: 0,
+      missing_source_memory_id: 0,
+    };
+    for (const record of archiveRecords) {
+      if (!stringField(record, "id")) archiveFieldIssues.missing_id += 1;
+      if (!stringField(record, "timestamp")) archiveFieldIssues.missing_timestamp += 1;
+      if (stringField(record, "layer") !== "archive") archiveFieldIssues.missing_layer += 1;
+      if (!stringField(record, "summary")) archiveFieldIssues.missing_summary += 1;
+      if (!stringField(record, "source_memory_id") && !stringField(record, "canonical_id")) {
+        archiveFieldIssues.missing_source_memory_id += 1;
+      }
+    }
+    const vectorFieldIssues = {
+      missing_id: 0,
+      missing_layer: 0,
+      missing_summary: 0,
+      missing_source_memory_id: 0,
+      missing_embedding: 0,
+    };
+    for (const record of vectorJsonlRecords) {
+      if (!stringField(record, "id")) vectorFieldIssues.missing_id += 1;
+      const layer = stringField(record, "layer");
+      if (layer !== "active" && layer !== "archive") vectorFieldIssues.missing_layer += 1;
+      if (!stringField(record, "summary")) vectorFieldIssues.missing_summary += 1;
+      if (!stringField(record, "source_memory_id")) vectorFieldIssues.missing_source_memory_id += 1;
+      const embedding = record.embedding;
+      const vector = record.vector;
+      const hasEmbedding = Array.isArray(embedding) ? embedding.length > 0 : (Array.isArray(vector) ? vector.length > 0 : false);
+      if (!hasEmbedding) vectorFieldIssues.missing_embedding += 1;
+    }
+    const graphFieldIssues = {
+      missing_id: 0,
+      missing_event_ref: 0,
+      missing_layer: 0,
+      malformed_relations: 0,
+    };
+    for (const record of graphRecords) {
+      if (!stringField(record, "id")) graphFieldIssues.missing_id += 1;
+      if (!stringField(record, "source_event_id") && !stringField(record, "archive_event_id")) {
+        graphFieldIssues.missing_event_ref += 1;
+      }
+      const layer = stringField(record, "source_layer");
+      if (layer !== "archive_event" && layer !== "active_only") graphFieldIssues.missing_layer += 1;
+      if (!Array.isArray(record.relations)) graphFieldIssues.malformed_relations += 1;
+    }
+    const archiveIdSet = new Set(
+      archiveRecords
+        .map(record => stringField(record, "id"))
+        .filter(Boolean),
+    );
+    const vectorLinkedToArchive = vectorJsonlRecords.filter(record => {
+      const sourceMemoryId = stringField(record, "source_memory_id");
+      return !!sourceMemoryId && archiveIdSet.has(sourceMemoryId);
+    }).length;
+    const graphLinkedToArchive = graphRecords.filter(record => {
+      const sourceLayer = stringField(record, "source_layer");
+      const refId = stringField(record, "source_event_id") || stringField(record, "archive_event_id");
+      return sourceLayer === "archive_event" && !!refId && archiveIdSet.has(refId);
+    }).length;
+    const schemaIssueTotal = Object.values(activeFieldIssues).reduce((sum, n) => sum + n, 0)
+      + Object.values(archiveFieldIssues).reduce((sum, n) => sum + n, 0)
+      + Object.values(vectorFieldIssues).reduce((sum, n) => sum + n, 0)
+      + Object.values(graphFieldIssues).reduce((sum, n) => sum + n, 0);
+    checks.push({
+      name: "Field mapping alignment",
+      passed: schemaIssueTotal === 0,
+      message: schemaIssueTotal === 0
+        ? "active/archive/vector/graph field mapping aligned with read path"
+        : `${schemaIssueTotal} field mapping issues detected across four memory stores`,
+    });
     return {
       success: true,
       data: {
@@ -1207,7 +1423,40 @@ export function createTsEngine(deps: TsEngineDeps): MemoryEngine {
           llm: llmConnectivity,
           reranker: rerankerConnectivity,
         },
-        recommendations: [],
+        quality_check: qualityCheck,
+        schema_alignment: {
+          active: {
+            records: activeRecords.length,
+            issues: activeFieldIssues,
+          },
+          archive: {
+            records: archiveRecords.length,
+            issues: archiveFieldIssues,
+          },
+          vector: {
+            records: vectorJsonlRecords.length,
+            issues: vectorFieldIssues,
+            linked_to_archive: vectorLinkedToArchive,
+          },
+          graph: {
+            records: graphRecords.length,
+            issues: graphFieldIssues,
+            linked_archive_events: graphLinkedToArchive,
+          },
+          cross_layer_links: {
+            archive_records: archiveIdSet.size,
+            vector_archive_link_coverage: archiveIdSet.size > 0
+              ? Number((vectorLinkedToArchive / archiveIdSet.size).toFixed(4))
+              : 0,
+            graph_archive_link_coverage: archiveIdSet.size > 0
+              ? Number((graphLinkedToArchive / archiveIdSet.size).toFixed(4))
+              : 0,
+          },
+        },
+        recommendations: [
+          ...(totalInvalid > 0 ? ["Run repair-memory --fix to clean invalid records"] : []),
+          ...(schemaIssueTotal > 0 ? ["Run diagnostics output schema_alignment and repair missing cross-layer fields"] : []),
+        ],
       },
     };
   }
@@ -1340,7 +1589,7 @@ export function createTsEngine(deps: TsEngineDeps): MemoryEngine {
 
     if (role === "user" && text.length > 5) {
       try {
-        const searchResult = await deps.readStore.searchMemory({ query: text, topK: 3 });
+        const searchResult = await deps.readStore.searchMemory({ query: text, topK: 3, mode: "lightweight" });
         if (searchResult.results.length > 0) {
           deps.setSessionAutoSearchCache(sessionId, text, searchResult.results);
           deps.logger.info(`TS auto-search cached ${searchResult.results.length} results for context`);

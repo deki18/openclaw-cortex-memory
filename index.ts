@@ -7,6 +7,7 @@ import { createReadStore } from "./src/store/read_store";
 import { createWriteStore } from "./src/store/write_store";
 import { createArchiveStore } from "./src/store/archive_store";
 import { createVectorStore } from "./src/store/vector_store";
+import { createGraphMemoryStore } from "./src/store/graph_memory_store";
 import { createSessionSync } from "./src/sync/session_sync";
 import { createSessionEnd } from "./src/session/session_end";
 import { createRuleStore } from "./src/rules/rule_store";
@@ -52,6 +53,7 @@ interface CortexMemoryConfig {
   llmRequiredForWrite?: boolean;
   autoReflect?: boolean;
   autoReflectIntervalMinutes?: number;
+  graphQualityMode?: "off" | "warn" | "strict";
   readFusion?: {
     enabled?: boolean;
     maxCandidates?: number;
@@ -80,6 +82,15 @@ interface CortexMemoryConfig {
   vectorChunking?: {
     chunkSize?: number;
     chunkOverlap?: number;
+    evidenceMaxChunks?: number;
+  };
+  writePolicy?: {
+    archiveMinConfidence?: number;
+    archiveMinQualityScore?: number;
+    activeMinQualityScore?: number;
+    activeDedupTailLines?: number;
+    activeTextMaxChars?: number;
+    archiveSourceTextMaxChars?: number;
   };
   memoryDecay?: {
     enabled?: boolean;
@@ -91,6 +102,32 @@ interface CortexMemoryConfig {
       maxBoost?: number;
       hitWeight?: number;
       recentWindowDays?: number;
+    };
+  };
+  readTuning?: {
+    scoring?: {
+      lexicalWeight?: number;
+      bm25Scale?: number;
+      semanticWeight?: number;
+      recencyWeight?: number;
+      qualityWeight?: number;
+      typeMatchWeight?: number;
+      graphMatchWeight?: number;
+    };
+    rrf?: {
+      k?: number;
+      weight?: number;
+    };
+    recency?: {
+      buckets?: Array<{
+        maxAgeHours: number;
+        score: number;
+        bonus: number;
+      }>;
+    };
+    autoContext?: {
+      queryMaxChars?: number;
+      lightweightSearch?: boolean;
     };
   };
 }
@@ -170,6 +207,7 @@ const defaultConfig: Partial<CortexMemoryConfig> = {
   llmRequiredForWrite: true,
   autoReflect: false,
   autoReflectIntervalMinutes: 30,
+  graphQualityMode: "warn",
   readFusion: {
     enabled: true,
     maxCandidates: 10,
@@ -198,6 +236,15 @@ const defaultConfig: Partial<CortexMemoryConfig> = {
   vectorChunking: {
     chunkSize: 600,
     chunkOverlap: 100,
+    evidenceMaxChunks: 2,
+  },
+  writePolicy: {
+    archiveMinConfidence: 0.35,
+    archiveMinQualityScore: 0.4,
+    activeMinQualityScore: 0.45,
+    activeDedupTailLines: 200,
+    activeTextMaxChars: 4000,
+    archiveSourceTextMaxChars: 8000,
   },
   memoryDecay: {
     enabled: true,
@@ -225,6 +272,35 @@ const defaultConfig: Partial<CortexMemoryConfig> = {
       requirement: 240,
       dependency: 240,
       assumption: 240,
+    },
+  },
+  readTuning: {
+    scoring: {
+      lexicalWeight: 0.2,
+      bm25Scale: 2,
+      semanticWeight: 0.3,
+      recencyWeight: 0.1,
+      qualityWeight: 0.15,
+      typeMatchWeight: 0.15,
+      graphMatchWeight: 0.1,
+    },
+    rrf: {
+      k: 60,
+      weight: 1.5,
+    },
+    recency: {
+      buckets: [
+        { maxAgeHours: 12, score: 1, bonus: 0.6 },
+        { maxAgeHours: 24, score: 0.8, bonus: 0.6 },
+        { maxAgeHours: 72, score: 0.6, bonus: 0.3 },
+        { maxAgeHours: 168, score: 0.4, bonus: 0.3 },
+        { maxAgeHours: 720, score: 0.2, bonus: 0 },
+        { maxAgeHours: Number.POSITIVE_INFINITY, score: 0.05, bonus: 0 },
+      ],
+    },
+    autoContext: {
+      queryMaxChars: 80,
+      lightweightSearch: true,
     },
   },
   enabled: true,
@@ -344,6 +420,7 @@ function resolveEngine(): MemoryEngine {
     llm: config.llm,
     fusion: config.readFusion,
     memoryDecay: config.memoryDecay,
+    readTuning: config.readTuning,
   });
   const vectorStore = createVectorStore({
     memoryRoot,
@@ -355,6 +432,7 @@ function resolveEngine(): MemoryEngine {
     logger,
     embedding: config.embedding,
     vectorChunking: config.vectorChunking,
+    writePolicy: config.writePolicy,
     vectorStore,
   });
   const deduplicator = createThreeStageDeduplicator({
@@ -367,16 +445,26 @@ function resolveEngine(): MemoryEngine {
     logger,
     embedding: config.embedding,
     vectorChunking: config.vectorChunking,
+    writePolicy: config.writePolicy,
     deduplicator,
     vectorStore,
+  });
+  const graphMemoryStore = createGraphMemoryStore({
+    projectRoot,
+    memoryRoot,
+    logger,
+    qualityMode: config.graphQualityMode || "warn",
   });
   const sessionSync = createSessionSync({
     projectRoot,
     dbPath: config.dbPath,
     logger,
     llm: config.llm,
+    graphQualityMode: config.graphQualityMode || "warn",
     requireLlmForWrite: config.llmRequiredForWrite ?? true,
+    writePolicy: config.writePolicy,
     archiveStore,
+    graphMemoryStore,
     writeStore,
   });
   const sessionEnd = createSessionEnd({
@@ -385,9 +473,7 @@ function resolveEngine(): MemoryEngine {
     logger,
     syncMemory: sessionSync.syncMemory,
     syncDailySummaries: sessionSync.syncDailySummaries,
-    archiveStore,
-    llm: config.llm,
-    requireLlmForWrite: config.llmRequiredForWrite ?? true,
+    routeTranscript: sessionSync.routeTranscript,
   });
   const ruleStore = createRuleStore({
     projectRoot,
@@ -406,6 +492,7 @@ function resolveEngine(): MemoryEngine {
     writeStore,
     vectorStore,
     archiveStore,
+    graphMemoryStore,
     sessionSync,
     sessionEnd,
     reflector,
@@ -548,6 +635,11 @@ function validateConfig(cfg: CortexMemoryConfig): string[] {
       errors.push("autoReflectIntervalMinutes must be >= 5.");
     }
   }
+  if (cfg.graphQualityMode !== undefined) {
+    if (!["off", "warn", "strict"].includes(cfg.graphQualityMode)) {
+      errors.push("graphQualityMode must be one of: off, warn, strict.");
+    }
+  }
   if (cfg.readFusion?.channelWeights) {
     const weights = cfg.readFusion.channelWeights;
     for (const [key, value] of Object.entries(weights)) {
@@ -574,6 +666,30 @@ function validateConfig(cfg: CortexMemoryConfig): string[] {
       errors.push("vectorChunking.chunkOverlap must be >= 0.");
     }
   }
+  if (cfg.vectorChunking?.evidenceMaxChunks !== undefined) {
+    if (!Number.isFinite(cfg.vectorChunking.evidenceMaxChunks) || cfg.vectorChunking.evidenceMaxChunks < 0) {
+      errors.push("vectorChunking.evidenceMaxChunks must be >= 0.");
+    }
+  }
+  if (cfg.writePolicy) {
+    const wp = cfg.writePolicy;
+    const bounded01 = ["archiveMinConfidence", "archiveMinQualityScore", "activeMinQualityScore"] as const;
+    for (const key of bounded01) {
+      const value = wp[key];
+      if (value !== undefined && (!Number.isFinite(value) || value < 0 || value > 1)) {
+        errors.push(`writePolicy.${key} must be between 0 and 1.`);
+      }
+    }
+    if (wp.activeDedupTailLines !== undefined && (!Number.isFinite(wp.activeDedupTailLines) || wp.activeDedupTailLines < 20)) {
+      errors.push("writePolicy.activeDedupTailLines must be >= 20.");
+    }
+    if (wp.activeTextMaxChars !== undefined && (!Number.isFinite(wp.activeTextMaxChars) || wp.activeTextMaxChars < 500)) {
+      errors.push("writePolicy.activeTextMaxChars must be >= 500.");
+    }
+    if (wp.archiveSourceTextMaxChars !== undefined && (!Number.isFinite(wp.archiveSourceTextMaxChars) || wp.archiveSourceTextMaxChars < 1000)) {
+      errors.push("writePolicy.archiveSourceTextMaxChars must be >= 1000.");
+    }
+  }
   if (cfg.memoryDecay) {
     if (typeof cfg.memoryDecay.minFloor === "number" && (!Number.isFinite(cfg.memoryDecay.minFloor) || cfg.memoryDecay.minFloor < 0 || cfg.memoryDecay.minFloor > 1)) {
       errors.push("memoryDecay.minFloor must be between 0 and 1.");
@@ -591,6 +707,40 @@ function validateConfig(cfg: CortexMemoryConfig): string[] {
       }
       if (typeof anti.recentWindowDays === "number" && (!Number.isFinite(anti.recentWindowDays) || anti.recentWindowDays <= 0)) {
         errors.push("memoryDecay.antiDecay.recentWindowDays must be > 0.");
+      }
+    }
+  }
+  if (cfg.readTuning) {
+    const numericReadTuningFields: Array<[string, number | undefined, number]> = [
+      ["readTuning.scoring.lexicalWeight", cfg.readTuning.scoring?.lexicalWeight, 0],
+      ["readTuning.scoring.bm25Scale", cfg.readTuning.scoring?.bm25Scale, 0],
+      ["readTuning.scoring.semanticWeight", cfg.readTuning.scoring?.semanticWeight, 0],
+      ["readTuning.scoring.recencyWeight", cfg.readTuning.scoring?.recencyWeight, 0],
+      ["readTuning.scoring.qualityWeight", cfg.readTuning.scoring?.qualityWeight, 0],
+      ["readTuning.scoring.typeMatchWeight", cfg.readTuning.scoring?.typeMatchWeight, 0],
+      ["readTuning.scoring.graphMatchWeight", cfg.readTuning.scoring?.graphMatchWeight, 0],
+      ["readTuning.rrf.k", cfg.readTuning.rrf?.k, 1],
+      ["readTuning.rrf.weight", cfg.readTuning.rrf?.weight, 0],
+      ["readTuning.autoContext.queryMaxChars", cfg.readTuning.autoContext?.queryMaxChars, 20],
+    ];
+    for (const [name, value, min] of numericReadTuningFields) {
+      if (typeof value === "number" && (!Number.isFinite(value) || value < min)) {
+        errors.push(`${name} must be >= ${min}.`);
+      }
+    }
+    if (Array.isArray(cfg.readTuning.recency?.buckets)) {
+      const buckets = cfg.readTuning.recency.buckets;
+      for (let i = 0; i < buckets.length; i += 1) {
+        const bucket = buckets[i];
+        if (!Number.isFinite(bucket.maxAgeHours) || bucket.maxAgeHours <= 0) {
+          errors.push(`readTuning.recency.buckets[${i}].maxAgeHours must be > 0.`);
+        }
+        if (!Number.isFinite(bucket.score) || bucket.score < 0) {
+          errors.push(`readTuning.recency.buckets[${i}].score must be >= 0.`);
+        }
+        if (!Number.isFinite(bucket.bonus) || bucket.bonus < 0) {
+          errors.push(`readTuning.recency.buckets[${i}].bonus must be >= 0.`);
+        }
       }
     }
   }
@@ -803,13 +953,47 @@ function registerTools(): void {
           entities: { 
             type: "array", 
             description: "Involved entities",
-            items: { type: "string" }
+            items: {
+              oneOf: [
+                { type: "string" },
+                {
+                  type: "object",
+                  properties: {
+                    id: { type: "string" },
+                    name: { type: "string" },
+                    type: { type: "string" },
+                  },
+                  additionalProperties: false,
+                },
+              ],
+            },
+          },
+          entity_types: {
+            type: "object",
+            description: "Entity type map, key is entity name and value is type",
+            additionalProperties: { type: "string" },
           },
           outcome: { type: "string", description: "Event outcome" },
           relations: { 
             type: "array", 
             description: "Entity relationships",
-            items: { type: "string" }
+            items: {
+              oneOf: [
+                { type: "string" },
+                {
+                  type: "object",
+                  properties: {
+                    source: { type: "string" },
+                    target: { type: "string" },
+                    type: { type: "string" },
+                    evidence_span: { type: "string" },
+                    confidence: { type: "number" },
+                  },
+                  required: ["source", "target"],
+                  additionalProperties: false,
+                },
+              ],
+            }
           },
         },
         required: ["summary"],
@@ -817,7 +1001,13 @@ function registerTools(): void {
       },
       execute: async (params: { args?: Record<string, unknown>; context: ToolContext }) => {
         const args = params.args || params;
-        return resolveEngine().storeEvent(args as { summary: string; entities?: Array<{ id?: string; name?: string; type?: string }>; outcome?: string; relations?: Array<{ source: string; target: string; type: string }> }, params.context);
+        return resolveEngine().storeEvent(args as {
+          summary: string;
+          entities?: Array<{ id?: string; name?: string; type?: string }>;
+          entity_types?: Record<string, string>;
+          outcome?: string;
+          relations?: Array<{ source: string; target: string; type: string }>;
+        }, params.context);
       },
     },
     {
@@ -825,15 +1015,29 @@ function registerTools(): void {
       description: "Query memory graph for entity relationships",
       parameters: {
         type: "object",
-        properties: { 
-          entity: { type: "string", description: "Entity name" } 
+        properties: {
+          entity: { type: "string", description: "Entity name" },
+          rel: { type: "string", description: "Optional relation type filter" },
+          dir: {
+            type: "string",
+            description: "Relation direction filter",
+            enum: ["incoming", "outgoing", "both"],
+          },
+          path_to: { type: "string", description: "Find path from entity to this target entity" },
+          max_depth: { type: "integer", description: "Path query max depth (2~4)" },
         },
         required: ["entity"],
         additionalProperties: false,
       },
       execute: async (params: { args?: Record<string, unknown>; context: ToolContext }) => {
         const args = params.args || params;
-        return resolveEngine().queryGraph(args as { entity: string }, params.context);
+        return resolveEngine().queryGraph(args as {
+          entity: string;
+          rel?: string;
+          dir?: "incoming" | "outgoing" | "both";
+          path_to?: string;
+          max_depth?: number;
+        }, params.context);
       },
     },
     {
@@ -1443,6 +1647,7 @@ export function register(pluginApi: OpenClawPluginApi, userConfig?: Partial<Cort
     autoSync: effectiveConfig.autoSync ?? defaultConfig.autoSync,
     autoReflect: effectiveConfig.autoReflect ?? defaultConfig.autoReflect,
     autoReflectIntervalMinutes: effectiveConfig.autoReflectIntervalMinutes ?? defaultConfig.autoReflectIntervalMinutes,
+    graphQualityMode: effectiveConfig.graphQualityMode ?? defaultConfig.graphQualityMode,
     readFusion: {
       enabled: effectiveConfig.readFusion?.enabled ?? defaultConfig.readFusion?.enabled,
       maxCandidates: effectiveConfig.readFusion?.maxCandidates ?? defaultConfig.readFusion?.maxCandidates,
@@ -1461,6 +1666,15 @@ export function register(pluginApi: OpenClawPluginApi, userConfig?: Partial<Cort
     vectorChunking: {
       chunkSize: effectiveConfig.vectorChunking?.chunkSize ?? defaultConfig.vectorChunking?.chunkSize,
       chunkOverlap: effectiveConfig.vectorChunking?.chunkOverlap ?? defaultConfig.vectorChunking?.chunkOverlap,
+      evidenceMaxChunks: effectiveConfig.vectorChunking?.evidenceMaxChunks ?? defaultConfig.vectorChunking?.evidenceMaxChunks,
+    },
+    writePolicy: {
+      archiveMinConfidence: effectiveConfig.writePolicy?.archiveMinConfidence ?? defaultConfig.writePolicy?.archiveMinConfidence,
+      archiveMinQualityScore: effectiveConfig.writePolicy?.archiveMinQualityScore ?? defaultConfig.writePolicy?.archiveMinQualityScore,
+      activeMinQualityScore: effectiveConfig.writePolicy?.activeMinQualityScore ?? defaultConfig.writePolicy?.activeMinQualityScore,
+      activeDedupTailLines: effectiveConfig.writePolicy?.activeDedupTailLines ?? defaultConfig.writePolicy?.activeDedupTailLines,
+      activeTextMaxChars: effectiveConfig.writePolicy?.activeTextMaxChars ?? defaultConfig.writePolicy?.activeTextMaxChars,
+      archiveSourceTextMaxChars: effectiveConfig.writePolicy?.archiveSourceTextMaxChars ?? defaultConfig.writePolicy?.archiveSourceTextMaxChars,
     },
     memoryDecay: {
       enabled: effectiveConfig.memoryDecay?.enabled ?? defaultConfig.memoryDecay?.enabled,
@@ -1472,6 +1686,28 @@ export function register(pluginApi: OpenClawPluginApi, userConfig?: Partial<Cort
         maxBoost: effectiveConfig.memoryDecay?.antiDecay?.maxBoost ?? defaultConfig.memoryDecay?.antiDecay?.maxBoost,
         hitWeight: effectiveConfig.memoryDecay?.antiDecay?.hitWeight ?? defaultConfig.memoryDecay?.antiDecay?.hitWeight,
         recentWindowDays: effectiveConfig.memoryDecay?.antiDecay?.recentWindowDays ?? defaultConfig.memoryDecay?.antiDecay?.recentWindowDays,
+      },
+    },
+    readTuning: {
+      scoring: {
+        lexicalWeight: effectiveConfig.readTuning?.scoring?.lexicalWeight ?? defaultConfig.readTuning?.scoring?.lexicalWeight,
+        bm25Scale: effectiveConfig.readTuning?.scoring?.bm25Scale ?? defaultConfig.readTuning?.scoring?.bm25Scale,
+        semanticWeight: effectiveConfig.readTuning?.scoring?.semanticWeight ?? defaultConfig.readTuning?.scoring?.semanticWeight,
+        recencyWeight: effectiveConfig.readTuning?.scoring?.recencyWeight ?? defaultConfig.readTuning?.scoring?.recencyWeight,
+        qualityWeight: effectiveConfig.readTuning?.scoring?.qualityWeight ?? defaultConfig.readTuning?.scoring?.qualityWeight,
+        typeMatchWeight: effectiveConfig.readTuning?.scoring?.typeMatchWeight ?? defaultConfig.readTuning?.scoring?.typeMatchWeight,
+        graphMatchWeight: effectiveConfig.readTuning?.scoring?.graphMatchWeight ?? defaultConfig.readTuning?.scoring?.graphMatchWeight,
+      },
+      rrf: {
+        k: effectiveConfig.readTuning?.rrf?.k ?? defaultConfig.readTuning?.rrf?.k,
+        weight: effectiveConfig.readTuning?.rrf?.weight ?? defaultConfig.readTuning?.rrf?.weight,
+      },
+      recency: {
+        buckets: effectiveConfig.readTuning?.recency?.buckets ?? defaultConfig.readTuning?.recency?.buckets,
+      },
+      autoContext: {
+        queryMaxChars: effectiveConfig.readTuning?.autoContext?.queryMaxChars ?? defaultConfig.readTuning?.autoContext?.queryMaxChars,
+        lightweightSearch: effectiveConfig.readTuning?.autoContext?.lightweightSearch ?? defaultConfig.readTuning?.autoContext?.lightweightSearch,
       },
     },
     enabled: effectiveConfig.enabled ?? defaultConfig.enabled,

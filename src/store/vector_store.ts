@@ -17,6 +17,7 @@ interface VectorStoreRecord {
   layer: "active" | "archive";
   source_memory_id: string;
   source_memory_canonical_id?: string;
+  source_field?: "summary" | "evidence";
   outcome?: string;
   entities?: string[];
   relations?: Array<{ source: string; target: string; type: string }>;
@@ -67,6 +68,7 @@ export function createVectorStore(options: VectorStoreOptions): {
         layer: record.layer,
         source_memory_id: record.source_memory_id,
         source_memory_canonical_id: record.source_memory_canonical_id || "",
+        source_field: record.source_field || "",
         outcome: record.outcome || "",
         entities_json: JSON.stringify(record.entities || []),
         relations_json: JSON.stringify(record.relations || []),

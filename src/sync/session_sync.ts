@@ -1,6 +1,8 @@
-import * as crypto from "crypto";
+﻿import * as crypto from "crypto";
 import * as fs from "fs";
 import * as path from "path";
+import type { GraphQualityMode } from "../graph/ontology";
+import { validateLlmJsonOutput, validateArchiveEvent } from "../quality/llm_output_validator";
 
 interface LoggerLike {
   debug: (message: string, ...args: unknown[]) => void;
@@ -30,24 +32,47 @@ interface SessionSyncOptions {
     baseURL?: string;
     baseUrl?: string;
   };
+  graphQualityMode?: GraphQualityMode;
   archiveStore: {
     storeEvents(events: Array<{
       event_type: string;
       summary: string;
       entities?: string[];
-      relations?: Array<{ source: string; target: string; type: string }>;
+      relations?: Array<{ source: string; target: string; type: string; evidence_span?: string; confidence?: number }>;
+      entity_types?: Record<string, string>;
       outcome?: string;
       session_id: string;
       source_file: string;
+      source_text?: string;
       confidence?: number;
       source_event_id?: string;
       actor?: string;
     }>): Promise<{ stored: Array<{ id: string }>; skipped: Array<{ summary: string; reason: string }> }>;
   };
+  graphMemoryStore?: {
+    append(input: {
+      sourceEventId: string;
+      sourceLayer: "archive_event" | "active_only";
+      archiveEventId?: string;
+      sessionId: string;
+      sourceFile?: string;
+      eventType?: string;
+      entities?: string[];
+      entity_types?: Record<string, string>;
+      relations?: Array<{ source: string; target: string; type: string; evidence_span?: string; confidence?: number }>;
+      gateSource: "sync" | "session_end" | "manual";
+      confidence?: number;
+      sourceText?: string;
+    }): Promise<{ success: boolean; reason?: string }>;
+  };
   writeStore: {
     writeMemory(args: { text: string; role: string; source: string; sessionId: string }): Promise<{ status: "ok" | "skipped"; reason?: string }>;
   };
   requireLlmForWrite?: boolean;
+  writePolicy?: {
+    activeTextMaxChars?: number;
+    archiveSourceTextMaxChars?: number;
+  };
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -237,27 +262,47 @@ function normalizeBaseUrl(value?: string): string {
   return value.endsWith("/") ? value.slice(0, -1) : value;
 }
 
+function buildEventSnippet(text: string): string {
+  const lines = text
+    .split(/\r?\n/)
+    .map(line => line.trim())
+    .filter(Boolean)
+    .filter(line => line.length >= 8);
+  const actionPattern = /(决定|完成|修复|阻塞|失败|成功|上线|部署|实现|依赖|owner|blocked|resolved|fixed|depends|decide|complete)/i;
+  const picked = lines.filter(line => actionPattern.test(line));
+  const use = picked.length > 0 ? picked : lines.slice(-20);
+  return use.slice(-30).join("\n").slice(-8000);
+}
+
 interface ArchiveEventPayload {
   event_type: string;
   summary: string;
   entities?: string[];
-  relations?: Array<{ source: string; target: string; type: string }>;
+  relations?: Array<{ source: string; target: string; type: string; evidence_span?: string; confidence?: number }>;
+  entity_types?: Record<string, string>;
   outcome?: string;
   confidence?: number;
 }
 
 interface GateDecisionPayload {
+  candidate_id?: string;
   target_layer: "active_only" | "archive_event" | "skip";
   active_text?: string;
   event?: ArchiveEventPayload;
+  graph?: {
+    entities?: string[];
+    entity_types?: Record<string, string>;
+    relations?: Array<{ source: string; target: string; type: string; evidence_span?: string; confidence?: number }>;
+    confidence?: number;
+  };
   reason?: string;
 }
 
-const WRITE_GATE_PROMPT_VERSION = "write-gate.v1.1.0";
+const WRITE_GATE_PROMPT_VERSION = "write-gate.v1.3.0";
 const WRITE_GATE_REGRESSION_SAMPLES = [
-  "样例A: “今天讨论了三种方案，尚未决策” => active_only",
-  "样例B: “决定采用B方案并完成上线，错误率下降到0.2%” => archive_event",
-  "样例C: “好的收到谢谢” => skip",
+  "鏍蜂緥A: 鈥滀粖澶╄璁轰簡涓夌鏂规锛屽皻鏈喅绛栤€?=> active_only",
+  "鏍蜂緥B: 鈥滃喅瀹氶噰鐢˙鏂规骞跺畬鎴愪笂绾匡紝閿欒鐜囦笅闄嶅埌0.2%鈥?=> archive_event",
+  "鏍蜂緥C: 鈥滃ソ鐨勬敹鍒拌阿璋⑩€?=> skip",
 ];
 
 function parseArchiveEventPayload(value: unknown): ArchiveEventPayload | null {
@@ -281,69 +326,170 @@ function parseArchiveEventPayload(value: unknown): ArchiveEventPayload | null {
           const source = typeof relation.source === "string" ? relation.source.trim() : "";
           const target = typeof relation.target === "string" ? relation.target.trim() : "";
           const type = typeof relation.type === "string" ? relation.type.trim() : "related_to";
+          const evidenceSpan = typeof relation.evidence_span === "string" ? relation.evidence_span.trim() : "";
+          const confidence = typeof relation.confidence === "number"
+            ? Math.max(0, Math.min(1, relation.confidence))
+            : undefined;
           if (!source || !target) return null;
-          return { source, target, type };
+          return { source, target, type, evidence_span: evidenceSpan || undefined, confidence };
         })
-        .filter((valueItem): valueItem is { source: string; target: string; type: string } => Boolean(valueItem))
-    : [];
+        .filter(Boolean) as Array<{ source: string; target: string; type: string; evidence_span?: string; confidence?: number }>
+      : [];
+  const entity_types = typeof obj.entity_types === "object" && obj.entity_types !== null && !Array.isArray(obj.entity_types)
+    ? Object.fromEntries(
+        Object.entries(obj.entity_types as Record<string, unknown>)
+          .filter(([key, value]) => typeof key === "string" && key.trim().length > 0 && typeof value === "string" && value.trim().length > 0)
+          .map(([key, value]) => [key.trim(), (value as string).trim()]),
+      )
+    : undefined;
   return {
     event_type: eventType,
     summary,
     entities,
+    entity_types,
     relations,
     outcome: typeof obj.outcome === "string" ? obj.outcome.trim() : "",
     confidence: typeof obj.confidence === "number" ? Math.max(0, Math.min(1, obj.confidence)) : 0.6,
   };
 }
 
-function parseLlmGateDecisions(raw: string): GateDecisionPayload[] {
-  const trimmed = raw.trim();
-  const fence = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/i);
-  const candidate = fence?.[1]?.trim() || trimmed;
-  const parsed = JSON.parse(candidate) as unknown;
-  const asRecordObj = (typeof parsed === "object" && parsed !== null) ? parsed as Record<string, unknown> : null;
-  const wrapped = Array.isArray(parsed)
-    ? parsed
-    : Array.isArray(asRecordObj?.decisions)
-      ? asRecordObj?.decisions
-      : [];
-  if (Array.isArray(wrapped) && wrapped.length > 0) {
-    const output: GateDecisionPayload[] = [];
-    for (const item of wrapped) {
-      if (!item || typeof item !== "object") continue;
-      const obj = item as Record<string, unknown>;
-      const target = typeof obj.target_layer === "string" ? obj.target_layer.trim() : "";
-      if (target !== "active_only" && target !== "archive_event" && target !== "skip") {
-        continue;
+function parseGraphPayload(value: unknown): {
+  entities?: string[];
+  entity_types?: Record<string, string>;
+  relations?: Array<{ source: string; target: string; type: string; evidence_span?: string; confidence?: number }>;
+  confidence?: number;
+} | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  const obj = value as Record<string, unknown>;
+  const entities = Array.isArray(obj.entities)
+    ? obj.entities.map(v => (typeof v === "string" ? v.trim() : "")).filter(Boolean)
+    : [];
+  const entity_types = typeof obj.entity_types === "object" && obj.entity_types !== null && !Array.isArray(obj.entity_types)
+    ? Object.fromEntries(
+        Object.entries(obj.entity_types as Record<string, unknown>)
+          .filter(([key, val]) => typeof key === "string" && key.trim() && typeof val === "string" && val.trim())
+          .map(([key, val]) => [key.trim(), (val as string).trim()]),
+      )
+    : undefined;
+  const relations = Array.isArray(obj.relations)
+    ? obj.relations
+        .map(item => {
+          if (!item || typeof item !== "object") return null;
+          const rel = item as Record<string, unknown>;
+          const source = typeof rel.source === "string" ? rel.source.trim() : "";
+          const target = typeof rel.target === "string" ? rel.target.trim() : "";
+          const type = typeof rel.type === "string" && rel.type.trim() ? rel.type.trim() : "related_to";
+          if (!source || !target) return null;
+          const evidenceSpan = typeof rel.evidence_span === "string" ? rel.evidence_span.trim() : "";
+          const confidence = typeof rel.confidence === "number"
+            ? Math.max(0, Math.min(1, rel.confidence))
+            : undefined;
+          return {
+            source,
+            target,
+            type,
+            ...(evidenceSpan ? { evidence_span: evidenceSpan } : {}),
+            ...(typeof confidence === "number" ? { confidence } : {}),
+          };
+        })
+        .filter((item): item is { source: string; target: string; type: string; evidence_span?: string; confidence?: number } => item !== null)
+    : [];
+  if (entities.length === 0 || relations.length === 0) {
+    return null;
+  }
+  return {
+    entities,
+    entity_types,
+    relations,
+    confidence: typeof obj.confidence === "number" ? Math.max(0, Math.min(1, obj.confidence)) : undefined,
+  };
+}
+
+function parseLlmGateDecisions(raw: string, logger?: LoggerLike): GateDecisionPayload[] {
+  const validation = validateLlmJsonOutput(raw);
+  if (!validation.valid) {
+    if (logger) {
+      logger.warn(`quality_gate_decisions_invalid errors=${validation.errors.join("|")}`);
+    }
+    return [];
+  }
+  if (validation.warnings.length > 0 && logger) {
+    logger.debug(`quality_gate_decisions_warnings warnings=${validation.warnings.join("|")}`);
+  }
+  const root = validation.data;
+  const parsed = Array.isArray(root) ? root : (root as Record<string, unknown>);
+  const output: GateDecisionPayload[] = [];
+  const pushDecision = (obj: Record<string, unknown>, target: "active_only" | "archive_event" | "skip"): void => {
+    let event: ArchiveEventPayload | null = null;
+    if (target === "archive_event") {
+      const eventValidation = validateArchiveEvent(obj.event || obj);
+      if (eventValidation.valid && eventValidation.cleaned) {
+        event = {
+          event_type: eventValidation.cleaned.event_type || "insight",
+          summary: eventValidation.cleaned.summary,
+          entities: eventValidation.cleaned.entities,
+          entity_types: eventValidation.cleaned.entity_types,
+          relations: eventValidation.cleaned.relations,
+          outcome: eventValidation.cleaned.outcome || "",
+          confidence: eventValidation.cleaned.confidence,
+        };
+      } else {
+        if (logger) {
+          logger.warn(`quality_event_invalid errors=${eventValidation.errors.join("|")}`);
+        }
+        return;
       }
-      const event = target === "archive_event"
-        ? parseArchiveEventPayload(obj.event || obj)
-        : null;
-      output.push({
-        target_layer: target,
-        active_text: typeof obj.active_text === "string" ? obj.active_text.trim() : "",
-        event: event || undefined,
-        reason: typeof obj.reason === "string" ? obj.reason.trim() : "",
-      });
     }
-    if (output.length > 0) {
-      return output;
-    }
-  }
-  const legacyEvents = Array.isArray(asRecordObj?.events) ? asRecordObj?.events : [];
-  const legacyOutput: GateDecisionPayload[] = [];
-  for (const item of legacyEvents) {
-    const parsedEvent = parseArchiveEventPayload(item);
-    if (!parsedEvent) {
-      continue;
-    }
-    legacyOutput.push({
-      target_layer: "archive_event",
-      event: parsedEvent,
-      reason: "legacy_events",
+    output.push({
+      candidate_id: typeof obj.candidate_id === "string" ? obj.candidate_id.trim() : "",
+      target_layer: target,
+      active_text: typeof obj.active_text === "string" ? obj.active_text.trim() : "",
+      event: event || undefined,
+      graph: parseGraphPayload(obj.graph) || undefined,
+      reason: typeof obj.reason === "string" ? obj.reason.trim() : "",
     });
+  };
+
+  if (Array.isArray(parsed)) {
+    if (logger) {
+      logger.warn("quality_gate_decisions_invalid format=array_not_supported_require_routing_plan");
+    }
+  } else if (parsed && typeof parsed === "object") {
+    const rootObj = parsed as Record<string, unknown>;
+    const routingPlan = (typeof rootObj.routing_plan === "object" && rootObj.routing_plan !== null)
+      ? rootObj.routing_plan as Record<string, unknown>
+      : null;
+    if (routingPlan) {
+      const buckets: Array<{ key: "archive_event" | "active_only" | "skip"; items: unknown }> = [
+        { key: "archive_event", items: routingPlan.archive_event },
+        { key: "active_only", items: routingPlan.active_only },
+        { key: "skip", items: routingPlan.skip },
+      ];
+      for (const bucket of buckets) {
+        if (!Array.isArray(bucket.items)) continue;
+        for (const item of bucket.items) {
+          if (!item || typeof item !== "object") continue;
+          pushDecision(item as Record<string, unknown>, bucket.key);
+        }
+      }
+    } else if (logger) {
+      logger.warn("quality_gate_decisions_invalid missing_routing_plan");
+    }
   }
-  return legacyOutput;
+  if (output.length === 0 && logger) {
+    logger.warn("quality_gate_decisions_empty");
+  }
+  const deduped: GateDecisionPayload[] = [];
+  const seen = new Set<string>();
+  for (const item of output) {
+    const key = `${item.target_layer}|${item.event?.summary || item.active_text || item.reason || ""}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    deduped.push(item);
+  }
+  return deduped;
 }
 
 async function extractGateDecisionsWithLlm(args: {
@@ -359,30 +505,35 @@ async function extractGateDecisionsWithLlm(args: {
     temperature: 0.1,
     response_format: { type: "json_object" },
     messages: [
-      { role: "system", content: "你是出色的记忆提取器。仅输出 JSON。" },
+      { role: "system", content: "You are a memory write-gate router. Output JSON only." },
       {
         role: "user",
         content: [
           `prompt_version=${WRITE_GATE_PROMPT_VERSION}`,
-          "请对以下导入内容做分流判定，target_layer 只能是 active_only、archive_event、skip。",
-          "分类标准：",
-          "A) active_only：内容是过程信息/上下文片段/未形成稳定结论；或仅记录进行中状态、临时讨论、零散想法。",
-          "B) archive_event：内容形成完整可复用事件，需同时满足：有明确对象、有动作/决策、有结果或阶段性结论；summary 需可脱离原上下文理解。",
-          "C) skip：内容是噪声、重复、空泛寒暄、无业务价值描述，或无法提取清晰事件主体。",
-          "降噪要求：先剔除与任务无关的寒暄、口头禅、重复表述、无实义感叹词，再做分流判定。",
-          "降噪要求：对同一事实的重复片段做合并去重，保留一次且优先保留信息更完整的表达。",
-          "降噪要求：若内容混杂噪声与有效信息，仅保留有效信息进入 active_text 或 event.summary，不要把噪声带入结果。",
-          "archive_event 额外约束：confidence < 0.35 时优先判为 skip；若关系不明确可省略 relations 但不得伪造。",
-          "active_only 额外约束：active_text 必须保留关键信息，不得只返回“同上/略”。",
-          "输出格式必须是 {\"decisions\":[...]}。",
-          "active_only: 必须给 active_text。",
-          "archive_event: 必须给 event={event_type,summary,entities[],relations[],outcome,confidence}。",
-          "skip: 必须给 reason。",
-          "禁止输出任何解释性自然语言。",
+          "Execute in 3 stages:",
+          "Stage1) Split transcript into candidate_events[]. One candidate should contain one principal event only.",
+          "Stage2) Route each candidate_event into target_layer: active_only | archive_event | skip.",
+          "Stage3) Output routing plan only. Do NOT claim data has been written.",
+          "Classification:",
+          "A) active_only: process context, ongoing discussion, temporary status, no stable conclusion.",
+          "B) archive_event: reusable event with clear subject + action/decision + outcome/phase conclusion.",
+          "C) skip: noise/repetition/chitchat/no clear business value.",
+          "Constraints:",
+          "- For archive_event: if confidence < 0.35, prefer skip.",
+          "- Relations must be grounded in source text. Do not fabricate.",
+          "- For active_only: active_text is required.",
+          "- Optional graph for active_only: graph={entities[],entity_types,relations[],confidence}.",
+          "- For relations: each relation should include source,target,type,evidence_span,confidence.",
+          "- If evidence_span or confidence is missing, do not output that relation.",
+          "Output JSON schema:",
+          "{\"candidate_events\":[{\"candidate_id\":\"c1\",\"span\":\"...\",\"normalized_text\":\"...\"}],\"routing_plan\":{\"archive_event\":[{\"candidate_id\":\"c1\",\"event\":{\"event_type\":\"decision\",\"summary\":\"...\",\"entities\":[\"A\"],\"entity_types\":{\"A\":\"Project\"},\"relations\":[],\"outcome\":\"...\",\"confidence\":0.82}}],\"active_only\":[],\"skip\":[]}}",
+          "routing_plan.archive_event[] item: {candidate_id,event}",
+          "routing_plan.active_only[] item: {candidate_id,active_text,graph}",
+          "routing_plan.skip[] item: {candidate_id,reason}",
           ...WRITE_GATE_REGRESSION_SAMPLES,
-          "只输出 JSON。",
+          "Output JSON only.",
           "",
-          args.transcript.slice(-12000),
+          buildEventSnippet(args.transcript),
         ].join("\n"),
       },
     ],
@@ -412,7 +563,7 @@ async function extractGateDecisionsWithLlm(args: {
         lastError = new Error("sync_llm_empty");
         continue;
       }
-      return parseLlmGateDecisions(content);
+      return parseLlmGateDecisions(content, args.logger);
     } catch (error) {
       clearTimeout(timeoutId);
       lastError = error;
@@ -435,6 +586,15 @@ export function createSessionSync(options: SessionSyncOptions): {
     skipReasons: Record<string, number>;
   }>;
   syncDailySummaries(): Promise<{ imported: number; skipped: number; filesProcessed: number; llmDecisions: number; activeOnly: number; archiveEvent: number; skipReasons: Record<string, number> }>;
+  routeTranscript(args: { sessionId: string; sourceFile: string; transcript: string }): Promise<{
+    imported: number;
+    skipped: number;
+    ok: boolean;
+    llmDecisions: number;
+    activeOnly: number;
+    archiveEvent: number;
+    skipReasons: Record<string, number>;
+  }>;
 } {
   const memoryRoot = options.dbPath ? path.resolve(options.dbPath) : path.join(options.projectRoot, "data", "memory");
   const statePath = path.join(memoryRoot, ".sync_state.json");
@@ -458,6 +618,12 @@ export function createSessionSync(options: SessionSyncOptions): {
     skipReasons: Record<string, number>;
   }> {
     const skipReasons: Record<string, number> = {};
+    const activeTextMaxChars = typeof options.writePolicy?.activeTextMaxChars === "number"
+      ? Math.max(500, Math.min(20000, Math.floor(options.writePolicy.activeTextMaxChars)))
+      : 4000;
+    const archiveSourceTextMaxChars = typeof options.writePolicy?.archiveSourceTextMaxChars === "number"
+      ? Math.max(1000, Math.min(30000, Math.floor(options.writePolicy.archiveSourceTextMaxChars)))
+      : 8000;
     function bumpReason(reason: string): void {
       const key = reason || "unknown";
       skipReasons[key] = (skipReasons[key] || 0) + 1;
@@ -475,7 +641,7 @@ export function createSessionSync(options: SessionSyncOptions): {
       }
       options.logger.warn(`Sync gate degraded to active_only for ${args.sessionId}: llm_not_configured`);
       const fallbackWrite = await options.writeStore.writeMemory({
-        text: args.transcript.slice(-4000),
+        text: args.transcript.slice(-activeTextMaxChars),
         role: "system",
         source: `sync_gate_fallback:${args.sourceFile}`,
         sessionId: args.sessionId,
@@ -501,14 +667,21 @@ export function createSessionSync(options: SessionSyncOptions): {
     let skipped = 0;
     let activeOnly = 0;
     let archiveEvent = 0;
+    let activeAttempted = 0;
+    let archiveAttempted = 0;
+    let graphAttempted = 0;
+    let graphStored = 0;
+    let graphSkipped = 0;
     const archiveInputs: Array<{
       event_type: string;
       summary: string;
       entities?: string[];
-      relations?: Array<{ source: string; target: string; type: string }>;
+      relations?: Array<{ source: string; target: string; type: string; evidence_span?: string; confidence?: number }>;
+      entity_types?: Record<string, string>;
       outcome?: string;
       session_id: string;
       source_file: string;
+      source_text?: string;
       confidence?: number;
       source_event_id?: string;
       actor?: string;
@@ -521,7 +694,8 @@ export function createSessionSync(options: SessionSyncOptions): {
         continue;
       }
       if (decision.target_layer === "active_only") {
-        const activeText = (decision.active_text || args.transcript).trim().slice(-4000);
+        activeAttempted += 1;
+        const activeText = (decision.active_text || args.transcript).trim().slice(-activeTextMaxChars);
         if (!activeText) {
           skipped += 1;
           bumpReason("active_only_empty");
@@ -536,6 +710,35 @@ export function createSessionSync(options: SessionSyncOptions): {
         if (writeResult.status === "ok") {
           imported += 1;
           activeOnly += 1;
+          if (options.graphMemoryStore && decision.graph) {
+            graphAttempted += 1;
+            const relationFingerprint = (decision.graph.relations || [])
+              .map(rel => `${rel.source}|${rel.type}|${rel.target}|${rel.evidence_span || ""}`)
+              .sort()
+              .join("||");
+            const activeSourceEventId = `active:${args.sessionId}:${crypto.createHash("sha1").update(relationFingerprint || activeText).digest("hex").slice(0, 16)}`;
+            const graphResult = await options.graphMemoryStore.append({
+              sourceEventId: activeSourceEventId,
+              sourceLayer: "active_only",
+              sessionId: args.sessionId,
+              sourceFile: args.sourceFile,
+              eventType: "insight",
+              entities: decision.graph.entities,
+              entity_types: decision.graph.entity_types,
+              relations: decision.graph.relations,
+              gateSource: "sync",
+              confidence: decision.graph.confidence,
+              sourceText: activeText,
+            });
+            if (!graphResult.success) {
+              graphSkipped += 1;
+              options.logger.info(
+                `graph_skip_reason=${graphResult.reason} source_event_id=${activeSourceEventId}`,
+              );
+            } else {
+              graphStored += 1;
+            }
+          }
         } else {
           skipped += 1;
           bumpReason(writeResult.reason || "active_only_write_skipped");
@@ -543,6 +746,7 @@ export function createSessionSync(options: SessionSyncOptions): {
         continue;
       }
       if (decision.target_layer === "archive_event") {
+        archiveAttempted += 1;
         if (!decision.event) {
           skipped += 1;
           bumpReason("archive_event_missing_payload");
@@ -553,29 +757,73 @@ export function createSessionSync(options: SessionSyncOptions): {
           summary: decision.event.summary,
           entities: decision.event.entities,
           relations: decision.event.relations,
+          entity_types: decision.event.entity_types,
           outcome: decision.event.outcome,
           confidence: decision.event.confidence,
           session_id: args.sessionId,
           source_file: args.sourceFile,
-          source_event_id: "",
+          source_text: args.transcript.slice(-archiveSourceTextMaxChars),
+          source_event_id: decision.candidate_id
+            ? `candidate:${args.sessionId}:${decision.candidate_id}`
+            : `candidate:${args.sessionId}:${crypto.createHash("sha1").update(decision.event.summary).digest("hex").slice(0, 16)}`,
           actor: "sync_llm_gate",
         });
       }
     }
     if (archiveInputs.length > 0) {
-      const archiveResult = await options.archiveStore.storeEvents(archiveInputs);
-      imported += archiveResult.stored.length;
-      skipped += archiveResult.skipped.length;
-      archiveEvent += archiveResult.stored.length;
-      for (const skip of archiveResult.skipped) {
-        bumpReason(skip.reason || "archive_store_skipped");
+      let archivedSuccess = 0;
+      let archivedSkipped = 0;
+      for (const inputRecord of archiveInputs) {
+        const archiveResult = await options.archiveStore.storeEvents([inputRecord]);
+        imported += archiveResult.stored.length;
+        skipped += archiveResult.skipped.length;
+        archiveEvent += archiveResult.stored.length;
+        archivedSuccess += archiveResult.stored.length;
+        archivedSkipped += archiveResult.skipped.length;
+        for (const skip of archiveResult.skipped) {
+          bumpReason(skip.reason || "archive_store_skipped");
+        }
+        const archiveRecord = archiveResult.stored[0];
+        if (!archiveRecord) {
+          continue;
+        }
+        if (!options.graphMemoryStore) {
+          continue;
+        }
+        graphAttempted += 1;
+        const graphResult = await options.graphMemoryStore.append({
+          // Graph trace points to persisted archive record id for stable lookup.
+          sourceEventId: archiveRecord.id,
+          sourceLayer: "archive_event",
+          archiveEventId: archiveRecord.id,
+          sessionId: args.sessionId,
+          sourceFile: args.sourceFile,
+          eventType: inputRecord.event_type,
+          entities: inputRecord.entities,
+          entity_types: inputRecord.entity_types,
+          relations: inputRecord.relations,
+          gateSource: "sync",
+          confidence: inputRecord.confidence,
+          sourceText: args.transcript,
+        });
+        if (!graphResult.success) {
+          graphSkipped += 1;
+          options.logger.info(
+            `graph_skip_reason=${graphResult.reason} source_event_id=${archiveRecord.id}`,
+          );
+        } else {
+          graphStored += 1;
+        }
       }
       options.logger.info(
-        `sync_archive_result session=${args.sessionId} archived_success=${archiveResult.stored.length} skipped=${archiveResult.skipped.length}`,
+        `sync_archive_result session=${args.sessionId} archived_success=${archivedSuccess} skipped=${archivedSkipped}`,
       );
     }
     options.logger.info(
       `sync_gate_result session=${args.sessionId} llm_decisions=${llmDecisions} active_only=${activeOnly} archive_event=${archiveEvent} skipped=${skipped}`,
+    );
+    options.logger.info(
+      `sync_gate_metrics session=${args.sessionId} active_attempted=${activeAttempted} archive_attempted=${archiveAttempted} graph_attempted=${graphAttempted} graph_stored=${graphStored} graph_skipped=${graphSkipped} skip_reason_kinds=${Object.keys(skipReasons).length}`,
     );
     return {
       imported,
@@ -762,5 +1010,22 @@ export function createSessionSync(options: SessionSyncOptions): {
     };
   }
 
-  return { syncMemory, syncDailySummaries };
+  async function routeTranscript(args: {
+    sessionId: string;
+    sourceFile: string;
+    transcript: string;
+  }): Promise<{
+    imported: number;
+    skipped: number;
+    ok: boolean;
+    llmDecisions: number;
+    activeOnly: number;
+    archiveEvent: number;
+    skipReasons: Record<string, number>;
+  }> {
+    return storeFromTranscript(args);
+  }
+
+  return { syncMemory, syncDailySummaries, routeTranscript };
 }
+

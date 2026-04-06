@@ -4,8 +4,8 @@ import {
   buildCanonicalId,
   loadGraphSchema,
   normalizeEventType,
-  validateRelations,
 } from "../graph/ontology";
+import { validateJsonlLine } from "../quality/llm_output_validator";
 
 interface LoggerLike {
   debug: (message: string, ...args: unknown[]) => void;
@@ -28,9 +28,10 @@ interface ExtractedEvent {
   event_type: string;
   summary: string;
   entities?: string[];
-  relations?: Array<{ source: string; target: string; type: string }>;
+  relations?: Array<{ source: string; target: string; type: string; evidence_span?: string; confidence?: number }>;
   entity_types?: Record<string, string>;
   outcome?: string;
+  source_text?: string;
   session_id: string;
   source_file: string;
   confidence?: number;
@@ -39,10 +40,16 @@ interface ExtractedEvent {
   canonical_id?: string;
 }
 
-interface StoredEvent extends ExtractedEvent {
+interface StoredEvent {
   id: string;
   timestamp: string;
   layer: "archive";
+  event_type: string;
+  summary: string;
+  source_text?: string;
+  outcome?: string;
+  session_id: string;
+  source_file: string;
   gate_source: "sync" | "session_end" | "manual";
   embedding_status: "ok" | "failed" | "pending";
   quality_score: number;
@@ -52,6 +59,10 @@ interface StoredEvent extends ExtractedEvent {
   vector_chunks_total?: number;
   vector_chunks_ok?: number;
   embedding?: number[];
+  confidence?: number;
+  source_event_id?: string;
+  actor?: string;
+  canonical_id?: string;
 }
 
 interface ArchiveStoreOptions {
@@ -62,6 +73,11 @@ interface ArchiveStoreOptions {
   vectorChunking?: {
     chunkSize?: number;
     chunkOverlap?: number;
+    evidenceMaxChunks?: number;
+  };
+  writePolicy?: {
+    archiveMinConfidence?: number;
+    archiveMinQualityScore?: number;
   };
   deduplicator: {
     check(input: { id: string; summary: string; embedding?: number[] }): { duplicate: boolean; stage?: string; matchedId?: string };
@@ -75,13 +91,12 @@ interface ArchiveStoreOptions {
       summary: string;
       timestamp: string;
       outcome?: string;
-      entities?: string[];
-      relations?: Array<{ source: string; target: string; type: string }>;
       embedding: number[];
       quality_score: number;
       layer: "active" | "archive";
       source_memory_id: string;
       source_memory_canonical_id?: string;
+      source_field?: "summary" | "evidence";
       char_count: number;
       token_count: number;
       chunk_index?: number;
@@ -199,30 +214,13 @@ function inferGateSource(event: ExtractedEvent): "sync" | "session_end" | "manua
   return "manual";
 }
 
-function buildArchiveVectorText(event: ExtractedEvent, normalizedEventType: string, entities: string[]): string {
+function buildArchiveVectorText(event: ExtractedEvent, normalizedEventType: string): string {
   const lines = [
     `event_type: ${normalizedEventType}`,
     `summary: ${(event.summary || "").trim()}`,
     `outcome: ${(event.outcome || "").trim()}`,
-    `entities: ${entities.join(", ")}`,
     `source_file: ${(event.source_file || "").trim()}`,
-    `actor: ${(event.actor || "").trim()}`,
   ].map(line => line.trim()).filter(Boolean);
-  if (Array.isArray(event.relations) && event.relations.length > 0) {
-    const relationLines = event.relations
-      .map(relation => {
-        if (!relation || typeof relation !== "object") return "";
-        const source = typeof relation.source === "string" ? relation.source.trim() : "";
-        const target = typeof relation.target === "string" ? relation.target.trim() : "";
-        const type = typeof relation.type === "string" ? relation.type.trim() : "related_to";
-        if (!source || !target) return "";
-        return `${source} -[${type}]-> ${target}`;
-      })
-      .filter(Boolean);
-    if (relationLines.length > 0) {
-      lines.push(`relations: ${relationLines.join(" ; ")}`);
-    }
-  }
   return lines.join("\n").trim();
 }
 
@@ -283,6 +281,33 @@ function splitTextChunks(text: string, chunkSize: number, chunkOverlap: number):
   return output;
 }
 
+function pickEvidenceChunks(
+  chunks: Array<{ index: number; start: number; end: number; text: string }>,
+  maxCount: number,
+): Array<{ index: number; start: number; end: number; text: string }> {
+  if (!chunks.length || maxCount <= 0) return [];
+  if (chunks.length <= maxCount) return chunks;
+  const picked = new Map<number, { index: number; start: number; end: number; text: string }>();
+  picked.set(chunks[0].index, chunks[0]);
+  if (maxCount >= 2) {
+    const mid = chunks[Math.floor(chunks.length / 2)];
+    picked.set(mid.index, mid);
+  }
+  if (maxCount >= 3) {
+    const last = chunks[chunks.length - 1];
+    picked.set(last.index, last);
+  }
+  if (picked.size < maxCount) {
+    for (const chunk of chunks) {
+      if (!picked.has(chunk.index)) {
+        picked.set(chunk.index, chunk);
+      }
+      if (picked.size >= maxCount) break;
+    }
+  }
+  return [...picked.values()].sort((a, b) => a.index - b.index).slice(0, maxCount);
+}
+
 async function mapWithConcurrency<T, R>(
   items: T[],
   maxConcurrency: number,
@@ -312,7 +337,7 @@ export function createArchiveStore(options: ArchiveStoreOptions): {
   storeEvents(events: ExtractedEvent[]): Promise<{ stored: StoredEvent[]; skipped: Array<{ summary: string; reason: string }> }>;
 } {
   const archivePath = path.join(options.memoryRoot, "sessions", "archive", "sessions.jsonl");
-  const mutationLogPath = path.join(options.memoryRoot, "graph", "mutation_log.jsonl");
+  const mutationLogPath = path.join(options.memoryRoot, "sessions", "archive", "mutation_log.jsonl");
   const graphSchema = loadGraphSchema(options.projectRoot);
 
   async function storeEvents(events: ExtractedEvent[]): Promise<{ stored: StoredEvent[]; skipped: Array<{ summary: string; reason: string }> }> {
@@ -333,33 +358,26 @@ export function createArchiveStore(options: ArchiveStoreOptions): {
       const confidence = typeof event.confidence === "number"
         ? Math.max(0, Math.min(1, event.confidence))
         : undefined;
-      if (typeof confidence === "number" && confidence < 0.35) {
+      const archiveMinConfidence = typeof options.writePolicy?.archiveMinConfidence === "number"
+        ? Math.max(0, Math.min(1, options.writePolicy.archiveMinConfidence))
+        : 0.35;
+      if (typeof confidence === "number" && confidence < archiveMinConfidence) {
         skipped.push({ summary, reason: "low_confidence" });
         options.logger.info("archive_skip reason=filtered_low_quality detail=low_confidence");
         continue;
       }
       const quality = scoreQuality(summary);
-      if (quality.level === "low") {
+      const archiveMinQualityScore = typeof options.writePolicy?.archiveMinQualityScore === "number"
+        ? Math.max(0, Math.min(1, options.writePolicy.archiveMinQualityScore))
+        : 0.4;
+      if (quality.score < archiveMinQualityScore) {
         skipped.push({ summary, reason: "low_quality" });
         options.logger.info("archive_skip reason=filtered_low_quality detail=low_quality");
         continue;
       }
       const normalizedEventType = normalizeEventType(event.event_type || "insight", graphSchema);
-      const entities = Array.isArray(event.entities)
-        ? [...new Set(event.entities.map(item => (typeof item === "string" ? item.trim() : "")).filter(Boolean))]
-        : [];
-      const relationValidation = validateRelations({
-        relations: Array.isArray(event.relations) ? event.relations : [],
-        entities,
-        entityTypes: event.entity_types,
-        schema: graphSchema,
-      });
-      if (relationValidation.accepted.length === 0 && Array.isArray(event.relations) && event.relations.length > 0) {
-        skipped.push({ summary, reason: "relation_validation_failed" });
-        options.logger.info("archive_skip reason=relation_validation_failed");
-        continue;
-      }
       const id = `evt_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+      const sourceText = typeof event.source_text === "string" ? event.source_text.trim().slice(0, 12000) : "";
       let embedding: number[] | undefined = undefined;
       let embeddingStatus: "ok" | "failed" | "pending" = "pending";
       let vectorChunksTotal = 0;
@@ -368,6 +386,7 @@ export function createArchiveStore(options: ArchiveStoreOptions): {
         id: string;
         summary: string;
         embedding: number[];
+        source_field?: "summary" | "evidence";
         chunk_index: number;
         chunk_total: number;
         chunk_start: number;
@@ -380,10 +399,40 @@ export function createArchiveStore(options: ArchiveStoreOptions): {
       if (embeddingModel && embeddingApiKey && embeddingBaseUrl) {
         const chunkSize = options.vectorChunking?.chunkSize ?? 600;
         const chunkOverlap = options.vectorChunking?.chunkOverlap ?? 100;
-        const vectorText = buildArchiveVectorText(event, normalizedEventType, entities);
-        const chunks = splitTextChunks(vectorText, chunkSize, chunkOverlap);
-        vectorChunksTotal = chunks.length;
-        const chunkEmbeddings = await mapWithConcurrency(chunks, maxParallel, async (chunk) => {
+        const evidenceMaxChunks = typeof options.vectorChunking?.evidenceMaxChunks === "number"
+          ? Math.max(0, Math.min(8, Math.floor(options.vectorChunking.evidenceMaxChunks)))
+          : 2;
+        const summaryText = buildArchiveVectorText(event, normalizedEventType);
+        const evidenceChunks = sourceText
+          ? pickEvidenceChunks(splitTextChunks(sourceText, chunkSize, chunkOverlap), evidenceMaxChunks)
+          : [];
+        const embeddingInputs: Array<{
+          text: string;
+          source_field: "summary" | "evidence";
+          index: number;
+          total: number;
+          start: number;
+          end: number;
+        }> = [
+          {
+            text: summaryText,
+            source_field: "summary",
+            index: 0,
+            total: 1 + evidenceChunks.length,
+            start: 0,
+            end: summaryText.length,
+          },
+          ...evidenceChunks.map((chunk, idx) => ({
+            text: chunk.text,
+            source_field: "evidence" as const,
+            index: idx + 1,
+            total: 1 + evidenceChunks.length,
+            start: chunk.start,
+            end: chunk.end,
+          })),
+        ];
+        vectorChunksTotal = embeddingInputs.length;
+        const chunkEmbeddings = await mapWithConcurrency(embeddingInputs, maxParallel, async (chunk) => {
           try {
             const chunkEmbedding = await requestEmbedding({
               text: chunk.text,
@@ -402,14 +451,17 @@ export function createArchiveStore(options: ArchiveStoreOptions): {
             }
             return null;
           } catch (error) {
-            options.logger.warn(`Archive chunk embedding failed id=${id} chunk=${chunk.index} error=${error}`);
+            options.logger.warn(`Archive chunk embedding failed id=${id} chunk=${chunk.index} field=${chunk.source_field} error=${error}`);
             return null;
           }
         });
         const validEmbeddings = chunkEmbeddings
-          .filter((item): item is { chunk: { index: number; start: number; end: number; text: string }; embedding: number[] } => Boolean(item))
+          .filter((item): item is { chunk: { text: string; source_field: "summary" | "evidence"; index: number; total: number; start: number; end: number }; embedding: number[] } => Boolean(item))
           .sort((a, b) => a.chunk.index - b.chunk.index);
-        if (validEmbeddings.length > 0) {
+        const primary = validEmbeddings.find(item => item.chunk.source_field === "summary");
+        if (primary) {
+          embedding = primary.embedding;
+        } else if (validEmbeddings.length > 0) {
           embedding = validEmbeddings[0].embedding;
         }
         for (const item of validEmbeddings) {
@@ -417,8 +469,9 @@ export function createArchiveStore(options: ArchiveStoreOptions): {
             id: `${id}_c${item.chunk.index}`,
             summary: item.chunk.text,
             embedding: item.embedding,
+            source_field: item.chunk.source_field,
             chunk_index: item.chunk.index,
-            chunk_total: chunks.length,
+            chunk_total: item.chunk.total,
             chunk_start: item.chunk.start,
             chunk_end: item.chunk.end,
           });
@@ -438,31 +491,32 @@ export function createArchiveStore(options: ArchiveStoreOptions): {
       }
       const gateSource = inferGateSource(event);
       const record: StoredEvent = {
-        ...event,
-        event_type: normalizedEventType,
-        entities,
-        relations: relationValidation.accepted,
-        canonical_id: event.canonical_id || buildCanonicalId({
-          eventType: normalizedEventType,
-          summary,
-          entities,
-          relations: relationValidation.accepted,
-          outcome: event.outcome,
-        }),
-        actor: event.actor || "system",
-        confidence,
         id,
         timestamp: new Date().toISOString(),
         layer: "archive",
+        event_type: normalizedEventType,
+        summary,
+        source_text: sourceText || undefined,
+        outcome: event.outcome,
+        session_id: event.session_id,
+        source_file: event.source_file,
         gate_source: gateSource,
         embedding_status: embeddingStatus,
         quality_score: quality.score,
         quality_level: quality.level,
-        char_count: buildArchiveVectorText(event, normalizedEventType, entities).length,
-        token_count: estimateTokenCount(buildArchiveVectorText(event, normalizedEventType, entities)),
+        char_count: (sourceText || summary).length,
+        token_count: estimateTokenCount(sourceText || summary),
         vector_chunks_total: vectorChunksTotal,
         vector_chunks_ok: vectorChunksOk,
         embedding,
+        confidence,
+        source_event_id: event.source_event_id,
+        actor: event.actor || "system",
+        canonical_id: event.canonical_id || buildCanonicalId({
+          eventType: normalizedEventType,
+          summary,
+          outcome: event.outcome,
+        }),
       };
       lines.push(JSON.stringify(record));
       stored.push(record);
@@ -493,13 +547,12 @@ export function createArchiveStore(options: ArchiveStoreOptions): {
               summary: chunkRow.summary,
               timestamp: record.timestamp,
               outcome: record.outcome,
-              entities: record.entities,
-              relations: record.relations,
               embedding: chunkRow.embedding,
               quality_score: record.quality_score,
               layer: "archive",
               source_memory_id: record.id,
               source_memory_canonical_id: record.canonical_id,
+              source_field: chunkRow.source_field,
               char_count: chunkRow.summary.length,
               token_count: estimateTokenCount(chunkRow.summary),
               chunk_index: chunkRow.chunk_index,
@@ -522,6 +575,12 @@ export function createArchiveStore(options: ArchiveStoreOptions): {
     if (lines.length > 0) {
       ensureDirForFile(archivePath);
       fs.appendFileSync(archivePath, `${lines.join("\n")}\n`, "utf-8");
+      for (let i = 0; i < lines.length; i++) {
+        const validation = validateJsonlLine(lines[i]);
+        if (!validation.valid && validation.errors.length > 0) {
+          options.logger.warn(`archive_write_integrity_check_failed line=${i} errors=${validation.errors.join("|")}`);
+        }
+      }
       ensureDirForFile(mutationLogPath);
       fs.appendFileSync(mutationLogPath, `${mutationLines.join("\n")}\n`, "utf-8");
     }

@@ -1,0 +1,7 @@
+{
+  "entity_f1_min": 0.85,
+  "relation_f1_min": 0.8,
+  "entity_type_accuracy_min": 0.85,
+  "evidence_span_coverage_min": 0.9,
+  "evidence_text_hit_min": 0.85
+}
