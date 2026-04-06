@@ -1,7 +1,7 @@
 {
   "id": "openclaw-cortex-memory",
   "name": "Cortex Memory",
-  "version": "0.1.0-Alpha.24",
+  "version": "0.1.0-Alpha.25",
   "description": "Long-term memory system with semantic, episodic, and procedural memory for AI Agents",
   "main": "dist/index.js",
   "author": "deki18",
