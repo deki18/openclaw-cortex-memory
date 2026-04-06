@@ -60,10 +60,12 @@
     "requiresPython": false,
     "cli": "cortex-memory",
     "build": {
-      "openclawVersion": "2026.3.22"
+      "openclawVersion": "2026.4.5",
+      "pluginSdkVersion": "2026.4.5"
     },
     "compat": {
-      "pluginApi": ">=2026.3.22"
+      "pluginApi": ">=2026.3.24-beta.2",
+      "minGatewayVersion": "2026.3.24-beta.2"
     },
     "extensions": [
       "./dist/index.js"
