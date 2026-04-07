@@ -1,6 +1,6 @@
 {
   "name": "openclaw-cortex-memory",
-  "version": "0.1.0-Alpha.25",
+  "version": "0.1.0-Alpha.26",
   "description": "Long-term memory system for OpenClaw AI Agent",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
