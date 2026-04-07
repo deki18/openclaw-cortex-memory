@@ -199,8 +199,8 @@ const ERROR_CODES: Record<string, UserFriendlyError> = {
 const SENSITIVE_KEYS = ["API_KEY", "SECRET", "TOKEN", "PASSWORD", "APIKEY"];
 const PLUGIN_ID = "openclaw-cortex-memory";
 
-const MIN_OPENCLAW_VERSION = "2026.3.8";
-const MAX_OPENCLAW_VERSION = "2027.0.0";
+const MIN_OPENCLAW_GATEWAY_VERSION = "2026.4.5";
+const MAX_OPENCLAW_GATEWAY_VERSION = "2027.0.0";
 
 const defaultConfig: Partial<CortexMemoryConfig> = {
   autoSync: true,
@@ -317,6 +317,7 @@ let autoSearchCacheBySession = new Map<string, CachedSearchResult>();
 const AUTO_SEARCH_CACHE_TTL = 60000;
 const MAX_AUTO_SEARCH_CACHE_SESSIONS = 200;
 const HOOK_GUARD_TIMEOUT_MS = 2000;
+const SYNC_DEBOUNCE_WINDOW_MS = 120000;
 
 let config: CortexMemoryConfig | null = null;
 let logger: Logger;
@@ -467,11 +468,33 @@ function resolveEngine(): MemoryEngine {
     graphMemoryStore,
     writeStore,
   });
+  let syncInFlight: Promise<{ imported: number; skipped: number; filesProcessed: number }> | null = null;
+  let lastSyncFinishedAt = 0;
+  const dedupedSyncMemory = async (): Promise<{ imported: number; skipped: number; filesProcessed: number }> => {
+    const now = Date.now();
+    if (syncInFlight) {
+      logger.info("sync_memory dedup: join in-flight run");
+      return syncInFlight;
+    }
+    if ((now - lastSyncFinishedAt) < SYNC_DEBOUNCE_WINDOW_MS) {
+      const waitMs = SYNC_DEBOUNCE_WINDOW_MS - (now - lastSyncFinishedAt);
+      logger.info(`sync_memory dedup: skip due to debounce window (${waitMs}ms remaining)`);
+      return { imported: 0, skipped: 0, filesProcessed: 0 };
+    }
+    syncInFlight = sessionSync.syncMemory();
+    try {
+      const result = await syncInFlight;
+      lastSyncFinishedAt = Date.now();
+      return result;
+    } finally {
+      syncInFlight = null;
+    }
+  };
   const sessionEnd = createSessionEnd({
     projectRoot,
     dbPath: config.dbPath,
     logger,
-    syncMemory: sessionSync.syncMemory,
+    syncMemory: dedupedSyncMemory,
     syncDailySummaries: sessionSync.syncDailySummaries,
     routeTranscript: sessionSync.routeTranscript,
   });
@@ -487,13 +510,17 @@ function resolveEngine(): MemoryEngine {
     ruleStore,
     llm: config.llm,
   });
+  const sessionSyncBridge = {
+    ...sessionSync,
+    syncMemory: dedupedSyncMemory,
+  };
   memoryEngine = createTsEngine({
     readStore,
     writeStore,
     vectorStore,
     archiveStore,
     graphMemoryStore,
-    sessionSync,
+    sessionSync: sessionSyncBridge,
     sessionEnd,
     reflector,
     memoryRoot,
@@ -511,6 +538,83 @@ function resolveEngine(): MemoryEngine {
     logger,
   });
   return memoryEngine;
+}
+
+function normalizeToolNameList(input: unknown): string[] {
+  if (!input) return [];
+  if (Array.isArray(input)) {
+    const names = input
+      .map((item) => {
+        if (typeof item === "string") return item.trim();
+        if (item && typeof item === "object") {
+          const name = firstString([(item as Record<string, unknown>).name]);
+          return name || "";
+        }
+        return "";
+      })
+      .filter(Boolean);
+    return [...new Set(names)].sort();
+  }
+  if (typeof input === "object") {
+    return Object.keys(input as Record<string, unknown>).sort();
+  }
+  return [];
+}
+
+async function getApiVisibleToolNames(): Promise<string[]> {
+  if (!api) return [];
+  const apiObj = api as any;
+  const readers: Array<() => unknown> = [];
+  if (typeof apiObj.listTools === "function") {
+    readers.push(() => apiObj.listTools());
+  }
+  if (typeof apiObj.getTools === "function") {
+    readers.push(() => apiObj.getTools());
+  }
+  if (typeof apiObj.tools === "object" && apiObj.tools !== null) {
+    readers.push(() => apiObj.tools);
+  }
+  if (typeof apiObj.registeredTools === "object" && apiObj.registeredTools !== null) {
+    readers.push(() => apiObj.registeredTools);
+  }
+  for (const read of readers) {
+    try {
+      const value = await Promise.resolve(read());
+      const names = normalizeToolNameList(value);
+      if (names.length > 0) {
+        return names;
+      }
+    } catch (error) {
+      logger.debug(`Failed to read visible tools from API: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  return [];
+}
+
+async function withToolVisibilityDiagnostics(result: ToolResult, context?: ToolContext): Promise<ToolResult> {
+  if (!result.success || !result.data || typeof result.data !== "object" || Array.isArray(result.data)) {
+    return result;
+  }
+  const visible = await getApiVisibleToolNames();
+  const registered = [...registeredTools].sort();
+  const missingFromVisibility = registered.filter((name) => !visible.includes(name));
+  const data = result.data as Record<string, unknown>;
+  return {
+    ...result,
+    data: {
+      ...data,
+      tool_visibility: {
+        lane_context: {
+          agent_id: context?.agentId || "unknown-agent",
+          session_id: context?.sessionId || null,
+          workspace_id: context?.workspaceId || "default",
+        },
+        registered_tools: registered,
+        api_visible_tools: visible,
+        missing_from_visible: missingFromVisibility,
+      },
+    },
+  };
 }
 
 function clearStaleAutoSearchCache(now: number = Date.now()): void {
@@ -751,20 +855,24 @@ function checkOpenClawVersion(): Promise<void> {
   return new Promise((resolve) => {
     try {
       const apiObj = api as any;
-      const candidates = [
-        apiObj?.openclawVersion,
-        apiObj?.gatewayVersion,
-        apiObj?.coreVersion,
-        apiObj?.openclaw?.version,
-      ].filter((value): value is string => typeof value === "string" && value.trim().length > 0);
-      const version = candidates.find((value) => {
+      const candidates: Array<{ source: string; value: string }> = [
+        { source: "api.openclawVersion", value: apiObj?.openclawVersion },
+        { source: "api.gatewayVersion", value: apiObj?.gatewayVersion },
+        { source: "api.coreVersion", value: apiObj?.coreVersion },
+        { source: "api.openclaw.version", value: apiObj?.openclaw?.version },
+      ].filter((item): item is { source: string; value: string } =>
+        typeof item.value === "string" && item.value.trim().length > 0,
+      );
+      const selected = candidates.find((item) => {
+        const value = item.value;
         const major = Number(value.replace(/[^0-9.]/g, "").split(".")[0] || "0");
         // OpenClaw release versions are calendar-like (e.g. 2026.x.x),
         // while plugin/package versions like 0.x should be ignored.
         return Number.isFinite(major) && major >= 2000;
-      }) || "";
+      });
+      const version = selected?.value || "";
       if (!version) {
-        logger.debug("Could not determine OpenClaw gateway version from API, skip version compatibility check");
+        logger.debug("Could not determine OpenClaw gateway/core version from API fields; skip compatibility check");
         resolve();
         return;
       }
@@ -773,15 +881,19 @@ function checkOpenClawVersion(): Promise<void> {
         return parts.length >= 3 ? parts : [...parts, ...Array(3 - parts.length).fill(0)];
       };
       const current = parseVersion(version);
-      const min = parseVersion(MIN_OPENCLAW_VERSION);
-      const max = parseVersion(MAX_OPENCLAW_VERSION);
+      const min = parseVersion(MIN_OPENCLAW_GATEWAY_VERSION);
+      const max = parseVersion(MAX_OPENCLAW_GATEWAY_VERSION);
       const currentNum = current[0] * 10000 + current[1] * 100 + current[2];
       const minNum = min[0] * 10000 + min[1] * 100 + min[2];
       const maxNum = max[0] * 10000 + max[1] * 100 + max[2];
       if (currentNum < minNum) {
-        logger.warn(`OpenClaw version ${version} is below minimum ${MIN_OPENCLAW_VERSION}. Some features may not work.`);
+        logger.warn(
+          `OpenClaw gateway/core version ${version} (from ${selected?.source || "unknown"}) is below minimum ${MIN_OPENCLAW_GATEWAY_VERSION}. Some features may not work.`,
+        );
       } else if (currentNum >= maxNum) {
-        logger.warn(`OpenClaw version ${version} may not be fully compatible. Maximum tested version is ${MAX_OPENCLAW_VERSION}.`);
+        logger.warn(
+          `OpenClaw gateway/core version ${version} (from ${selected?.source || "unknown"}) may not be fully compatible. Maximum tested version is ${MAX_OPENCLAW_GATEWAY_VERSION}.`,
+        );
       }
     } catch (e) {
       logger.warn(`Version check failed: ${e instanceof Error ? e.message : String(e)}`);
@@ -933,7 +1045,11 @@ async function onTimerHandler(payload: unknown, context: ToolContext): Promise<v
 
 function registerTools(): void {
   if (!api) return;
-  
+  const apiObj = api as any;
+  logger.info(
+    `registerTools API capability: registerTool=${typeof apiObj.registerTool === "function"}, registerTools=${typeof apiObj.registerTools === "function"}, tools.register=${typeof apiObj.tools?.register === "function"}`,
+  );
+
   const tools: RegisteredToolDefinition[] = [
     {
       name: "search_memory",
@@ -1165,15 +1281,23 @@ function registerTools(): void {
       },
       execute: async (params: { args?: Record<string, unknown>; context: ToolContext }) => {
         const args = params.args || params;
-        return resolveEngine().runDiagnostics(args, params.context);
+        const result = await resolveEngine().runDiagnostics(args, params.context);
+        return withToolVisibilityDiagnostics(result, params.context);
       },
     },
   ];
-  
+
+  let successCount = 0;
   for (const tool of tools) {
-    registerToolCompat(tool);
-    registeredTools.push(tool.name);
+    try {
+      registerToolCompat(tool);
+      registeredTools.push(tool.name);
+      successCount += 1;
+    } catch (error) {
+      logger.error(`Failed to register tool ${tool.name}: ${error instanceof Error ? error.message : String(error)}`);
+    }
   }
+  logger.info(`registerTools completed: ${successCount}/${tools.length} tools registered`);
 }
 
 function sanitizeToolParametersSchemaValue(schema: unknown): Record<string, unknown> {
@@ -1337,13 +1461,27 @@ function registerToolCompat(tool: RegisteredToolDefinition): void {
       context: normalized.context,
     });
   };
-  api.registerTool({
+  const payload = {
     name: tool.name,
     description: tool.description,
     parameters: sanitizeToolParametersSchema(tool.parameters),
     execute: invoke,
     handler: invoke,
-  });
+  };
+  const apiObj = api as any;
+  if (typeof apiObj.registerTool === "function") {
+    apiObj.registerTool(payload);
+    return;
+  }
+  if (typeof apiObj.registerTools === "function") {
+    apiObj.registerTools([payload]);
+    return;
+  }
+  if (typeof apiObj.tools?.register === "function") {
+    apiObj.tools.register(payload);
+    return;
+  }
+  throw new Error("No supported tool registration API found");
 }
 
 function unregisterTools(): void {
