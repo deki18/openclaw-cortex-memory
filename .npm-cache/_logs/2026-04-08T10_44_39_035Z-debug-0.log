@@ -1,0 +1,40 @@
+0 verbose cli C:\Program Files\nodejs\node.exe C:\Program Files\nodejs\node_modules\npm\bin\npm-cli.js
+1 info using npm@11.6.2
+2 info using node@v24.11.1
+3 silly config load:file:C:\Program Files\nodejs\node_modules\npm\npmrc
+4 silly config load:file:D:\AI_Program\openclaw-cortex-memory\.npmrc
+5 silly config load:file:C:\Users\Joe\.npmrc
+6 silly config load:file:C:\Users\Joe\AppData\Roaming\npm\etc\npmrc
+7 verbose title npm pack
+8 verbose argv "pack"
+9 verbose logfile logs-max:10 dir:D:\AI_Program\openclaw-cortex-memory\.npm-cache\_logs\2026-04-08T10_44_39_035Z-
+10 verbose logfile D:\AI_Program\openclaw-cortex-memory\.npm-cache\_logs\2026-04-08T10_44_39_035Z-debug-0.log
+11 silly logfile done cleaning log files
+12 http fetch GET https://registry.npmjs.org/npm attempt 1 failed with ECONNREFUSED
+13 silly packumentCache heap:4496293888 maxSize:1124073472 maxEntrySize:562036736
+14 verbose stack Error: EPERM: operation not permitted, unlink 'D:\AI_Program\openclaw-cortex-memory\.npm-cache\_cacache\tmp\28ec2bda'
+15 error code EPERM
+16 error syscall unlink
+17 error path D:\AI_Program\openclaw-cortex-memory\.npm-cache\_cacache\tmp\28ec2bda
+18 error errno -4048
+19 error [Error: EPERM: operation not permitted, unlink 'D:\AI_Program\openclaw-cortex-memory\.npm-cache\_cacache\tmp\28ec2bda'] {
+19 error   errno: -4048,
+19 error   code: 'EPERM',
+19 error   syscall: 'unlink',
+19 error   path: 'D:\\AI_Program\\openclaw-cortex-memory\\.npm-cache\\_cacache\\tmp\\28ec2bda'
+19 error }
+20 error
+20 error The operation was rejected by your operating system.
+20 error It's possible that the file was already in use (by a text editor or antivirus),
+20 error or that you lack permissions to access it.
+20 error
+20 error If you believe this might be a permissions issue, please double-check the
+20 error permissions of the file and its containing directories, or try running
+20 error the command again as root/Administrator.
+21 verbose cwd D:\AI_Program\openclaw-cortex-memory
+22 verbose os Windows_NT 10.0.26200
+23 verbose node v24.11.1
+24 verbose npm  v11.6.2
+25 verbose exit -4048
+26 verbose code -4048
+27 error A complete log of this run can be found in: D:\AI_Program\openclaw-cortex-memory\.npm-cache\_logs\2026-04-08T10_44_39_035Z-debug-0.log
