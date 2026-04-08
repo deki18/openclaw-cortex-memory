@@ -93,6 +93,39 @@ function firstString(values: unknown[]): string | undefined {
   return undefined;
 }
 
+function extractTextFromContent(content: unknown): string | undefined {
+  if (typeof content === "string" && content.trim()) {
+    return content.trim();
+  }
+  if (!Array.isArray(content)) {
+    return undefined;
+  }
+  const parts: string[] = [];
+  for (const item of content) {
+    if (typeof item === "string" && item.trim()) {
+      parts.push(item.trim());
+      continue;
+    }
+    const obj = asRecord(item);
+    if (!obj) {
+      continue;
+    }
+    const text = firstString([obj.text, obj.content, obj.summary, obj.message, obj.body]);
+    if (text) {
+      parts.push(text);
+    }
+  }
+  if (parts.length === 0) {
+    return undefined;
+  }
+  return parts.join("\n");
+}
+
+function extractTextFromMessageRecord(record: Record<string, unknown>): string | undefined {
+  const contentText = extractTextFromContent(record.content);
+  return firstString([contentText, record.text, record.summary, record.message, record.body]);
+}
+
 const SYNC_STATE_VERSION = "2";
 
 function createDefaultState(): SyncState {
@@ -202,7 +235,7 @@ function extractMessages(record: Record<string, unknown>): Array<{ role: string;
       }
       const obj = asRecord(item);
       if (!obj) continue;
-      const text = firstString([obj.content, obj.summary, obj.text, obj.message, obj.body]);
+      const text = extractTextFromMessageRecord(obj);
       if (!text) continue;
       const role = firstString([obj.role, obj.senderRole, obj.fromRole]) || "unknown";
       output.push({ role, text });
@@ -212,7 +245,15 @@ function extractMessages(record: Record<string, unknown>): Array<{ role: string;
     }
   }
 
-  const text = firstString([record.content, record.summary, record.text, record.message]);
+  const nestedMessage = asRecord(record.message);
+  if (nestedMessage) {
+    const text = extractTextFromMessageRecord(nestedMessage);
+    if (text) {
+      return [{ role: firstString([nestedMessage.role, record.role, record.senderRole, record.fromRole]) || "unknown", text }];
+    }
+  }
+
+  const text = extractTextFromMessageRecord(record);
   if (text) {
     return [{ role: firstString([record.role, record.senderRole, record.fromRole]) || "unknown", text }];
   }
@@ -220,13 +261,18 @@ function extractMessages(record: Record<string, unknown>): Array<{ role: string;
 }
 
 function getSessionId(record: Record<string, unknown>, fallbackSeed: string): string {
+  const sessionObj = asRecord(record.session);
+  const type = firstString([record.type])?.toLowerCase();
+  const typeScopedId = type === "session" ? firstString([record.id]) : undefined;
   return (
     firstString([
       record.sessionId,
       record.session_id,
       record.conversationId,
       record.conversation_id,
-      record.id,
+      sessionObj?.id,
+      sessionObj?.sessionId,
+      typeScopedId,
     ]) || `sync:${fallbackSeed}`
   );
 }
@@ -931,18 +977,26 @@ export function createSessionSync(options: SessionSyncOptions): {
 
       const bySession = new Map<string, string[]>();
       let fileHasFailure = false;
+      const fileSessionSeed = path.basename(filePath, path.extname(filePath));
+      let fileSessionId: string | undefined;
       for (let i = startIndex; i < lines.length; i++) {
         const line = lines[i].trim();
         if (!line) continue;
-        const hash = crypto.createHash("sha1").update(line).digest("hex").slice(0, 12);
         try {
           const record = JSON.parse(line) as Record<string, unknown>;
+          if (!fileSessionId) {
+            const inferred = getSessionId(record, fileSessionSeed);
+            if (inferred && inferred !== `sync:${fileSessionSeed}`) {
+              fileSessionId = inferred;
+            }
+          }
           const messages = extractMessages(record);
           if (messages.length === 0) {
             skipped += 1;
             continue;
           }
-          const sessionId = getSessionId(record, `${path.basename(filePath)}:${hash}`);
+          const fallbackSession = fileSessionId || fileSessionSeed;
+          const sessionId = getSessionId(record, fallbackSession);
           for (const msg of messages) {
             if (!bySession.has(sessionId)) {
               bySession.set(sessionId, []);
