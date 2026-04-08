@@ -109,12 +109,6 @@ openclaw plugins enable openclaw-cortex-memory
 如果 `clawhub:` 安装出现 `fetch failed`，可改用 npm 包本地安装（推荐兜底）：
 
 ```bash
-bash -lc 'set -e; TMP="$(mktemp -d)"; cd "$TMP"; npm pack openclaw-cortex-memory@0.1.0-Alpha.29 >/dev/null; PKG="$(ls openclaw-cortex-memory-*.tgz | head -n1)"; openclaw plugins install "$TMP/$PKG"; openclaw plugins enable openclaw-cortex-memory'
-```
-
-也可分步执行（便于排错）：
-
-```bash
 npm pack openclaw-cortex-memory@0.1.0-Alpha.29
 openclaw plugins install ./openclaw-cortex-memory-0.1.0-Alpha.29.tgz
 openclaw plugins enable openclaw-cortex-memory
