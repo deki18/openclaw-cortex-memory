@@ -153,12 +153,15 @@ interface Logger {
 }
 
 interface OpenClawPluginApi {
+  logger?: Logger;
+  config?: Record<string, unknown>;
+  pluginConfig?: Record<string, unknown>;
   registerTool(tool: {
     name: string;
     description: string;
     parameters: Record<string, unknown>;
-    execute?: (params: { args?: Record<string, unknown>; context: ToolContext }) => Promise<ToolResult>;
-    handler?: (...params: unknown[]) => Promise<ToolResult>;
+    execute?: (...params: unknown[]) => Promise<unknown>;
+    handler?: (...params: unknown[]) => Promise<unknown>;
   }): void;
   unregisterTool?(name: string): void;
   registerHook(hook: {
@@ -345,6 +348,13 @@ type RegisteredToolDefinition = {
   parameters: Record<string, unknown>;
   execute: (params: { args?: Record<string, unknown>; context: ToolContext }) => Promise<ToolResult>;
 };
+
+type AgentToolResultPayload = {
+  content: Array<{ type: "text"; text: string }>;
+  details?: Record<string, unknown>;
+};
+
+const TOOL_TRACE_PAYLOAD_MAX_CHARS = 1500;
 
 function getMemoryRoot(): string {
   const projectRoot = findProjectRoot();
@@ -648,6 +658,74 @@ function createConsoleLogger(): Logger {
     info: (message: string, ...args: unknown[]) => console.log(`[CortexMemory] ${message}`, ...args),
     warn: (message: string, ...args: unknown[]) => console.warn(`[CortexMemory] ${message}`, ...args),
     error: (message: string, ...args: unknown[]) => console.error(`[CortexMemory] ${message}`, ...args),
+  };
+}
+
+function toTextContent(value: unknown): string {
+  if (typeof value === "string") {
+    return value;
+  }
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return String(value);
+  }
+}
+
+function truncateForLog(value: string, maxChars: number = TOOL_TRACE_PAYLOAD_MAX_CHARS): string {
+  if (value.length <= maxChars) {
+    return value;
+  }
+  return `${value.slice(0, maxChars)}...<truncated>`;
+}
+
+function formatUnknownForLog(value: unknown): string {
+  if (typeof value === "string") {
+    return truncateForLog(value);
+  }
+  try {
+    return truncateForLog(JSON.stringify(value));
+  } catch {
+    return truncateForLog(String(value));
+  }
+}
+
+function createToolTraceId(toolName: string): string {
+  return `${toolName}:${Date.now().toString(36)}:${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function toErrorMessage(error: unknown): string {
+  if (error instanceof Error) {
+    return error.message;
+  }
+  return String(error);
+}
+
+function toAgentToolResult(result: ToolResult, traceId?: string): AgentToolResultPayload {
+  if (!result.success) {
+    const errorText = result.error || "Tool execution failed";
+    return {
+      content: [{ type: "text", text: errorText }],
+      details: {
+        status: "error",
+        error: errorText,
+        ...(traceId ? { traceId } : {}),
+        ...(result.errorCode ? { errorCode: result.errorCode } : {}),
+      },
+    };
+  }
+  const payloadText = toTextContent(result.data ?? { ok: true });
+  const detailsData =
+    result.data && typeof result.data === "object" && !Array.isArray(result.data)
+      ? (result.data as Record<string, unknown>)
+      : { value: result.data ?? null };
+  return {
+    content: [{ type: "text", text: payloadText }],
+    details: {
+      status: "ok",
+      ...(traceId ? { traceId } : {}),
+      ...detailsData,
+    },
   };
 }
 
@@ -1453,13 +1531,44 @@ function registerToolCompat(tool: RegisteredToolDefinition): void {
     };
   };
   const invoke = async (...params: unknown[]) => {
-    logger.info(`invoke called for tool ${tool.name} with params: ${JSON.stringify(params)}`);
+    const traceId = createToolTraceId(tool.name);
+    const startedAt = Date.now();
+    logger.info(`[ToolTrace] start traceId=${traceId} tool=${tool.name} paramCount=${params.length}`);
     const normalized = normalizeInvocation(...params);
-    logger.info(`invoke: normalized args=${JSON.stringify(normalized.args)}, context=${JSON.stringify(normalized.context)}`);
-    return tool.execute({
-      args: normalized.args,
-      context: normalized.context,
-    });
+    logger.debug(
+      `[ToolTrace] normalized traceId=${traceId} tool=${tool.name} args=${formatUnknownForLog(sanitizeForLogging(normalized.args))} context=${formatUnknownForLog(sanitizeForLogging(normalized.context as unknown as Record<string, unknown>))}`,
+    );
+    try {
+      const result = await tool.execute({
+        args: normalized.args,
+        context: normalized.context,
+      });
+      const durationMs = Date.now() - startedAt;
+      logger.info(`[ToolTrace] success traceId=${traceId} tool=${tool.name} durationMs=${durationMs} resultSuccess=${result.success}`);
+      if (!result.success) {
+        logger.error(
+          `[ToolTrace] tool_failure traceId=${traceId} tool=${tool.name} error=${truncateForLog(result.error || "unknown_error")} errorCode=${result.errorCode || "none"} args=${formatUnknownForLog(sanitizeForLogging(normalized.args))}`,
+        );
+      }
+      return toAgentToolResult(result, traceId);
+    } catch (error) {
+      const durationMs = Date.now() - startedAt;
+      const message = toErrorMessage(error);
+      logger.error(
+        `[ToolTrace] exception traceId=${traceId} tool=${tool.name} durationMs=${durationMs} message=${truncateForLog(message)} args=${formatUnknownForLog(sanitizeForLogging(normalized.args))} context=${formatUnknownForLog(sanitizeForLogging(normalized.context as unknown as Record<string, unknown>))}`,
+      );
+      if (error instanceof Error && error.stack) {
+        logger.error(`[ToolTrace] stack traceId=${traceId} tool=${tool.name} ${truncateForLog(error.stack, 4000)}`);
+      }
+      return toAgentToolResult(
+        {
+          success: false,
+          error: `Tool execution failed [traceId=${traceId}]: ${message}`,
+          errorCode: "TOOL_EXECUTION_EXCEPTION",
+        },
+        traceId,
+      );
+    }
   };
   const payload = {
     name: tool.name,
@@ -1765,7 +1874,7 @@ export function register(pluginApi: OpenClawPluginApi, userConfig?: Partial<Cort
   
   api = pluginApi;
   
-  logger = api.getLogger?.() || createConsoleLogger();
+  logger = api.logger || api.getLogger?.() || createConsoleLogger();
   
   const apiPluginConfig = (api as any).pluginConfig || {};
   const openclawConfig = (api as any).config || {};
@@ -1882,6 +1991,12 @@ export function register(pluginApi: OpenClawPluginApi, userConfig?: Partial<Cort
     enabled: config.enabled,
     fallbackToBuiltin: config.fallbackToBuiltin,
   });
+  logger.info(`Runtime config snapshot: ${JSON.stringify(safeConfig)}`);
+
+  const configErrors = validateConfig(config);
+  if (configErrors.length > 0) {
+    logger.warn(`Cortex Memory config validation warnings: ${configErrors.join(" | ")}`);
+  }
 
   checkOpenClawVersion().catch(e => logger.warn(`Version check failed: ${e}`));
   
@@ -1899,7 +2014,6 @@ export function register(pluginApi: OpenClawPluginApi, userConfig?: Partial<Cort
   isInitializing = false;
   isRegistered = true;
   logger.info("Cortex Memory plugin registered successfully");
-  logger.info(`Cortex Memory engine mode: ${resolveEngine().mode}`);
   logLifecycle("register_success", {
     enabled: isEnabled,
   });

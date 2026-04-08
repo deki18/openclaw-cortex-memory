@@ -1,12 +1,12 @@
 {
   "id": "openclaw-cortex-memory",
   "name": "Cortex Memory",
-  "version": "0.1.0-Alpha.26",
+  "version": "0.1.0-Alpha.27",
   "description": "Long-term memory system with semantic, episodic, and procedural memory for AI Agents",
   "main": "dist/index.js",
   "author": "deki18",
   "license": "MIT",
-  "type": "memory",
+  "kind": "memory",
   "repository": {
     "type": "git",
     "url": "https://github.com/deki18/openclaw-cortex-memory"
@@ -361,7 +361,7 @@
             "default": 4
           }
         },
-        "required": ["provider", "model", "apiKey", "baseURL"],
+        "required": ["provider", "model"],
         "additionalProperties": false
       },
       "llm": {
@@ -389,7 +389,7 @@
             "description": "LLM API base URL (camelCase alias)"
           }
         },
-        "required": ["provider", "model", "apiKey", "baseURL"],
+        "required": ["provider", "model"],
         "additionalProperties": false
       },
       "reranker": {
@@ -417,7 +417,7 @@
             "description": "Reranker API base URL (camelCase alias)"
           }
         },
-        "required": ["provider", "model", "apiKey", "baseURL"],
+        "required": ["model"],
         "additionalProperties": false
       },
       "fallbackToBuiltin": {

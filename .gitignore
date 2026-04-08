@@ -4,6 +4,8 @@ package-lock.json
 *.tgz
 releases/
 
+openclaw-main/
+
 venv/
 
 # Trae rules

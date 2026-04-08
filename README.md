@@ -109,16 +109,16 @@ openclaw plugins enable openclaw-cortex-memory
 如果 `clawhub:` 安装出现 `fetch failed`，可改用 npm 包本地安装（推荐兜底）：
 
 ```bash
-bash -lc 'set -e; TMP="$(mktemp -d)"; cd "$TMP"; npm pack openclaw-cortex-memory@0.1.0-Alpha.26 >/dev/null; PKG="$(ls openclaw-cortex-memory-*.tgz | head -n1)"; openclaw plugins install "$TMP/$PKG"; openclaw plugins enable openclaw-cortex-memory'
+bash -lc 'set -e; TMP="$(mktemp -d)"; cd "$TMP"; npm pack openclaw-cortex-memory@0.1.0-Alpha.27 >/dev/null; PKG="$(ls openclaw-cortex-memory-*.tgz | head -n1)"; openclaw plugins install "$TMP/$PKG"; openclaw plugins enable openclaw-cortex-memory'
 ```
 
 也可分步执行（便于排错）：
 
 ```bash
-npm pack openclaw-cortex-memory@0.1.0-Alpha.26
-openclaw plugins install ./openclaw-cortex-memory-0.1.0-Alpha.26.tgz
+npm pack openclaw-cortex-memory@0.1.0-Alpha.27
+openclaw plugins install ./openclaw-cortex-memory-0.1.0-Alpha.27.tgz
 openclaw plugins enable openclaw-cortex-memory
-rm ./openclaw-cortex-memory-0.1.0-Alpha.26.tgz
+rm ./openclaw-cortex-memory-0.1.0-Alpha.27.tgz
 ```
 
 完成安装后，请先按下方“最小配置”示例配置 `openclaw.json`，确认配置无误后再启动 gateway。
@@ -127,10 +127,10 @@ rm ./openclaw-cortex-memory-0.1.0-Alpha.26.tgz
 
 ```bash
 rm -r ~/.openclaw/extensions/openclaw-cortex-memory
-npm pack openclaw-cortex-memory@0.1.0-Alpha.26
-openclaw plugins install ./openclaw-cortex-memory-0.1.0-Alpha.26.tgz
+npm pack openclaw-cortex-memory@0.1.0-Alpha.27
+openclaw plugins install ./openclaw-cortex-memory-0.1.0-Alpha.27.tgz
 openclaw plugins enable openclaw-cortex-memory
-rm ./openclaw-cortex-memory-0.1.0-Alpha.26.tgz
+rm ./openclaw-cortex-memory-0.1.0-Alpha.27.tgz
 openclaw plugins list
 openclaw gateway restart
 ```
