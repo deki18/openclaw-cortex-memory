@@ -914,7 +914,9 @@ function validateConfig(cfg: CortexMemoryConfig): string[] {
       const buckets = cfg.readTuning.recency.buckets;
       for (let i = 0; i < buckets.length; i += 1) {
         const bucket = buckets[i];
-        if (!Number.isFinite(bucket.maxAgeHours) || bucket.maxAgeHours <= 0) {
+        const maxAgeHours = bucket.maxAgeHours;
+        const finiteOrInfinity = Number.isFinite(maxAgeHours) || maxAgeHours === Number.POSITIVE_INFINITY;
+        if (!finiteOrInfinity || maxAgeHours <= 0) {
           errors.push(`readTuning.recency.buckets[${i}].maxAgeHours must be > 0.`);
         }
         if (!Number.isFinite(bucket.score) || bucket.score < 0) {
