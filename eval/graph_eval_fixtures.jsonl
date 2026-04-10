@@ -1,8 +1,0 @@
-{"id":"evt_fixture_1","canonical_id":"can_fixture_deploy_chain","summary":"deploy pipeline depends on build pipeline","entities":["deploy_pipeline","build_pipeline"],"relations":[{"source":"deploy_pipeline","target":"build_pipeline","type":"depends_on"}],"outcome":"ok"}
-{"id":"evt_fixture_2","canonical_id":"can_fixture_deploy_chain","summary":"build pipeline depends on lint step","entities":["build_pipeline","lint_step"],"relations":[{"source":"build_pipeline","target":"lint_step","type":"depends_on"}],"outcome":"ok"}
-{"id":"evt_fixture_3","canonical_id":"can_fixture_memory_sync","summary":"memory sync is blocked by rate limit","entities":["memory_sync","rate_limit"],"relations":[{"source":"rate_limit","target":"memory_sync","type":"blocks"}],"outcome":"failed"}
-{"id":"evt_fixture_4","canonical_id":"can_fixture_memory_sync","summary":"retry strategy resolves memory sync issue","entities":["retry_strategy","memory_sync"],"relations":[{"source":"retry_strategy","target":"memory_sync","type":"resolves"}],"outcome":"ok"}
-{"id":"evt_fixture_5","canonical_id":"can_fixture_path","summary":"task_a depends on task_b","entities":["task_a","task_b"],"relations":[{"source":"task_a","target":"task_b","type":"depends_on"}],"outcome":"ok"}
-{"id":"evt_fixture_6","canonical_id":"can_fixture_path","summary":"task_b depends on task_c","entities":["task_b","task_c"],"relations":[{"source":"task_b","target":"task_c","type":"depends_on"}],"outcome":"ok"}
-{"id":"evt_fixture_7","canonical_id":"can_fixture_conflict","summary":"deployment succeeded","entities":["deployment"],"relations":[],"outcome":"success"}
-{"id":"evt_fixture_8","canonical_id":"can_fixture_conflict","summary":"deployment failed","entities":["deployment"],"relations":[],"outcome":"failed"}
