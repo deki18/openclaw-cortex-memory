@@ -1,7 +1,7 @@
 {
   "id": "openclaw-cortex-memory",
   "name": "Cortex Memory",
-  "version": "0.1.0-Alpha.30",
+  "version": "0.1.0-Alpha.31",
   "description": "Long-term memory system with semantic, episodic, and procedural memory for AI Agents",
   "main": "dist/index.js",
   "author": "deki18",
@@ -72,6 +72,18 @@
           "summary": {
             "type": "string",
             "description": "Event summary"
+          },
+          "cause": {
+            "type": "string",
+            "description": "What triggered the event (task/request/problem statement)"
+          },
+          "process": {
+            "type": "string",
+            "description": "How the task was handled (steps/attempts/iterations)"
+          },
+          "result": {
+            "type": "string",
+            "description": "Final result and acceptance outcome"
           },
           "entities": {
             "type": "array",
@@ -177,6 +189,75 @@
           }
         },
         "required": ["entity"],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "export_graph_view",
+      "description": "Export status-aware graph view and optionally write wiki graph snapshots",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "write_snapshot": {
+            "type": "boolean",
+            "description": "When true (default), write data/memory/wiki/graph/view.json and timeline.jsonl"
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "lint_memory_wiki",
+      "description": "Run wiki memory lint checks and return structured repair guidance",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "list_graph_conflicts",
+      "description": "List pending/handled graph memory conflicts that require user confirmation",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": ["pending", "accepted", "rejected", "all"],
+            "description": "Filter conflict status"
+          },
+          "limit": {
+            "type": "integer",
+            "description": "Maximum returned conflicts"
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "resolve_graph_conflict",
+      "description": "Resolve a graph conflict by accepting or rejecting the new candidate fact",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "conflict_id": {
+            "type": "string",
+            "description": "Conflict ID from list_graph_conflicts"
+          },
+          "action": {
+            "type": "string",
+            "enum": ["accept", "reject"],
+            "description": "Resolution action"
+          },
+          "note": {
+            "type": "string",
+            "description": "Optional note for audit trail"
+          }
+        },
+        "required": ["conflict_id", "action"],
         "additionalProperties": false
       }
     },
@@ -299,7 +380,7 @@
       },
       "dbPath": {
         "type": "string",
-        "description": "Path to the memory database directory"
+        "description": "Path to the memory database directory (default: <openclaw_base>/workspace/memory/openclaw-cortex-memory)"
       },
       "autoSync": {
         "type": "boolean",
@@ -321,6 +402,29 @@
         "description": "Graph extraction quality gate mode",
         "enum": ["off", "warn", "strict"],
         "default": "warn"
+      },
+      "wikiProjection": {
+        "type": "object",
+        "description": "Feature flags for wiki projection runtime",
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "description": "Enable wiki projection pipeline",
+            "default": false
+          },
+          "mode": {
+            "type": "string",
+            "description": "Wiki projection mode",
+            "enum": ["off", "incremental", "rebuild"],
+            "default": "off"
+          },
+          "maxBatch": {
+            "type": "integer",
+            "description": "Max events/pages processed per projection batch",
+            "default": 100
+          }
+        },
+        "additionalProperties": false
       },
       "embedding": {
         "type": "object",
@@ -537,12 +641,24 @@
           "activeTextMaxChars": {
             "type": "integer",
             "description": "Maximum chars for active text payload",
-            "default": 4000
+            "default": 200000
           },
           "archiveSourceTextMaxChars": {
             "type": "integer",
             "description": "Maximum chars for archive source_text payload",
-            "default": 8000
+            "default": 500000
+          }
+        },
+        "additionalProperties": false
+      },
+      "syncPolicy": {
+        "type": "object",
+        "description": "Sync ingestion controls",
+        "properties": {
+          "includeLocalActiveInput": {
+            "type": "boolean",
+            "description": "Whether sync_memory reads local memory/sessions/active/sessions.jsonl as source input",
+            "default": false
           }
         },
         "additionalProperties": false

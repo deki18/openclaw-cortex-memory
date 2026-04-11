@@ -1,6 +1,6 @@
 {
   "name": "openclaw-cortex-memory",
-  "version": "0.1.0-Alpha.30",
+  "version": "0.1.0-Alpha.31",
   "description": "Long-term memory system for OpenClaw AI Agent",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -16,6 +16,8 @@
     "test:graph": "node scripts/graph-eval.js",
     "test:graph-quality": "node scripts/graph-quality-eval.js",
     "test:graph-quality-zh": "node scripts/graph-quality-eval.js --gold eval/graph_quality_gold.zh.jsonl --pred eval/graph_quality_predictions.zh.sample.jsonl --thresholds eval/graph_quality_thresholds.json",
+    "test:m1-ingest-regression": "node scripts/m1-ingest-regression.js",
+    "test:m5-cross-store": "node scripts/m5-cross-store-regression.js",
     "test:lengthnorm": "node scripts/lengthnorm-regression.js",
     "test:all": "npm run test:compat && npm run test:model && npm run test:graph && npm run test:graph-quality && npm run test:graph-quality-zh && npm run test:lengthnorm",
     "release:check": "node scripts/release-pipeline.js",
@@ -51,11 +53,14 @@
   "files": [
     "dist/",
     "scripts/cli.js",
+    "scripts/install.js",
     "scripts/uninstall.js",
     "scripts/repair-memory.js",
     "schema/",
     "openclaw.plugin.json",
-    "SKILL.md"
+    "SIGNATURE.md",
+    "SKILL.md",
+    "skills/cortex-memory/"
   ],
   "openclaw": {
     "plugin": true,
