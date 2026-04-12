@@ -125,10 +125,10 @@ openclaw plugins enable openclaw-cortex-memory
 如果 `clawhub:` 安装出现 `fetch failed`，可改用 npm 包本地安装（推荐兜底）：
 
 ```bash
-npm pack openclaw-cortex-memory@0.1.0-Alpha.31
-openclaw plugins install ./openclaw-cortex-memory-0.1.0-Alpha.31.tgz
+npm pack openclaw-cortex-memory@0.1.0-Alpha.32
+openclaw plugins install ./openclaw-cortex-memory-0.1.0-Alpha.32.tgz
 openclaw plugins enable openclaw-cortex-memory
-rm ./openclaw-cortex-memory-0.1.0-Alpha.31.tgz
+rm ./openclaw-cortex-memory-0.1.0-Alpha.32.tgz
 ```
 
 完成安装后，请先按下方"最小配置"示例配置 `openclaw.json`，确认配置无误后再启动 gateway。
@@ -137,10 +137,10 @@ rm ./openclaw-cortex-memory-0.1.0-Alpha.31.tgz
 
 ```bash
 rm -r ~/.openclaw/extensions/openclaw-cortex-memory
-npm pack openclaw-cortex-memory@0.1.0-Alpha.31
-openclaw plugins install ./openclaw-cortex-memory-0.1.0-Alpha.31.tgz
+npm pack openclaw-cortex-memory@0.1.0-Alpha.32
+openclaw plugins install ./openclaw-cortex-memory-0.1.0-Alpha.32.tgz
 openclaw plugins enable openclaw-cortex-memory
-rm ./openclaw-cortex-memory-0.1.0-Alpha.31.tgz
+rm ./openclaw-cortex-memory-0.1.0-Alpha.32.tgz
 openclaw plugins list  --enabled
 openclaw gateway restart
 ```
