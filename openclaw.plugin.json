@@ -1,7 +1,7 @@
 {
   "id": "openclaw-cortex-memory",
   "name": "Cortex Memory",
-  "version": "0.1.0-Alpha.32",
+  "version": "0.1.0-Alpha.33",
   "description": "Long-term memory system with semantic, episodic, and procedural memory for AI Agents",
   "main": "dist/index.js",
   "author": "deki18",
@@ -360,8 +360,19 @@
       }
     },
     {
-      "name": "diagnostics",
+      "name": "cortex_diagnostics",
       "description": "Check memory system status",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "diagnostics",
+      "description": "Legacy alias for cortex_diagnostics",
+      "optional": true,
       "parameters": {
         "type": "object",
         "properties": {},
