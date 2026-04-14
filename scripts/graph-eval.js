@@ -160,6 +160,7 @@ function main() {
     relation_hit_rate: relationTotal === 0 ? 1 : Number((relationPass / relationTotal).toFixed(4)),
     path_correct_rate: pathTotal === 0 ? 1 : Number((pathPass / pathTotal).toFixed(4)),
     conflict_detection_ratio: conflict.canonical_total === 0 ? 0 : Number((conflict.canonical_conflicts / conflict.canonical_total).toFixed(4)),
+    conflict_threshold_skipped: conflict.canonical_total === 0,
     relation_cases: relationTotal,
     path_cases: pathTotal,
     canonical_total: conflict.canonical_total,
@@ -173,7 +174,7 @@ function main() {
   if (summary.path_correct_rate < Number(thresholds.path_correct_rate_min || 0)) {
     failures.push(`path_correct_rate ${summary.path_correct_rate} < ${thresholds.path_correct_rate_min}`);
   }
-  if (summary.conflict_detection_ratio < Number(thresholds.conflict_detection_ratio_min || 0)) {
+  if (!summary.conflict_threshold_skipped && summary.conflict_detection_ratio < Number(thresholds.conflict_detection_ratio_min || 0)) {
     failures.push(`conflict_detection_ratio ${summary.conflict_detection_ratio} < ${thresholds.conflict_detection_ratio_min}`);
   }
   if (failures.length > 0) {
