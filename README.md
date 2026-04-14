@@ -169,8 +169,14 @@ openclaw plugins uninstall openclaw-cortex-memory --keep-data
 {
   "plugins": {
     "allow": ["openclaw-cortex-memory"],
-    "slots": { "memory": "openclaw-cortex-memory" },
+    "slots": { "memory": "none" },
     "entries": {
+      "memory-core": {
+        "enabled": false
+      },
+      "memory-lancedb": {
+        "enabled": false
+      },
       "openclaw-cortex-memory": {
         "enabled": true,
         "config": {
@@ -208,15 +214,10 @@ openclaw plugins uninstall openclaw-cortex-memory --keep-data
 }
 ```
 
-如果你启用了工具白名单（`tools.allow`），请把插件 ID 也加入白名单，否则该插件工具在会话中会不可见：
+独占模式注意事项：
 
-```json
-{
-  "tools": {
-    "allow": ["openclaw-cortex-memory"]
-  }
-}
-```
+- `plugins.slots.memory` 不要设置为 `openclaw-cortex-memory`
+- 建议将 `memory-core` 与 `memory-lancedb` 显式禁用（如上示例），避免多记忆后端并存冲突
 
 ## 外部端点与凭证声明（审查说明）
 

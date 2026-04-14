@@ -203,7 +203,7 @@ const ERROR_CODES: Record<string, UserFriendlyError> = {
   PLUGIN_DISABLED: {
     code: "E006",
     message: "Cortex Memory plugin is disabled",
-    suggestion: "Enable the plugin using 'openclaw plugins enable cortex-memory' or check openclaw.json"
+    suggestion: "Enable the plugin using 'openclaw plugins enable openclaw-cortex-memory' or check openclaw.json"
   }
 };
 

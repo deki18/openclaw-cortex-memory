@@ -4,6 +4,7 @@ const fs = require('fs');
 const path = require('path');
 
 const PLUGIN_NAME = 'openclaw-cortex-memory';
+const EXCLUSIVE_MEMORY_PLUGINS = ['memory-core', 'memory-lancedb'];
 
 function findOpenClawConfig() {
   const explicitConfigPath = process.env.OPENCLAW_CONFIG_PATH || '';
@@ -50,6 +51,41 @@ function saveConfig(configPath, config) {
   console.log(`Configuration saved to: ${configPath}`);
 }
 
+function ensureExclusiveMemoryMode(config) {
+  let changed = false;
+
+  if (!config.plugins) {
+    config.plugins = {};
+    changed = true;
+  }
+  if (!config.plugins.entries) {
+    config.plugins.entries = {};
+    changed = true;
+  }
+
+  for (const pluginId of EXCLUSIVE_MEMORY_PLUGINS) {
+    const current = config.plugins.entries[pluginId] || {};
+    if (current.enabled !== false) {
+      config.plugins.entries[pluginId] = {
+        ...current,
+        enabled: false
+      };
+      changed = true;
+    }
+  }
+
+  if (!config.plugins.slots) {
+    config.plugins.slots = {};
+    changed = true;
+  }
+  if (config.plugins.slots.memory !== 'none') {
+    config.plugins.slots.memory = 'none';
+    changed = true;
+  }
+
+  return changed;
+}
+
 function enablePlugin() {
   const configPath = findOpenClawConfig();
   
@@ -64,9 +100,15 @@ function enablePlugin() {
       plugins: {
         allow: [PLUGIN_NAME],
         slots: {
-          memory: PLUGIN_NAME
+          memory: 'none'
         },
         entries: {
+          'memory-core': {
+            enabled: false
+          },
+          'memory-lancedb': {
+            enabled: false
+          },
           [PLUGIN_NAME]: {
             enabled: true
           }
@@ -92,24 +134,26 @@ function enablePlugin() {
   if (!config.plugins.entries) {
     config.plugins.entries = {};
   }
-  
-  if (config.plugins.entries[PLUGIN_NAME]?.enabled === true) {
-    console.log(`Plugin '${PLUGIN_NAME}' is already enabled.`);
-    return;
-  }
-  
+
+  const wasEnabled = config.plugins.entries[PLUGIN_NAME]?.enabled === true;
   config.plugins.entries[PLUGIN_NAME] = {
     ...config.plugins.entries[PLUGIN_NAME],
     enabled: true
   };
-  
-  if (!config.plugins.slots) {
-    config.plugins.slots = {};
+
+  const exclusiveUpdated = ensureExclusiveMemoryMode(config);
+  if (wasEnabled && !exclusiveUpdated) {
+    console.log(`Plugin '${PLUGIN_NAME}' is already enabled.`);
+    return;
   }
-  config.plugins.slots.memory = PLUGIN_NAME;
-  
+
   saveConfig(configPath, config);
-  console.log(`Plugin '${PLUGIN_NAME}' has been enabled.`);
+  if (wasEnabled) {
+    console.log(`Plugin '${PLUGIN_NAME}' is already enabled.`);
+    console.log('Exclusive memory mode config has been refreshed (slots.memory=none, memory-core/memory-lancedb disabled).');
+  } else {
+    console.log(`Plugin '${PLUGIN_NAME}' has been enabled.`);
+  }
   console.log('The plugin will be activated on the next OpenClaw restart or config reload.');
 }
 
@@ -221,13 +265,23 @@ Configuration:
   {
     "plugins": {
       "allow": ["openclaw-cortex-memory"],
+      "slots": {
+        "memory": "none"
+      },
       "entries": {
+        "memory-core": {
+          "enabled": false
+        },
+        "memory-lancedb": {
+          "enabled": false
+        },
         "openclaw-cortex-memory": {
           "enabled": true/false
         }
       }
     }
   }
+  Note: do not set plugins.slots.memory to "openclaw-cortex-memory".
 
 Fallback Behavior:
   When disabled, the plugin will fall back to OpenClaw's builtin
