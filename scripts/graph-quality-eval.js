@@ -437,6 +437,8 @@ function main() {
       pred: predPath,
       thresholds: thresholdPath,
     },
+    thresholds_skipped: gold.length === 0,
+    thresholds_skip_reason: gold.length === 0 ? "no_gold_cases" : "",
     cases_total: gold.length,
     cases_missing_prediction: missingCases.length,
     missing_case_ids: missingCases,
@@ -487,6 +489,11 @@ function main() {
   }
 
   console.log(JSON.stringify(summary, null, 2));
+
+  if (summary.thresholds_skipped) {
+    console.warn("\nGraph quality threshold check skipped: no gold cases were loaded.");
+    process.exit(0);
+  }
 
   const failures = [];
   const entityF1Min = thresholdNumber(thresholds, "entity_f1_min", 0);
