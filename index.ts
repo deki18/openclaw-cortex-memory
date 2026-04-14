@@ -54,6 +54,11 @@ interface CortexMemoryConfig {
   autoReflect?: boolean;
   autoReflectIntervalMinutes?: number;
   graphQualityMode?: "off" | "warn" | "strict";
+  wikiProjection?: {
+    enabled?: boolean;
+    mode?: "off" | "incremental" | "rebuild";
+    maxBatch?: number;
+  };
   readFusion?: {
     enabled?: boolean;
     maxCandidates?: number;
@@ -91,6 +96,9 @@ interface CortexMemoryConfig {
     activeDedupTailLines?: number;
     activeTextMaxChars?: number;
     archiveSourceTextMaxChars?: number;
+  };
+  syncPolicy?: {
+    includeLocalActiveInput?: boolean;
   };
   memoryDecay?: {
     enabled?: boolean;
@@ -162,7 +170,7 @@ interface OpenClawPluginApi {
     parameters: Record<string, unknown>;
     execute?: (...params: unknown[]) => Promise<unknown>;
     handler?: (...params: unknown[]) => Promise<unknown>;
-  }): void;
+  }, options?: { optional?: boolean }): void;
   unregisterTool?(name: string): void;
   registerHook(hook: {
     event: string;
@@ -201,6 +209,30 @@ const ERROR_CODES: Record<string, UserFriendlyError> = {
 
 const SENSITIVE_KEYS = ["API_KEY", "SECRET", "TOKEN", "PASSWORD", "APIKEY"];
 const PLUGIN_ID = "openclaw-cortex-memory";
+const TOOL_NAME_CORTEX_DIAGNOSTICS = "cortex_diagnostics";
+const TOOL_NAME_DIAGNOSTICS_LEGACY = "diagnostics";
+
+type PluginEntryLike = {
+  id?: string;
+  name?: string;
+  register: typeof register;
+  unregister?: typeof unregister;
+  enable?: typeof enable;
+  disable?: typeof disable;
+  getStatus?: typeof getStatus;
+};
+
+const definePluginEntryCompat = (() => {
+  try {
+    const sdk = require("openclaw/plugin-sdk/plugin-entry");
+    if (sdk && typeof sdk.definePluginEntry === "function") {
+      return sdk.definePluginEntry as <T extends PluginEntryLike>(entry: T) => T;
+    }
+  } catch {
+    // Fallback keeps compatibility with hosts that only support legacy exports.
+  }
+  return <T extends PluginEntryLike>(entry: T): T => entry;
+})();
 
 const MIN_OPENCLAW_GATEWAY_VERSION = "2026.4.5";
 const MAX_OPENCLAW_GATEWAY_VERSION = "2027.0.0";
@@ -211,6 +243,11 @@ const defaultConfig: Partial<CortexMemoryConfig> = {
   autoReflect: false,
   autoReflectIntervalMinutes: 30,
   graphQualityMode: "warn",
+  wikiProjection: {
+    enabled: true,
+    mode: "incremental",
+    maxBatch: 100,
+  },
   readFusion: {
     enabled: true,
     maxCandidates: 10,
@@ -246,8 +283,11 @@ const defaultConfig: Partial<CortexMemoryConfig> = {
     archiveMinQualityScore: 0.4,
     activeMinQualityScore: 0.45,
     activeDedupTailLines: 200,
-    activeTextMaxChars: 4000,
-    archiveSourceTextMaxChars: 8000,
+    activeTextMaxChars: 200000,
+    archiveSourceTextMaxChars: 500000,
+  },
+  syncPolicy: {
+    includeLocalActiveInput: false,
   },
   memoryDecay: {
     enabled: true,
@@ -346,6 +386,7 @@ type RegisteredToolDefinition = {
   name: string;
   description: string;
   parameters: Record<string, unknown>;
+  optional?: boolean;
   execute: (params: { args?: Record<string, unknown>; context: ToolContext }) => Promise<ToolResult>;
 };
 
@@ -356,9 +397,43 @@ type AgentToolResultPayload = {
 
 const TOOL_TRACE_PAYLOAD_MAX_CHARS = 1500;
 
+function inferOpenClawBasePathForWorkspace(): string | null {
+  const explicitConfigPath = getEnvValue("OPENCLAW_CONFIG_PATH").trim();
+  if (explicitConfigPath) {
+    return path.dirname(path.resolve(explicitConfigPath));
+  }
+  const stateDir = getEnvValue("OPENCLAW_STATE_DIR").trim();
+  if (stateDir) {
+    return path.resolve(stateDir);
+  }
+  const basePath = getEnvValue("OPENCLAW_BASE_PATH").trim();
+  if (basePath) {
+    return path.resolve(basePath);
+  }
+  const discoveredConfigPath = findOpenClawConfig();
+  if (discoveredConfigPath) {
+    return path.dirname(path.resolve(discoveredConfigPath));
+  }
+  return null;
+}
+
+function resolveDefaultMemoryRoot(projectRoot: string): string {
+  const openClawBasePath = inferOpenClawBasePathForWorkspace();
+  if (openClawBasePath) {
+    return path.join(openClawBasePath, "workspace", "memory", PLUGIN_ID);
+  }
+  return path.join(projectRoot, "data", "memory");
+}
+
+function resolveConfiguredMemoryRoot(configuredDbPath?: string): string {
+  if (typeof configuredDbPath === "string" && configuredDbPath.trim()) {
+    return path.resolve(configuredDbPath.trim());
+  }
+  return resolveDefaultMemoryRoot(findProjectRoot());
+}
+
 function getMemoryRoot(): string {
-  const projectRoot = findProjectRoot();
-  return config?.dbPath ? path.resolve(config.dbPath) : path.join(projectRoot, "data", "memory");
+  return resolveConfiguredMemoryRoot(config?.dbPath);
 }
 
 function getArchiveMarker(): string {
@@ -465,6 +540,7 @@ function resolveEngine(): MemoryEngine {
     memoryRoot,
     logger,
     qualityMode: config.graphQualityMode || "warn",
+    wikiProjection: config.wikiProjection,
   });
   const sessionSync = createSessionSync({
     projectRoot,
@@ -474,6 +550,7 @@ function resolveEngine(): MemoryEngine {
     graphQualityMode: config.graphQualityMode || "warn",
     requireLlmForWrite: config.llmRequiredForWrite ?? true,
     writePolicy: config.writePolicy,
+    syncPolicy: config.syncPolicy,
     archiveStore,
     graphMemoryStore,
     writeStore,
@@ -822,6 +899,16 @@ function validateConfig(cfg: CortexMemoryConfig): string[] {
       errors.push("graphQualityMode must be one of: off, warn, strict.");
     }
   }
+  if (cfg.wikiProjection?.mode !== undefined) {
+    if (!["off", "incremental", "rebuild"].includes(cfg.wikiProjection.mode)) {
+      errors.push("wikiProjection.mode must be one of: off, incremental, rebuild.");
+    }
+  }
+  if (cfg.wikiProjection?.maxBatch !== undefined) {
+    if (!Number.isFinite(cfg.wikiProjection.maxBatch) || cfg.wikiProjection.maxBatch < 1) {
+      errors.push("wikiProjection.maxBatch must be >= 1.");
+    }
+  }
   if (cfg.readFusion?.channelWeights) {
     const weights = cfg.readFusion.channelWeights;
     for (const [key, value] of Object.entries(weights)) {
@@ -870,6 +957,11 @@ function validateConfig(cfg: CortexMemoryConfig): string[] {
     }
     if (wp.archiveSourceTextMaxChars !== undefined && (!Number.isFinite(wp.archiveSourceTextMaxChars) || wp.archiveSourceTextMaxChars < 1000)) {
       errors.push("writePolicy.archiveSourceTextMaxChars must be >= 1000.");
+    }
+  }
+  if (cfg.syncPolicy && cfg.syncPolicy.includeLocalActiveInput !== undefined) {
+    if (typeof cfg.syncPolicy.includeLocalActiveInput !== "boolean") {
+      errors.push("syncPolicy.includeLocalActiveInput must be boolean.");
     }
   }
   if (cfg.memoryDecay) {
@@ -1158,6 +1250,9 @@ function registerTools(): void {
         type: "object",
         properties: {
           summary: { type: "string", description: "Event summary" },
+          cause: { type: "string", description: "What triggered the event (task/request/problem statement)" },
+          process: { type: "string", description: "How the task was handled (steps/attempts/iterations)" },
+          result: { type: "string", description: "Final result and acceptance outcome" },
           entities: { 
             type: "array", 
             description: "Involved entities",
@@ -1211,6 +1306,9 @@ function registerTools(): void {
         const args = params.args || params;
         return resolveEngine().storeEvent(args as {
           summary: string;
+          cause?: string;
+          process?: string;
+          result?: string;
           entities?: Array<{ id?: string; name?: string; type?: string }>;
           entity_types?: Record<string, string>;
           outcome?: string;
@@ -1245,6 +1343,87 @@ function registerTools(): void {
           dir?: "incoming" | "outgoing" | "both";
           path_to?: string;
           max_depth?: number;
+        }, params.context);
+      },
+    },
+    {
+      name: "export_graph_view",
+      description: "Export status-aware graph view and optionally write wiki graph snapshots",
+      parameters: {
+        type: "object",
+        properties: {
+          write_snapshot: {
+            type: "boolean",
+            description: "When true (default), write wiki/graph/view.json, timeline.jsonl and Mermaid network snapshots",
+          },
+        },
+        required: [],
+        additionalProperties: false,
+      },
+      execute: async (params: { args?: Record<string, unknown>; context: ToolContext }) => {
+        const args = params.args || params;
+        return resolveEngine().exportGraphView(args as {
+          write_snapshot?: boolean;
+        }, params.context);
+      },
+    },
+    {
+      name: "lint_memory_wiki",
+      description: "Run wiki memory lint checks and return structured repair guidance",
+      parameters: {
+        type: "object",
+        properties: {},
+        required: [],
+        additionalProperties: false,
+      },
+      execute: async (params: { args?: Record<string, unknown>; context: ToolContext }) => {
+        const args = params.args || params;
+        return resolveEngine().lintMemoryWiki(args as Record<string, unknown>, params.context);
+      },
+    },
+    {
+      name: "list_graph_conflicts",
+      description: "List pending/handled graph memory conflicts that require user confirmation",
+      parameters: {
+        type: "object",
+        properties: {
+          status: {
+            type: "string",
+            enum: ["pending", "accepted", "rejected", "all"],
+            description: "Filter conflict status",
+          },
+          limit: { type: "integer", description: "Maximum returned conflicts" },
+        },
+        required: [],
+        additionalProperties: false,
+      },
+      execute: async (params: { args?: Record<string, unknown>; context: ToolContext }) => {
+        const args = params.args || params;
+        return resolveEngine().listGraphConflicts(args as {
+          status?: "pending" | "accepted" | "rejected" | "all";
+          limit?: number;
+        }, params.context);
+      },
+    },
+    {
+      name: "resolve_graph_conflict",
+      description: "Resolve a graph conflict by accepting or rejecting the new candidate fact",
+      parameters: {
+        type: "object",
+        properties: {
+          conflict_id: { type: "string", description: "Conflict ID from list_graph_conflicts" },
+          action: { type: "string", enum: ["accept", "reject"], description: "Resolution action" },
+          note: { type: "string", description: "Optional note for audit trail" },
+        },
+        required: ["conflict_id", "action"],
+        additionalProperties: false,
+      },
+      execute: async (params: { args?: Record<string, unknown>; context: ToolContext }) => {
+        const args = params.args || params;
+        return resolveEngine().resolveGraphConflict(args as {
+          conflict_id: string;
+          action: "accept" | "reject";
+          note?: string;
         }, params.context);
       },
     },
@@ -1351,10 +1530,26 @@ function registerTools(): void {
       },
     },
     {
-      name: "diagnostics",
+      name: TOOL_NAME_CORTEX_DIAGNOSTICS,
       description: "Check memory system status",
-      parameters: { 
-        type: "object", 
+      parameters: {
+        type: "object",
+        properties: {},
+        required: [],
+        additionalProperties: false,
+      },
+      execute: async (params: { args?: Record<string, unknown>; context: ToolContext }) => {
+        const args = params.args || params;
+        const result = await resolveEngine().runDiagnostics(args, params.context);
+        return withToolVisibilityDiagnostics(result, params.context);
+      },
+    },
+    {
+      name: TOOL_NAME_DIAGNOSTICS_LEGACY,
+      description: "Legacy alias for cortex_diagnostics",
+      optional: true,
+      parameters: {
+        type: "object",
         properties: {},
         required: [],
         additionalProperties: false,
@@ -1576,12 +1771,17 @@ function registerToolCompat(tool: RegisteredToolDefinition): void {
     name: tool.name,
     description: tool.description,
     parameters: sanitizeToolParametersSchema(tool.parameters),
+    ...(tool.optional ? { optional: true } : {}),
     execute: invoke,
     handler: invoke,
   };
   const apiObj = api as any;
   if (typeof apiObj.registerTool === "function") {
-    apiObj.registerTool(payload);
+    if (tool.optional) {
+      apiObj.registerTool(payload, { optional: true });
+    } else {
+      apiObj.registerTool(payload);
+    }
     return;
   }
   if (typeof apiObj.registerTools === "function") {
@@ -1884,6 +2084,7 @@ export function register(pluginApi: OpenClawPluginApi, userConfig?: Partial<Cort
   const pluginConfig = Object.keys(apiPluginConfig).length > 0 ? apiPluginConfig : (pluginEntry?.config || {});
   
   const effectiveConfig = userConfig || pluginConfig || {};
+  const resolvedDbPath = resolveConfiguredMemoryRoot(typeof effectiveConfig.dbPath === "string" ? effectiveConfig.dbPath : undefined);
   const embeddingConfigRaw = (effectiveConfig.embedding || { provider: "openai-compatible", model: "" }) as EmbeddingConfig;
   const llmConfigRaw = (effectiveConfig.llm || { provider: "openai", model: "" }) as LLMConfig;
   const rerankerConfigRaw = (effectiveConfig.reranker || { provider: "", model: "" }) as RerankerConfig;
@@ -1904,11 +2105,16 @@ export function register(pluginApi: OpenClawPluginApi, userConfig?: Partial<Cort
     embedding: embeddingConfig,
     llm: llmConfig,
     reranker: rerankerConfig,
-    dbPath: effectiveConfig.dbPath,
+    dbPath: resolvedDbPath,
     autoSync: effectiveConfig.autoSync ?? defaultConfig.autoSync,
     autoReflect: effectiveConfig.autoReflect ?? defaultConfig.autoReflect,
     autoReflectIntervalMinutes: effectiveConfig.autoReflectIntervalMinutes ?? defaultConfig.autoReflectIntervalMinutes,
     graphQualityMode: effectiveConfig.graphQualityMode ?? defaultConfig.graphQualityMode,
+    wikiProjection: {
+      enabled: effectiveConfig.wikiProjection?.enabled ?? defaultConfig.wikiProjection?.enabled,
+      mode: effectiveConfig.wikiProjection?.mode ?? defaultConfig.wikiProjection?.mode,
+      maxBatch: effectiveConfig.wikiProjection?.maxBatch ?? defaultConfig.wikiProjection?.maxBatch,
+    },
     readFusion: {
       enabled: effectiveConfig.readFusion?.enabled ?? defaultConfig.readFusion?.enabled,
       maxCandidates: effectiveConfig.readFusion?.maxCandidates ?? defaultConfig.readFusion?.maxCandidates,
@@ -1936,6 +2142,9 @@ export function register(pluginApi: OpenClawPluginApi, userConfig?: Partial<Cort
       activeDedupTailLines: effectiveConfig.writePolicy?.activeDedupTailLines ?? defaultConfig.writePolicy?.activeDedupTailLines,
       activeTextMaxChars: effectiveConfig.writePolicy?.activeTextMaxChars ?? defaultConfig.writePolicy?.activeTextMaxChars,
       archiveSourceTextMaxChars: effectiveConfig.writePolicy?.archiveSourceTextMaxChars ?? defaultConfig.writePolicy?.archiveSourceTextMaxChars,
+    },
+    syncPolicy: {
+      includeLocalActiveInput: effectiveConfig.syncPolicy?.includeLocalActiveInput ?? defaultConfig.syncPolicy?.includeLocalActiveInput,
     },
     memoryDecay: {
       enabled: effectiveConfig.memoryDecay?.enabled ?? defaultConfig.memoryDecay?.enabled,
@@ -2026,3 +2235,15 @@ export function register(pluginApi: OpenClawPluginApi, userConfig?: Partial<Cort
     startAutoReflectScheduler();
   }
 }
+
+const pluginEntry = definePluginEntryCompat({
+  id: PLUGIN_ID,
+  name: "Cortex Memory",
+  register,
+  unregister,
+  enable,
+  disable,
+  getStatus,
+});
+
+export default pluginEntry;

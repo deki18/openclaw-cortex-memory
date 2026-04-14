@@ -20,6 +20,9 @@ export interface SearchMemoryArgs {
 
 export interface StoreEventArgs {
   summary: string;
+  cause?: string;
+  process?: string;
+  result?: string;
   entities?: Array<{ id?: string; name?: string; type?: string }>;
   entity_types?: Record<string, string>;
   outcome?: string;
@@ -33,6 +36,23 @@ export interface QueryGraphArgs {
   path_to?: string;
   max_depth?: number;
 }
+
+export interface ListGraphConflictsArgs {
+  status?: "pending" | "accepted" | "rejected" | "all";
+  limit?: number;
+}
+
+export interface ResolveGraphConflictArgs {
+  conflict_id: string;
+  action: "accept" | "reject";
+  note?: string;
+}
+
+export interface ExportGraphViewArgs {
+  write_snapshot?: boolean;
+}
+
+export interface LintMemoryWikiArgs {}
 
 export interface GetHotContextArgs {
   limit?: number;

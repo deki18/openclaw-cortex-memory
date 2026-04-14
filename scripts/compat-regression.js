@@ -14,11 +14,15 @@ const requiredTools = [
   'reflect_memory',
   'sync_memory',
   'delete_memory',
-  'diagnostics',
+  'cortex_diagnostics',
 ];
 
 function logger() {
   return { debug() {}, info() {}, warn() {}, error() {} };
+}
+
+function isOkToolPayload(payload) {
+  return Boolean(payload && payload.details && payload.details.status === 'ok');
 }
 
 function cfg(dbPath) {
@@ -86,9 +90,9 @@ async function runApiCompatibility(mode) {
   const context = { agentId: 'agent', workspaceId: 'ws', sessionId: 'session-1' };
   const searchTool = tools.get('search_memory');
   const executeResult = await searchTool.execute({ args: { query: '修复成功', top_k: 3 }, context });
-  assert(executeResult && executeResult.success === true);
+  assert(isOkToolPayload(executeResult), `unexpected execute result: ${JSON.stringify(executeResult)}`);
   const handlerResult = await searchTool.handler({ query: '修复成功', top_k: 3 }, context);
-  assert(handlerResult && handlerResult.success === true);
+  assert(isOkToolPayload(handlerResult), `unexpected handler result: ${JSON.stringify(handlerResult)}`);
   await hooks.get('message_received')({ content: '出现错误后修复成功' }, context);
   await hooks.get('session_end')({ sync_records: false }, context);
   await plugin.unregister();
@@ -122,7 +126,7 @@ async function runFallbackCompatibility() {
     args: { query: 'x', top_k: 1 },
     context: { agentId: 'agent', workspaceId: 'ws', sessionId: 'session-fallback' },
   });
-  assert(result && result.success === true);
+  assert(isOkToolPayload(result), `unexpected fallback result: ${JSON.stringify(result)}`);
   await plugin.unregister();
 }
 

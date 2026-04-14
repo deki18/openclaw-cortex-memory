@@ -3,9 +3,13 @@ import type {
   CleanupMemoriesArgs,
   DeleteMemoryArgs,
   EngineMode,
+  ExportGraphViewArgs,
   GetAutoContextArgs,
   GetHotContextArgs,
+  LintMemoryWikiArgs,
+  ListGraphConflictsArgs,
   QueryGraphArgs,
+  ResolveGraphConflictArgs,
   SearchMemoryArgs,
   StoreEventArgs,
   ToolContext,
@@ -18,6 +22,10 @@ export interface MemoryEngine {
   searchMemory(args: SearchMemoryArgs, context: ToolContext): Promise<ToolResult>;
   storeEvent(args: StoreEventArgs, context: ToolContext): Promise<ToolResult>;
   queryGraph(args: QueryGraphArgs, context: ToolContext): Promise<ToolResult>;
+  exportGraphView(args: ExportGraphViewArgs, context: ToolContext): Promise<ToolResult>;
+  lintMemoryWiki(args: LintMemoryWikiArgs, context: ToolContext): Promise<ToolResult>;
+  listGraphConflicts(args: ListGraphConflictsArgs, context: ToolContext): Promise<ToolResult>;
+  resolveGraphConflict(args: ResolveGraphConflictArgs, context: ToolContext): Promise<ToolResult>;
   getHotContext(args: GetHotContextArgs, context: ToolContext): Promise<ToolResult>;
   getAutoContext(args: GetAutoContextArgs, context: ToolContext): Promise<ToolResult>;
   reflectMemory(args: Record<string, unknown>, context: ToolContext): Promise<ToolResult>;

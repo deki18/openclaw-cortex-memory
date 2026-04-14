@@ -33,13 +33,17 @@ metadata:
 - `search_memory`
 - `store_event`
 - `query_graph`
+- `export_graph_view`
+- `lint_memory_wiki`
+- `list_graph_conflicts`
+- `resolve_graph_conflict`
 - `get_hot_context`
 - `get_auto_context`
 - `reflect_memory`
 - `sync_memory`
 - `backfill_embeddings`
 - `delete_memory`
-- `diagnostics`
+- `cortex_diagnostics`
 
 ### 参数速览
 
@@ -48,17 +52,26 @@ metadata:
 | `search_memory` | `query`, `top_k` |
 | `store_event` | `summary`, `entities`, `entity_types`, `outcome`, `relations` |
 | `query_graph` | `entity`, `rel`, `dir`, `path_to`, `max_depth` |
+| `export_graph_view` | `write_snapshot` |
+| `lint_memory_wiki` | 无 |
+| `list_graph_conflicts` | `status`, `limit` |
+| `resolve_graph_conflict` | `conflict_id`, `action`, `note` |
 | `get_hot_context` | `limit` |
 | `get_auto_context` | `include_hot` |
+| `reflect_memory` | 无 |
+| `sync_memory` | 无 |
 | `backfill_embeddings` | `layer`, `batch_size`, `max_retries`, `retry_failed_only`, `rebuild_mode` |
+| `cortex_diagnostics` | 无 |
 | `delete_memory` | `memory_id` |
 
 ## 使用建议
 
 1. 回答历史问题前先调 `search_memory`。
 2. 涉及实体关系优先调 `query_graph`。
-3. 会话收尾或批量导入后再调 `sync_memory` / `reflect_memory`。
-4. 诊断发现向量缺失时调 `backfill_embeddings`。
+3. 如命中冲突事实（`conflict_hint`），先调 `list_graph_conflicts`，再让用户确认后执行 `resolve_graph_conflict`。
+4. 需要图谱状态快照或排查投影不一致时，调 `export_graph_view` 与 `lint_memory_wiki`。
+5. 会话收尾或批量导入后再调 `sync_memory` / `reflect_memory`。
+6. 诊断发现向量缺失时调 `backfill_embeddings`。
 
 ## 配置策略
 
@@ -75,3 +88,5 @@ metadata:
 
 - `backfill_embeddings` 已实现且已注册。
 - `query_graph` 支持参数：`entity`、`rel`、`dir`、`path_to`、`max_depth`。
+- `query_graph` 会返回 `wiki_refs`、`evidence_ids`，冲突时返回 `conflict_hint`。
+- 新增图谱治理工具：`export_graph_view`、`lint_memory_wiki`、`list_graph_conflicts`、`resolve_graph_conflict`。

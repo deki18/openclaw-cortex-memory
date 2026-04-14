@@ -8,8 +8,16 @@ openclaw-main/
 
 venv/
 
-# Trae rules
+# Project directories
+skills/
+.npm-cache/
+data/
+eval/
+tmp/
+
+# IDE rules
 .trae/
+.cursor/
 
 # Python cache
 __pycache__/

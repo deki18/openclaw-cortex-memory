@@ -15,6 +15,8 @@ export interface WriteMemoryArgs {
   role: string;
   source: string;
   sessionId: string;
+  summary?: string;
+  sourceText?: string;
 }
 
 export interface WriteMemoryResult {
@@ -49,6 +51,7 @@ interface WriteStoreOptions {
   writePolicy?: {
     activeMinQualityScore?: number;
     activeDedupTailLines?: number;
+    activeTextMaxChars?: number;
   };
   vectorStore?: {
     upsert(record: {
@@ -60,6 +63,7 @@ interface WriteStoreOptions {
       layer: "active" | "archive";
       source_memory_id: string;
       source_memory_canonical_id?: string;
+      source_event_id?: string;
       source_field?: "summary" | "evidence";
       outcome?: string;
       entities?: string[];
@@ -83,8 +87,13 @@ interface PersistedRecord {
   session_id: string;
   role: string;
   source: string;
-  content: string;
+  summary?: string;
+  source_text?: string;
   layer: "active";
+  source_memory_id?: string;
+  source_memory_canonical_id?: string;
+  source_event_id?: string;
+  canonical_id?: string;
   embedding_status: "ok" | "failed" | "pending";
   llm_gate_decision: "active_only" | "archive_event" | "skip";
   quality_level: "low" | "medium" | "high";
@@ -97,8 +106,43 @@ interface PersistedRecord {
   embedding?: number[];
 }
 
-function normalizeText(input: string): string {
-  return input.replace(/\s+/g, " ").trim();
+const ACTIVE_LOW_INFORMATION_LINE = /^(ok|okay|got it|roger|noted|sure|thanks|thank you|received|copy that|understood)\b/i;
+
+function denoiseActiveText(input: string): string {
+  const raw = (input || "").trim();
+  if (!raw) return "";
+  const output: string[] = [];
+  const seen = new Set<string>();
+  for (const line of raw.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    const content = trimmed.replace(/^\[[^\]]+\]\s*/, "").trim();
+    if (!content) continue;
+    const hasSignal = /(https?:\/\/|www\.|[A-Za-z0-9._-]+\.[A-Za-z]{2,}|[`#/:\\]|@\w+|\b\d{2,}\b)/.test(content);
+    if (!hasSignal && ACTIVE_LOW_INFORMATION_LINE.test(content)) {
+      continue;
+    }
+    const dedupKey = content.toLowerCase();
+    if (!hasSignal && seen.has(dedupKey)) {
+      continue;
+    }
+    seen.add(dedupKey);
+    output.push(trimmed);
+  }
+  return output.length > 0 ? output.join("\n") : raw;
+}
+
+function normalizeText(input: string, maxChars: number): string {
+  const cleaned = denoiseActiveText(input);
+  if (!cleaned) return "";
+  if (!Number.isFinite(maxChars) || maxChars <= 0 || cleaned.length <= maxChars) {
+    return cleaned;
+  }
+  return cleaned.slice(-Math.floor(maxChars)).trim();
+}
+
+function normalizeSummary(input: string): string {
+  return String(input || "").replace(/\s+/g, " ").trim();
 }
 
 function scoreQuality(text: string): { score: number; level: "low" | "medium" | "high" } {
@@ -306,10 +350,15 @@ export function createWriteStore(options: WriteStoreOptions): { writeMemory(args
   const activeSessionsPath = path.join(memoryRoot, "sessions", "active", "sessions.jsonl");
 
   async function writeMemory(args: WriteMemoryArgs): Promise<WriteMemoryResult> {
-    const cleaned = normalizeText(args.text || "");
+    const activeTextMaxChars = typeof options.writePolicy?.activeTextMaxChars === "number" && Number.isFinite(options.writePolicy.activeTextMaxChars)
+      ? Math.max(500, Math.floor(options.writePolicy.activeTextMaxChars))
+      : 200000;
+    const cleaned = normalizeText(args.text || "", activeTextMaxChars);
     if (!cleaned) {
       return { status: "skipped", reason: "empty_text", error_code: "E204" };
     }
+    const sourceTextRaw = typeof args.sourceText === "string" ? args.sourceText.trim() : "";
+    const sourceText = sourceTextRaw || cleaned;
 
     const quality = scoreQuality(cleaned);
     const activeMinQualityScore = typeof options.writePolicy?.activeMinQualityScore === "number"
@@ -348,15 +397,20 @@ export function createWriteStore(options: WriteStoreOptions): { writeMemory(args
       session_id: args.sessionId,
       role: args.role || "user",
       source: args.source || "message",
-      content: cleaned,
+      summary: normalizeSummary(args.summary || "") || normalizeSummary(cleaned),
+      source_text: sourceText || undefined,
       layer: "active",
+      source_memory_id: id,
+      source_memory_canonical_id: id,
+      source_event_id: id,
+      canonical_id: id,
       embedding_status: "pending",
       llm_gate_decision: "active_only",
       quality_level: quality.level,
       quality_score: quality.score,
       text_hash: textHash,
-      char_count: cleaned.length,
-      token_count: estimateTokenCount(cleaned),
+      char_count: sourceText.length,
+      token_count: estimateTokenCount(sourceText),
     };
     const embeddingModel = options.embedding?.model || "";
     const embeddingApiKey = options.embedding?.apiKey || "";
@@ -366,7 +420,7 @@ export function createWriteStore(options: WriteStoreOptions): { writeMemory(args
     const maxParallel = 6;
     const vectorStore = options.vectorStore;
     if (embeddingModel && embeddingApiKey && embeddingBaseUrl && vectorStore) {
-      const chunks = splitTextChunks(cleaned, chunkSize, chunkOverlap);
+      const chunks = splitTextChunks(sourceText, chunkSize, chunkOverlap);
       record.vector_chunks_total = chunks.length;
       record.vector_chunks_ok = 0;
       try {
@@ -397,9 +451,6 @@ export function createWriteStore(options: WriteStoreOptions): { writeMemory(args
       const validEmbeddings = chunkEmbeddings
         .filter((item): item is { chunk: { index: number; start: number; end: number; text: string }; embedding: number[] } => Boolean(item))
         .sort((a, b) => a.chunk.index - b.chunk.index);
-      if (validEmbeddings.length > 0) {
-        record.embedding = validEmbeddings[0].embedding;
-      }
       const upsertStatus = await mapWithConcurrency(validEmbeddings, maxParallel, async (item) => {
         const { chunk, embedding } = item;
         try {
@@ -412,6 +463,8 @@ export function createWriteStore(options: WriteStoreOptions): { writeMemory(args
             layer: "active",
             source_memory_id: record.id,
             source_memory_canonical_id: record.id,
+            source_event_id: record.id,
+            source_field: "summary",
             embedding,
             quality_score: record.quality_score,
             char_count: chunk.text.length,

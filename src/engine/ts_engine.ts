@@ -3,6 +3,8 @@ import * as path from "path";
 import { loadGraphSchema, normalizeRelationType } from "../graph/ontology";
 import { postJsonWithTimeout } from "../net/http_post";
 import { validateJsonlLine } from "../quality/llm_output_validator";
+import { writeGraphViewProjection } from "../wiki/wiki_projector";
+import { lintMemoryWiki as runWikiLint } from "../wiki/wiki_linter";
 import type { MemoryEngine } from "./memory_engine";
 import type { ReadStore } from "../store/read_store";
 import type { WriteMemoryResult } from "../store/write_store";
@@ -10,9 +12,13 @@ import type {
   BackfillEmbeddingsArgs,
   CleanupMemoriesArgs,
   DeleteMemoryArgs,
+  ExportGraphViewArgs,
   GetAutoContextArgs,
   GetHotContextArgs,
+  LintMemoryWikiArgs,
+  ListGraphConflictsArgs,
   QueryGraphArgs,
+  ResolveGraphConflictArgs,
   SearchMemoryArgs,
   StoreEventArgs,
   ToolContext,
@@ -21,7 +27,7 @@ import type {
 } from "./types";
 
 const PROMPT_VERSIONS = {
-  write_gate: "write-gate.v1.2.0",
+  write_gate: "write-gate.v1.7.9",
   session_end_write: "session-end-write.v1.2.0",
   read_fusion: "read-fusion.v1.2.0",
 };
@@ -29,7 +35,7 @@ const PROMPT_VERSIONS = {
 interface TsEngineDeps {
   readStore: ReadStore;
   writeStore: {
-    writeMemory(args: { text: string; role: string; source: string; sessionId: string }): Promise<WriteMemoryResult>;
+    writeMemory(args: { text: string; role: string; source: string; sessionId: string; summary?: string; sourceText?: string }): Promise<WriteMemoryResult>;
   };
   vectorStore: {
     upsert(record: {
@@ -41,6 +47,7 @@ interface TsEngineDeps {
       layer: "active" | "archive";
       source_memory_id: string;
       source_memory_canonical_id?: string;
+      source_event_id?: string;
       source_field?: "summary" | "evidence";
       outcome?: string;
       entities?: string[];
@@ -60,6 +67,9 @@ interface TsEngineDeps {
     storeEvents(events: Array<{
       event_type: string;
       summary: string;
+      cause?: string;
+      process?: string;
+      result?: string;
       entities?: string[];
       relations?: Array<{ source: string; target: string; type: string; evidence_span?: string; confidence?: number }>;
       entity_types?: Record<string, string>;
@@ -80,14 +90,109 @@ interface TsEngineDeps {
       archiveEventId?: string;
       sessionId: string;
       sourceFile?: string;
+      source_text_nav?: {
+        layer?: string;
+        session_id?: string;
+        source_file?: string;
+        source_memory_id?: string;
+        source_event_id?: string;
+        fulltext_anchor?: string;
+      };
+      summary?: string;
       eventType?: string;
       entities?: string[];
       entity_types?: Record<string, string>;
-      relations?: Array<{ source: string; target: string; type: string; evidence_span?: string; confidence?: number }>;
+      relations?: Array<{
+        source: string;
+        target: string;
+        type: string;
+        relation_origin?: string;
+        relation_definition?: string;
+        mapping_hint?: string;
+        evidence_span?: string;
+        context_chunk?: string;
+        confidence?: number;
+      }>;
       gateSource: "sync" | "session_end" | "manual";
       confidence?: number;
       sourceText?: string;
     }): Promise<{ success: boolean; reason?: string }>;
+    loadAll(): Array<{
+      id: string;
+      summary: string;
+      source_text_nav: {
+        layer: "archive_event" | "active_only";
+        session_id: string;
+        source_file: string;
+        source_memory_id: string;
+        source_event_id: string;
+        fulltext_anchor?: string;
+      };
+      source_event_id: string;
+      source_layer: "archive_event" | "active_only";
+      archive_event_id?: string;
+      session_id: string;
+      source_file?: string;
+      timestamp: string;
+      entities: string[];
+      entity_types: Record<string, string>;
+      relations: Array<{
+        source: string;
+        target: string;
+        type: string;
+        relation_origin?: string;
+        relation_definition?: string;
+        mapping_hint?: string;
+        evidence_span?: string;
+        context_chunk?: string;
+        confidence?: number;
+      }>;
+      gate_source: "sync" | "session_end" | "manual";
+      event_type?: string;
+      schema_version?: string;
+      confidence?: number;
+    }>;
+    listConflicts(args?: { status?: "pending" | "accepted" | "rejected" | "all"; limit?: number }): Array<{
+      conflict_id: string;
+      status: "pending" | "accepted" | "rejected";
+      created_at: string;
+      updated_at: string;
+      source_event_id: string;
+      session_id: string;
+      conflict_reason: string;
+      conflict_types: string[];
+      existing_relation_keys: string[];
+      candidate_relations: Array<{ source: string; type: string; target: string }>;
+      resolution?: {
+        action: "accept" | "reject";
+        note?: string;
+        resolved_at: string;
+        applied_record_id?: string;
+      };
+    }>;
+    resolveConflict(args: { conflictId: string; action: "accept" | "reject"; note?: string }): Promise<{ success: boolean; reason?: string; appliedRecordId?: string }>;
+    getConflictStats(): { pending: number; accepted: number; rejected: number };
+    exportGraphView(): {
+      nodes: Array<{ id: string; type: "entity" }>;
+      edges: Array<{
+        source: string;
+        target: string;
+        type: string;
+        status: "active" | "pending_conflict" | "superseded" | "rejected";
+        relation_key: string;
+        source_event_id?: string;
+        evidence_span?: string;
+        confidence?: number;
+        conflict_id?: string;
+      }>;
+      status_counts: {
+        active: number;
+        pending_conflict: number;
+        superseded: number;
+        rejected: number;
+      };
+      updated_at: string;
+    };
   };
   sessionSync: {
     syncMemory(): Promise<{ imported: number; skipped: number; filesProcessed: number }>;
@@ -131,6 +236,7 @@ interface TsEngineDeps {
   vectorChunking?: {
     chunkSize?: number;
     chunkOverlap?: number;
+    evidenceMaxChunks?: number;
   };
   getCachedAutoSearch: (sessionId: string) => { query: string; results: unknown[]; ageSeconds: number } | null;
   resolveSessionId: (context: ToolContext, payload?: unknown) => string;
@@ -266,42 +372,25 @@ export function createTsEngine(deps: TsEngineDeps): MemoryEngine {
 
   function buildVectorSourceText(record: Record<string, unknown>, layer: "active" | "archive"): string {
     if (layer === "active") {
-      const content = typeof record.content === "string" && record.content.trim()
-        ? record.content.trim()
-        : (typeof record.text === "string" ? record.text.trim() : "");
-      return content;
+      const sourceText = typeof record.source_text === "string" && record.source_text.trim()
+        ? record.source_text.trim()
+        : "";
+      if (sourceText) {
+        return sourceText;
+      }
+      const summary = typeof record.summary === "string" ? record.summary.trim() : "";
+      if (summary) {
+        return summary;
+      }
+      const text = typeof record.text === "string" ? record.text.trim() : "";
+      return text;
+    }
+    const sourceText = typeof record.source_text === "string" ? record.source_text.trim() : "";
+    if (sourceText) {
+      return sourceText;
     }
     const summary = typeof record.summary === "string" ? record.summary.trim() : "";
-    const eventType = typeof record.event_type === "string" ? record.event_type.trim() : "insight";
-    const outcome = typeof record.outcome === "string" ? record.outcome.trim() : "";
-    const sourceFile = typeof record.source_file === "string" ? record.source_file.trim() : "";
-    const actor = typeof record.actor === "string" ? record.actor.trim() : "";
-    const entities = Array.isArray(record.entities)
-      ? record.entities.filter(v => typeof v === "string").map(v => String(v).trim()).filter(Boolean)
-      : [];
-    const relations = Array.isArray(record.relations)
-      ? record.relations
-          .map(v => {
-            if (!v || typeof v !== "object") return "";
-            const relation = v as Record<string, unknown>;
-            const source = typeof relation.source === "string" ? relation.source.trim() : "";
-            const target = typeof relation.target === "string" ? relation.target.trim() : "";
-            const type = typeof relation.type === "string" ? relation.type.trim() : "related_to";
-            if (!source || !target) return "";
-            return `${source} -[${type}]-> ${target}`;
-          })
-          .filter(Boolean)
-      : [];
-    const lines = [
-      `event_type: ${eventType}`,
-      `summary: ${summary}`,
-      `outcome: ${outcome}`,
-      `entities: ${entities.join(", ")}`,
-      `source_file: ${sourceFile}`,
-      `actor: ${actor}`,
-      relations.length > 0 ? `relations: ${relations.join(" ; ")}` : "",
-    ].filter(Boolean);
-    return lines.join("\n").trim();
+    return summary;
   }
 
   function splitTextChunks(text: string, chunkSize: number, chunkOverlap: number): Array<{
@@ -359,6 +448,33 @@ export function createTsEngine(deps: TsEngineDeps): MemoryEngine {
       cursor = nextCursor <= cursor ? end : nextCursor;
     }
     return output;
+  }
+
+  function pickEvidenceChunks(
+    chunks: Array<{ index: number; start: number; end: number; text: string }>,
+    maxCount: number,
+  ): Array<{ index: number; start: number; end: number; text: string }> {
+    if (!chunks.length || maxCount <= 0) return [];
+    if (chunks.length <= maxCount) return chunks;
+    const picked = new Map<number, { index: number; start: number; end: number; text: string }>();
+    picked.set(chunks[0].index, chunks[0]);
+    if (maxCount >= 2) {
+      const mid = chunks[Math.floor(chunks.length / 2)];
+      picked.set(mid.index, mid);
+    }
+    if (maxCount >= 3) {
+      const last = chunks[chunks.length - 1];
+      picked.set(last.index, last);
+    }
+    if (picked.size < maxCount) {
+      for (const chunk of chunks) {
+        if (!picked.has(chunk.index)) {
+          picked.set(chunk.index, chunk);
+        }
+        if (picked.size >= maxCount) break;
+      }
+    }
+    return [...picked.values()].sort((a, b) => a.index - b.index).slice(0, maxCount);
   }
 
   function upsertJsonFile(filePath: string, patch: Record<string, unknown>): void {
@@ -593,6 +709,27 @@ export function createTsEngine(deps: TsEngineDeps): MemoryEngine {
           : typeof (rawArgs.event as Record<string, unknown> | undefined)?.outcome === "string"
             ? String((rawArgs.event as Record<string, unknown>).outcome)
             : "";
+      const causeValue = typeof rawArgs.cause === "string"
+        ? rawArgs.cause
+        : typeof (rawArgs.input as Record<string, unknown> | undefined)?.cause === "string"
+          ? String((rawArgs.input as Record<string, unknown>).cause)
+          : typeof (rawArgs.event as Record<string, unknown> | undefined)?.cause === "string"
+            ? String((rawArgs.event as Record<string, unknown>).cause)
+            : "";
+      const processValue = typeof rawArgs.process === "string"
+        ? rawArgs.process
+        : typeof (rawArgs.input as Record<string, unknown> | undefined)?.process === "string"
+          ? String((rawArgs.input as Record<string, unknown>).process)
+          : typeof (rawArgs.event as Record<string, unknown> | undefined)?.process === "string"
+            ? String((rawArgs.event as Record<string, unknown>).process)
+            : "";
+      const resultValue = typeof rawArgs.result === "string"
+        ? rawArgs.result
+        : typeof (rawArgs.input as Record<string, unknown> | undefined)?.result === "string"
+          ? String((rawArgs.input as Record<string, unknown>).result)
+          : typeof (rawArgs.event as Record<string, unknown> | undefined)?.result === "string"
+            ? String((rawArgs.event as Record<string, unknown>).result)
+            : "";
       const entityTypesInput = typeof rawArgs.entity_types === "object" && rawArgs.entity_types !== null
         ? rawArgs.entity_types as Record<string, unknown>
         : typeof (rawArgs.input as Record<string, unknown> | undefined)?.entity_types === "object"
@@ -615,6 +752,9 @@ export function createTsEngine(deps: TsEngineDeps): MemoryEngine {
         {
           event_type: "manual_event",
           summary: normalizedSummary,
+          cause: causeValue.trim() || normalizedSummary,
+          process: processValue.trim() || normalizedSummary,
+          result: resultValue.trim() || outcomeValue.trim() || normalizedSummary,
           entities,
           relations,
           entity_types: entityTypes,
@@ -631,12 +771,23 @@ export function createTsEngine(deps: TsEngineDeps): MemoryEngine {
       }
       const storedId = result.stored[0].id;
       if (deps.graphMemoryStore && entities.length > 0 && Object.keys(entityTypes).length > 0 && relations.length > 0) {
+        const graphSummary = normalizedSummary.toLowerCase().includes("entities:")
+          ? normalizedSummary
+          : `${normalizedSummary} Entities: ${entities.join(", ")}.`;
         const graphResult = await deps.graphMemoryStore.append({
           sourceEventId: storedId,
           sourceLayer: "archive_event",
           archiveEventId: storedId,
           sessionId: "manual",
           sourceFile: "ts_store_event",
+          summary: graphSummary,
+          source_text_nav: {
+            layer: "archive_event",
+            session_id: "manual",
+            source_file: "ts_store_event",
+            source_memory_id: storedId,
+            source_event_id: storedId,
+          },
           eventType: "manual_event",
           entities,
           entity_types: entityTypes,
@@ -669,32 +820,34 @@ export function createTsEngine(deps: TsEngineDeps): MemoryEngine {
     const pathTo = typeof args.path_to === "string" && args.path_to.trim() ? args.path_to.trim() : "";
     const maxDepth = Math.max(2, Math.min(4, typeof args.max_depth === "number" ? Math.floor(args.max_depth) : 3));
     const graphMemoryPath = path.join(deps.memoryRoot, "graph", "memory.jsonl");
+    const projectionIndexPath = path.join(deps.memoryRoot, "wiki", ".projection_index.json");
+    type FactStatus = "active" | "pending_conflict" | "superseded" | "rejected";
+    type QueryEdge = {
+      source: string;
+      target: string;
+      type: string;
+      fact_status: FactStatus;
+      relation_key: string;
+      source_event_id?: string;
+      evidence_span?: string;
+      confidence?: number;
+      conflict_id?: string;
+      evidence_ids: string[];
+    };
     const nodes = new Map<string, { id: string; type: string }>();
-    const edges: Array<{ source: string; target: string; type: string }> = [];
-    const adjacency = new Map<string, Array<{ next: string; edge: { source: string; target: string; type: string } }>>();
-    const pathAdjacency = new Map<string, Array<{ next: string; edge: { source: string; target: string; type: string } }>>();
+    const edges: QueryEdge[] = [];
+    const pathAdjacency = new Map<string, Array<{ next: string; edge: QueryEdge }>>();
     const relationTypeDistribution = new Map<string, number>();
     const edgeKeySet = new Set<string>();
+    const allEdges: QueryEdge[] = [];
 
-    function pushEdge(source: string, target: string, type: string): void {
-      const key = `${source}|${type}|${target}`;
-      if (edgeKeySet.has(key)) {
-        return;
-      }
-      edgeKeySet.add(key);
-      edges.push({ source, target, type });
-      relationTypeDistribution.set(type, (relationTypeDistribution.get(type) || 0) + 1);
-      if (!adjacency.has(source)) {
-        adjacency.set(source, []);
-      }
-      adjacency.get(source)?.push({ next: target, edge: { source, target, type } });
-      if (!adjacency.has(target)) {
-        adjacency.set(target, []);
-      }
-      adjacency.get(target)?.push({ next: source, edge: { source, target, type } });
+    function relationKeyOf(source: string, type: string, target: string): string {
+      return `${source.trim().toLowerCase()}|${type.trim().toLowerCase()}|${target.trim().toLowerCase()}`;
     }
 
-    function pushPathEdge(source: string, target: string, type: string): void {
+    function pushPathEdge(edge: QueryEdge): void {
+      const source = edge.source;
+      const target = edge.target;
       if (!pathAdjacency.has(source)) {
         pathAdjacency.set(source, []);
       }
@@ -702,77 +855,172 @@ export function createTsEngine(deps: TsEngineDeps): MemoryEngine {
         pathAdjacency.set(target, []);
       }
       if (direction === "incoming") {
-        pathAdjacency.get(target)?.push({ next: source, edge: { source, target, type } });
+        pathAdjacency.get(target)?.push({ next: source, edge });
       } else if (direction === "outgoing") {
-        pathAdjacency.get(source)?.push({ next: target, edge: { source, target, type } });
+        pathAdjacency.get(source)?.push({ next: target, edge });
       } else {
-        pathAdjacency.get(source)?.push({ next: target, edge: { source, target, type } });
-        pathAdjacency.get(target)?.push({ next: source, edge: { source, target, type } });
+        pathAdjacency.get(source)?.push({ next: target, edge });
+        pathAdjacency.get(target)?.push({ next: source, edge });
       }
     }
 
-    const graphRecords = fs.existsSync(graphMemoryPath) ? readJsonl(graphMemoryPath) : [];
-    for (const record of graphRecords) {
-      const entities = Array.isArray(record.entities) ? record.entities : [];
-      const named = entities.map((e: string) => (typeof e === "string" ? e.trim() : "")).filter(Boolean);
-      const relations = Array.isArray(record.relations) ? record.relations : [];
-      let explicitMatched = false;
-      for (const relationRaw of relations) {
-        if (typeof relationRaw !== "object" || relationRaw === null) {
-          continue;
-        }
-        const relation = relationRaw as { source?: string; target?: string; type?: string };
-        const source = typeof relation.source === "string" ? relation.source.trim() : "";
-        const target = typeof relation.target === "string" ? relation.target.trim() : "";
-        const type = normalizeRelationType(
-          typeof relation.type === "string" && relation.type.trim() ? relation.type.trim() : "related_to",
-          graphSchema,
-        );
-        if (!source || !target) {
-          continue;
-        }
-        if (relFilter && type !== relFilter) {
-          continue;
-        }
-        pushPathEdge(source, target, type);
-        const outgoingMatch = source === entity;
-        const incomingMatch = target === entity;
-        const directionMatched =
-          direction === "both" ? (outgoingMatch || incomingMatch)
-            : direction === "outgoing" ? outgoingMatch
-              : incomingMatch;
-        if (!directionMatched) {
-          continue;
-        }
-        explicitMatched = true;
-        if (!nodes.has(source)) nodes.set(source, { id: source, type: "entity" });
-        if (!nodes.has(target)) nodes.set(target, { id: target, type: "entity" });
-        pushEdge(source, target, type);
+    function normalizeStatus(value: string): FactStatus {
+      const token = (value || "").trim().toLowerCase();
+      if (token === "pending" || token === "pending_conflict") return "pending_conflict";
+      if (token === "superseded") return "superseded";
+      if (token === "rejected") return "rejected";
+      return "active";
+    }
+
+    const viewData = deps.graphMemoryStore?.exportGraphView();
+    if (viewData && Array.isArray(viewData.edges)) {
+      for (const edge of viewData.edges) {
+        const source = typeof edge.source === "string" ? edge.source.trim() : "";
+        const target = typeof edge.target === "string" ? edge.target.trim() : "";
+        const type = normalizeRelationType(typeof edge.type === "string" ? edge.type : "related_to", graphSchema);
+        if (!source || !target) continue;
+        const relationKey = typeof edge.relation_key === "string" && edge.relation_key.trim()
+          ? edge.relation_key.trim().toLowerCase()
+          : relationKeyOf(source, type, target);
+        allEdges.push({
+          source,
+          target,
+          type,
+          fact_status: normalizeStatus(typeof edge.status === "string" ? edge.status : "active"),
+          relation_key: relationKey,
+          source_event_id: typeof edge.source_event_id === "string" ? edge.source_event_id : undefined,
+          evidence_span: typeof edge.evidence_span === "string" ? edge.evidence_span : undefined,
+          confidence: typeof edge.confidence === "number" ? edge.confidence : undefined,
+          conflict_id: typeof edge.conflict_id === "string" ? edge.conflict_id : undefined,
+          evidence_ids: [],
+        });
       }
-      if (explicitMatched) {
-        continue;
-      }
-      if (!named.includes(entity)) {
-        continue;
-      }
-      for (const name of named) {
-        if (!nodes.has(name)) {
-          nodes.set(name, { id: name, type: "entity" });
-        }
-      }
-      for (const name of named) {
-        if (name !== entity) {
-          if (!relFilter || relFilter === "co_occurrence") {
-            pushEdge(entity, name, "co_occurrence");
-          }
+    }
+    if (allEdges.length === 0) {
+      const graphRecords = deps.graphMemoryStore
+        ? deps.graphMemoryStore.loadAll() as Array<Record<string, unknown>>
+        : (fs.existsSync(graphMemoryPath) ? readJsonl(graphMemoryPath) : []);
+      for (const record of graphRecords) {
+        const sourceEventId = typeof record.source_event_id === "string" ? record.source_event_id.trim() : "";
+        const relations = Array.isArray(record.relations) ? record.relations : [];
+        for (const relationRaw of relations) {
+          if (typeof relationRaw !== "object" || relationRaw === null) continue;
+          const relation = relationRaw as Record<string, unknown>;
+          const source = typeof relation.source === "string" ? relation.source.trim() : "";
+          const target = typeof relation.target === "string" ? relation.target.trim() : "";
+          const type = normalizeRelationType(
+            typeof relation.type === "string" && relation.type.trim() ? relation.type.trim() : "related_to",
+            graphSchema,
+          );
+          if (!source || !target) continue;
+          allEdges.push({
+            source,
+            target,
+            type,
+            fact_status: "active",
+            relation_key: relationKeyOf(source, type, target),
+            source_event_id: sourceEventId || undefined,
+            evidence_span: typeof relation.evidence_span === "string" ? relation.evidence_span.trim() : undefined,
+            confidence: typeof relation.confidence === "number" ? relation.confidence : undefined,
+            evidence_ids: [],
+          });
         }
       }
     }
 
-    let graphPath: Array<{ source: string; target: string; type: string }> = [];
+    const projectionIndex = parseJsonFile(projectionIndexPath);
+    const entityWikiPathByName = new Map<string, string>();
+    const topicWikiPathByType = new Map<string, string>();
+    const projectionEntities = Array.isArray(projectionIndex?.entities) ? projectionIndex.entities : [];
+    const projectionTopics = Array.isArray(projectionIndex?.topics) ? projectionIndex.topics : [];
+    for (const item of projectionEntities) {
+      if (!item || typeof item !== "object") continue;
+      const row = item as Record<string, unknown>;
+      const name = typeof row.name === "string" ? row.name.trim() : "";
+      const wikiPath = typeof row.path === "string" ? row.path.trim() : "";
+      if (!name || !wikiPath) continue;
+      entityWikiPathByName.set(name.toLowerCase(), wikiPath);
+    }
+    for (const item of projectionTopics) {
+      if (!item || typeof item !== "object") continue;
+      const row = item as Record<string, unknown>;
+      const topic = typeof row.type === "string" ? row.type.trim() : "";
+      const wikiPath = typeof row.path === "string" ? row.path.trim() : "";
+      if (!topic || !wikiPath) continue;
+      topicWikiPathByType.set(topic.toLowerCase(), wikiPath);
+    }
+
+    function statusAnchor(status: FactStatus): string {
+      if (status === "active") return "current-facts";
+      if (status === "pending_conflict") return "disputed-facts";
+      return "history";
+    }
+
+    function buildEvidenceIdsForEdge(edge: QueryEdge): string[] {
+      const ids: string[] = [
+        `graph:relation:${edge.relation_key}`,
+        edge.source_event_id ? `graph:event:${edge.source_event_id}` : "",
+        edge.evidence_span ? `graph:evidence:${edge.source_event_id || edge.relation_key}` : "",
+        edge.conflict_id ? `graph:conflict:${edge.conflict_id}` : "",
+      ];
+      const anchor = statusAnchor(edge.fact_status);
+      for (const name of [edge.source, edge.target]) {
+        const wikiPath = entityWikiPathByName.get(name.toLowerCase());
+        if (wikiPath) {
+          ids.push(`wiki:${wikiPath}#${anchor}`);
+        }
+      }
+      const topicPath = topicWikiPathByType.get(edge.type.toLowerCase());
+      if (topicPath) {
+        ids.push(`wiki:${topicPath}#relations`);
+      }
+      return [...new Set(ids.filter(Boolean))];
+    }
+
+    let explicitMatched = false;
+    for (const edge of allEdges) {
+      if (relFilter && edge.type !== relFilter) {
+        continue;
+      }
+      const pathEligible = edge.fact_status === "active" || edge.fact_status === "pending_conflict";
+      if (pathEligible) {
+        pushPathEdge(edge);
+      }
+      const outgoingMatch = edge.source === entity;
+      const incomingMatch = edge.target === entity;
+      const directionMatched =
+        direction === "both" ? (outgoingMatch || incomingMatch)
+          : direction === "outgoing" ? outgoingMatch
+            : incomingMatch;
+      if (!directionMatched) {
+        continue;
+      }
+      explicitMatched = true;
+      const edgeKey = `${edge.relation_key}|${edge.fact_status}|${edge.conflict_id || ""}`;
+      if (edgeKeySet.has(edgeKey)) {
+        continue;
+      }
+      edgeKeySet.add(edgeKey);
+      const enrichedEdge: QueryEdge = {
+        ...edge,
+        evidence_ids: buildEvidenceIdsForEdge(edge),
+      };
+      edges.push(enrichedEdge);
+      relationTypeDistribution.set(enrichedEdge.type, (relationTypeDistribution.get(enrichedEdge.type) || 0) + 1);
+      if (!nodes.has(enrichedEdge.source)) nodes.set(enrichedEdge.source, { id: enrichedEdge.source, type: "entity" });
+      if (!nodes.has(enrichedEdge.target)) nodes.set(enrichedEdge.target, { id: enrichedEdge.target, type: "entity" });
+    }
+
+    if (!explicitMatched) {
+      if (!nodes.has(entity)) {
+        nodes.set(entity, { id: entity, type: "entity" });
+      }
+    }
+
+    let graphPath: QueryEdge[] = [];
     if (pathTo) {
       const visited = new Set<string>();
-      const queue: Array<{ node: string; depth: number; pathEdges: Array<{ source: string; target: string; type: string }> }> = [
+      const queue: Array<{ node: string; depth: number; pathEdges: QueryEdge[] }> = [
         { node: entity, depth: 0, pathEdges: [] },
       ];
       while (queue.length > 0) {
@@ -800,6 +1048,35 @@ export function createTsEngine(deps: TsEngineDeps): MemoryEngine {
       }
     }
 
+    const statusCounts: Record<FactStatus, number> = {
+      active: 0,
+      pending_conflict: 0,
+      superseded: 0,
+      rejected: 0,
+    };
+    const wikiRefSet = new Set<string>();
+    if (entityWikiPathByName.has(entity.toLowerCase())) {
+      wikiRefSet.add(`wiki/${entityWikiPathByName.get(entity.toLowerCase())}`);
+    }
+    for (const edge of edges) {
+      statusCounts[edge.fact_status] += 1;
+      for (const name of [edge.source, edge.target]) {
+        const wikiPath = entityWikiPathByName.get(name.toLowerCase());
+        if (wikiPath) {
+          wikiRefSet.add(`wiki/${wikiPath}`);
+        }
+      }
+      const topicPath = topicWikiPathByType.get(edge.type.toLowerCase());
+      if (topicPath) {
+        wikiRefSet.add(`wiki/${topicPath}`);
+      }
+    }
+    const evidenceIds = [...new Set(edges.flatMap(edge => edge.evidence_ids).filter(Boolean))];
+    const conflictEdges = edges.filter(edge => edge.fact_status === "pending_conflict" || edge.fact_status === "rejected");
+    const pendingCount = conflictEdges.filter(edge => edge.fact_status === "pending_conflict").length;
+    const rejectedCount = conflictEdges.filter(edge => edge.fact_status === "rejected").length;
+    const conflictIds = [...new Set(conflictEdges.map(edge => edge.conflict_id).filter((item): item is string => !!item))];
+
     return {
       success: true,
       data: {
@@ -808,11 +1085,62 @@ export function createTsEngine(deps: TsEngineDeps): MemoryEngine {
         dir: direction,
         nodes: [...nodes.values()],
         edges,
+        status_counts: statusCounts,
         path_to: pathTo || "",
         max_depth: maxDepth,
         path: graphPath,
+        wiki_refs: [...wikiRefSet],
+        evidence_ids: evidenceIds,
+        conflict_hint: conflictEdges.length > 0
+          ? {
+              pending_count: pendingCount,
+              rejected_count: rejectedCount,
+              conflict_ids: conflictIds,
+              suggestion: pendingCount > 0
+                ? "Pending graph conflicts found. Call list_graph_conflicts first, then resolve_graph_conflict(accept/reject)."
+                : "Rejected candidate facts exist. Submit stronger evidence if you want to update the graph.",
+            }
+          : undefined,
         relation_type_distribution: [...relationTypeDistribution.entries()].map(([type, count]) => ({ type, count })),
       },
+    };
+  }
+
+  async function exportGraphView(args: ExportGraphViewArgs, _context: ToolContext): Promise<ToolResult> {
+    if (!deps.graphMemoryStore) {
+      return { success: false, error: "Graph memory store is not available." };
+    }
+    const writeSnapshot = args.write_snapshot !== false;
+    const view = deps.graphMemoryStore.exportGraphView();
+    const projection = writeSnapshot
+      ? writeGraphViewProjection({
+        memoryRoot: deps.memoryRoot,
+        view,
+      })
+      : null;
+
+    return {
+      success: true,
+      data: {
+        ...view,
+        snapshot_written: writeSnapshot,
+        projection,
+      },
+    };
+  }
+
+  async function lintMemoryWiki(_args: LintMemoryWikiArgs, _context: ToolContext): Promise<ToolResult> {
+    if (!deps.graphMemoryStore) {
+      return { success: false, error: "Graph memory store is not available." };
+    }
+    const graphView = deps.graphMemoryStore.exportGraphView();
+    const report = runWikiLint({
+      memoryRoot: deps.memoryRoot,
+      graphView,
+    });
+    return {
+      success: true,
+      data: report,
     };
   }
 
@@ -856,10 +1184,13 @@ export function createTsEngine(deps: TsEngineDeps): MemoryEngine {
           continue;
         }
         if (typeof args.text === "string") {
-          if (typeof record.content === "string") {
-            record.content = args.text;
+          const nextText = args.text.trim();
+          const layer = typeof record.layer === "string" ? record.layer.trim() : "";
+          if (layer === "active") {
+            record.summary = nextText;
+            record.source_text = nextText;
           } else {
-            record.summary = args.text;
+            record.summary = nextText;
           }
         }
         if (typeof args.type === "string") {
@@ -948,6 +1279,16 @@ export function createTsEngine(deps: TsEngineDeps): MemoryEngine {
       targetFiles.push({ layer: "archive", filePath: archivePath });
     }
 
+    const vectorJsonlPath = path.join(deps.memoryRoot, "vector", "lancedb_events.jsonl");
+    const vectorJsonlRecords = readJsonl(vectorJsonlPath);
+    const vectorSourceIndex = new Set<string>();
+    for (const row of vectorJsonlRecords) {
+      const rowLayer = row.layer === "active" || row.layer === "archive" ? row.layer : "";
+      const sourceMemoryId = typeof row.source_memory_id === "string" ? row.source_memory_id.trim() : "";
+      if (!rowLayer || !sourceMemoryId) continue;
+      vectorSourceIndex.add(`${rowLayer}|${sourceMemoryId}`);
+    }
+
     const queue: Array<{ layer: "active" | "archive"; filePath: string; index: number }> = [];
     const recordsByFile = new Map<string, Array<Record<string, unknown>>>();
     for (const target of targetFiles) {
@@ -961,6 +1302,7 @@ export function createTsEngine(deps: TsEngineDeps): MemoryEngine {
         }
         const status = typeof record.embedding_status === "string" ? record.embedding_status.trim() : "";
         const hasEmbedding = Array.isArray(record.embedding) && record.embedding.length > 0;
+        const hasVectorRows = vectorSourceIndex.has(`${target.layer}|${id}`);
         if (forceRebuild) {
           queue.push({ layer: target.layer, filePath: target.filePath, index: i });
           continue;
@@ -969,7 +1311,7 @@ export function createTsEngine(deps: TsEngineDeps): MemoryEngine {
           if (status !== "failed") {
             continue;
           }
-        } else if (status === "ok" || hasEmbedding) {
+        } else if ((status === "ok" || hasEmbedding) && hasVectorRows) {
           continue;
         }
         const failCountRaw = failureCountState[id];
@@ -1017,7 +1359,53 @@ export function createTsEngine(deps: TsEngineDeps): MemoryEngine {
         }
         const chunkSize = deps.vectorChunking?.chunkSize ?? 600;
         const chunkOverlap = deps.vectorChunking?.chunkOverlap ?? 100;
-        const chunks = splitTextChunks(text, chunkSize, chunkOverlap);
+        const evidenceMaxChunks = typeof deps.vectorChunking?.evidenceMaxChunks === "number"
+          ? Math.max(0, Math.min(8, Math.floor(deps.vectorChunking.evidenceMaxChunks)))
+          : 2;
+        let chunks: Array<{
+          index: number;
+          start: number;
+          end: number;
+          text: string;
+          source_field: "summary" | "evidence";
+        }> = [];
+        if (item.layer === "archive") {
+          const summaryText = typeof record.summary === "string" ? record.summary.trim() : "";
+          const sourceText = typeof record.source_text === "string" ? record.source_text.trim() : "";
+          const summaryChunk = summaryText
+            ? [{
+                index: 0,
+                start: 0,
+                end: summaryText.length,
+                text: summaryText,
+                source_field: "summary" as const,
+              }]
+            : [];
+          const evidenceChunks = sourceText
+            ? pickEvidenceChunks(splitTextChunks(sourceText, chunkSize, chunkOverlap), evidenceMaxChunks)
+            : [];
+          chunks = [
+            ...summaryChunk,
+            ...evidenceChunks.map((chunk, idx) => ({
+              index: idx + summaryChunk.length,
+              start: chunk.start,
+              end: chunk.end,
+              text: chunk.text,
+              source_field: "evidence" as const,
+            })),
+          ];
+          if (chunks.length === 0 && text) {
+            chunks = splitTextChunks(text, chunkSize, chunkOverlap).map(chunk => ({
+              ...chunk,
+              source_field: "summary" as const,
+            }));
+          }
+        } else {
+          chunks = splitTextChunks(text, chunkSize, chunkOverlap).map(chunk => ({
+            ...chunk,
+            source_field: "summary" as const,
+          }));
+        }
         if (chunks.length === 0) {
           record.embedding_status = "failed";
           failed += 1;
@@ -1055,6 +1443,8 @@ export function createTsEngine(deps: TsEngineDeps): MemoryEngine {
               layer: item.layer,
               source_memory_id: id,
               source_memory_canonical_id: typeof record.canonical_id === "string" ? record.canonical_id : id,
+              source_event_id: typeof record.source_event_id === "string" ? record.source_event_id : id,
+              source_field: chunk.source_field,
               outcome: typeof record.outcome === "string" ? record.outcome : "",
               entities: Array.isArray(record.entities) ? record.entities.filter(v => typeof v === "string") as string[] : [],
               relations: Array.isArray(record.relations)
@@ -1269,8 +1659,8 @@ export function createTsEngine(deps: TsEngineDeps): MemoryEngine {
       if (!stringField(record, "timestamp")) activeFieldIssues.missing_timestamp += 1;
       if (stringField(record, "layer") !== "active") activeFieldIssues.missing_layer += 1;
       const hasPayload = [
-        stringField(record, "content"),
         stringField(record, "summary"),
+        stringField(record, "source_text"),
         stringField(record, "text"),
         stringField(record, "message"),
       ].some(Boolean);
@@ -1339,6 +1729,9 @@ export function createTsEngine(deps: TsEngineDeps): MemoryEngine {
       const refId = stringField(record, "source_event_id") || stringField(record, "archive_event_id");
       return sourceLayer === "archive_event" && !!refId && archiveIdSet.has(refId);
     }).length;
+    const graphConflictStats = deps.graphMemoryStore
+      ? deps.graphMemoryStore.getConflictStats()
+      : { pending: 0, accepted: 0, rejected: 0 };
     const schemaIssueTotal = Object.values(activeFieldIssues).reduce((sum, n) => sum + n, 0)
       + Object.values(archiveFieldIssues).reduce((sum, n) => sum + n, 0)
       + Object.values(vectorFieldIssues).reduce((sum, n) => sum + n, 0)
@@ -1390,6 +1783,7 @@ export function createTsEngine(deps: TsEngineDeps): MemoryEngine {
           },
           graph_rules: {
             graph_mutation_log_exists: fs.existsSync(path.join(deps.memoryRoot, "graph", "mutation_log.jsonl")),
+            graph_conflicts: graphConflictStats,
             rules_exists: fs.existsSync(path.join(deps.memoryRoot, "CORTEX_RULES.md")),
           },
         },
@@ -1465,7 +1859,15 @@ export function createTsEngine(deps: TsEngineDeps): MemoryEngine {
       query,
       topK: typeof topKRaw === "number" && topKRaw > 0 ? Math.floor(topKRaw) : 3,
     });
-    return { success: true, data: result.results };
+    return {
+      success: true,
+      data: {
+        results: result.results,
+        vector_semantic_results: result.semantic_results,
+        vector_keyword_results: result.keyword_results,
+        vector_search_strategy: result.strategy,
+      },
+    };
   }
 
   async function getHotContext(args: GetHotContextArgs, _context: ToolContext): Promise<ToolResult> {
@@ -1501,6 +1903,51 @@ export function createTsEngine(deps: TsEngineDeps): MemoryEngine {
       };
     }
     return { success: true, data: result };
+  }
+
+  async function listGraphConflicts(args: ListGraphConflictsArgs, _context: ToolContext): Promise<ToolResult> {
+    if (!deps.graphMemoryStore) {
+      return { success: false, error: "Graph memory store is not available." };
+    }
+    const status = args.status === "pending" || args.status === "accepted" || args.status === "rejected" || args.status === "all"
+      ? args.status
+      : "pending";
+    const limit = typeof args.limit === "number" && Number.isFinite(args.limit) && args.limit > 0
+      ? Math.min(500, Math.floor(args.limit))
+      : 50;
+    const items = deps.graphMemoryStore.listConflicts({ status, limit });
+    return { success: true, data: { status, count: items.length, items } };
+  }
+
+  async function resolveGraphConflict(args: ResolveGraphConflictArgs, _context: ToolContext): Promise<ToolResult> {
+    if (!deps.graphMemoryStore) {
+      return { success: false, error: "Graph memory store is not available." };
+    }
+    const conflictId = (args.conflict_id || "").trim();
+    const action = args.action === "accept" || args.action === "reject" ? args.action : null;
+    if (!conflictId) {
+      return { success: false, error: "Invalid input provided. Missing 'conflict_id' parameter." };
+    }
+    if (!action) {
+      return { success: false, error: "Invalid input provided. 'action' must be accept or reject." };
+    }
+    const note = typeof args.note === "string" ? args.note.trim() : undefined;
+    const result = await deps.graphMemoryStore.resolveConflict({
+      conflictId,
+      action,
+      note,
+    });
+    if (!result.success) {
+      return { success: false, error: result.reason || "resolve_graph_conflict_failed" };
+    }
+    return {
+      success: true,
+      data: {
+        conflict_id: conflictId,
+        action,
+        applied_record_id: result.appliedRecordId,
+      },
+    };
   }
 
   async function syncMemory(_args: Record<string, unknown>, _context: ToolContext): Promise<ToolResult> {
@@ -1598,6 +2045,10 @@ export function createTsEngine(deps: TsEngineDeps): MemoryEngine {
     getAutoContext,
     storeEvent,
     queryGraph,
+    exportGraphView,
+    lintMemoryWiki,
+    listGraphConflicts,
+    resolveGraphConflict,
     reflectMemory,
     syncMemory,
     promoteMemory,
