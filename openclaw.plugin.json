@@ -1,7 +1,7 @@
 {
   "id": "openclaw-cortex-memory",
   "name": "Cortex Memory",
-  "version": "0.1.0-Alpha.33",
+  "version": "0.1.0-Alpha.34",
   "description": "Long-term memory system with semantic, episodic, and procedural memory for AI Agents",
   "main": "dist/index.js",
   "author": "deki18",
@@ -200,7 +200,7 @@
         "properties": {
           "write_snapshot": {
             "type": "boolean",
-            "description": "When true (default), write data/memory/wiki/graph/view.json and timeline.jsonl"
+            "description": "When true (default), write wiki/graph/view.json, timeline.jsonl and Mermaid network snapshots"
           }
         },
         "required": [],

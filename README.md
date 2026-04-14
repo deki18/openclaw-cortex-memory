@@ -1,4 +1,4 @@
-﻿# OpenClaw Cortex Memory
+# OpenClaw Cortex Memory
 
 OpenClaw 长期记忆插件 - 专为 OpenClaw AI 助手设计的智能记忆系统
 
@@ -127,10 +127,10 @@ openclaw plugins enable openclaw-cortex-memory
 如果 `clawhub:` 安装出现 `fetch failed`，可改用 npm 包本地安装（推荐兜底）：
 
 ```bash
-npm pack openclaw-cortex-memory@0.1.0-Alpha.33
-openclaw plugins install ./openclaw-cortex-memory-0.1.0-Alpha.33.tgz
+npm pack openclaw-cortex-memory@0.1.0-Alpha.34
+openclaw plugins install ./openclaw-cortex-memory-0.1.0-Alpha.34.tgz
 openclaw plugins enable openclaw-cortex-memory
-rm ./openclaw-cortex-memory-0.1.0-Alpha.33.tgz
+rm ./openclaw-cortex-memory-0.1.0-Alpha.34.tgz
 ```
 
 完成安装后，请先按下方"最小配置"示例配置 `openclaw.json`，确认配置无误后再启动 gateway。
@@ -139,10 +139,10 @@ rm ./openclaw-cortex-memory-0.1.0-Alpha.33.tgz
 
 ```bash
 rm -r ~/.openclaw/extensions/openclaw-cortex-memory
-npm pack openclaw-cortex-memory@0.1.0-Alpha.33
-openclaw plugins install ./openclaw-cortex-memory-0.1.0-Alpha.33.tgz
+npm pack openclaw-cortex-memory@0.1.0-Alpha.34
+openclaw plugins install ./openclaw-cortex-memory-0.1.0-Alpha.34.tgz
 openclaw plugins enable openclaw-cortex-memory
-rm ./openclaw-cortex-memory-0.1.0-Alpha.33.tgz
+rm ./openclaw-cortex-memory-0.1.0-Alpha.34.tgz
 openclaw plugins list  --enabled
 openclaw gateway restart
 ```
@@ -274,15 +274,20 @@ openclaw plugins uninstall openclaw-cortex-memory --keep-data
 - `<memoryRoot>/sessions/active/sessions.jsonl`
 - `<memoryRoot>/sessions/archive/sessions.jsonl`
 - `<memoryRoot>/graph/memory.jsonl`
+- `<memoryRoot>/graph/memory.md`
 - `<memoryRoot>/graph/mutation_log.jsonl`
+- `<memoryRoot>/graph/mutation_log.md`
 - `<memoryRoot>/graph/conflict_queue.jsonl`
 - `<memoryRoot>/graph/superseded_relations.jsonl`
 - `<memoryRoot>/wiki/index.md`
 - `<memoryRoot>/wiki/log.md`
 - `<memoryRoot>/wiki/entities/*.md`
 - `<memoryRoot>/wiki/topics/*.md`
+- `<memoryRoot>/wiki/timelines/*.md`
 - `<memoryRoot>/wiki/graph/view.json`
 - `<memoryRoot>/wiki/graph/timeline.jsonl`
+- `<memoryRoot>/wiki/graph/network.mmd`
+- `<memoryRoot>/wiki/graph/network.md`
 - `<memoryRoot>/wiki/.projection_index.json`
 - `<memoryRoot>/wiki/.rebuild_queue.jsonl`
 - `<memoryRoot>/vector/lancedb`
