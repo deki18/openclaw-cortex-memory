@@ -1,4 +1,4 @@
-# OpenClaw Cortex Memory
+﻿# OpenClaw Cortex Memory
 
 OpenClaw 长期记忆插件 - 专为 OpenClaw AI 助手设计的智能记忆系统
 
@@ -184,10 +184,10 @@ openclaw plugins uninstall openclaw-cortex-memory --keep-data
           },
           "embedding": {
             "provider": "api",
-            "model": "text-embedding-3-large",
+            "model": "text-embedding-3-small",
             "apiKey": "${EMBEDDING_API_KEY}",
             "baseURL": "https://your-embedding-endpoint/v1",
-            "dimensions": 3072
+            "dimensions": 1536
           },
           "llm": {
             "provider": "api",
