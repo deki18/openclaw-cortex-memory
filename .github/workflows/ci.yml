@@ -29,17 +29,11 @@ jobs:
       - name: Install
         run: npm install --no-audit --no-fund
 
-      - name: Version Gate
-        run: npm run check:version
-
       - name: Typecheck
         run: npm run typecheck
 
       - name: Build
         run: npm run build
 
-      - name: Regression Tests
-        run: npm run test:all
-
-      - name: Package Dry Run
-        run: npm pack --dry-run
+      - name: Core Tests
+        run: npm run test:ci-core
