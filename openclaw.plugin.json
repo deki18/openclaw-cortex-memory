@@ -209,7 +209,7 @@
     },
     {
       "name": "lint_memory_wiki",
-      "description": "Run wiki memory lint checks and return structured repair guidance",
+      "description": "Run wiki memory lint checks for graph consistency, evidence coverage, page quality, and structured repair guidance",
       "parameters": {
         "type": "object",
         "properties": {},
@@ -670,6 +670,12 @@
             "type": "boolean",
             "description": "Whether sync_memory reads local memory/sessions/active/sessions.jsonl as source input",
             "default": false
+          },
+          "graphQualityMode": {
+            "type": "string",
+            "description": "Graph quality gate mode for sync_memory/history import writes",
+            "enum": ["off", "warn", "strict"],
+            "default": "strict"
           }
         },
         "additionalProperties": false

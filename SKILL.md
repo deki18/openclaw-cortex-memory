@@ -76,7 +76,7 @@ metadata:
 ## 配置策略
 
 先用最小配置跑通：`embedding`、`llm`、`reranker` + `autoSync`。
-高级项（`readFusion`、`memoryDecay`、`vectorChunking`、`writePolicy`、`readTuning`）都有默认值，不需要一开始就调整。
+高级项（`readFusion`、`memoryDecay`、`vectorChunking`、`writePolicy`、`syncPolicy`、`readTuning`）都有默认值，不需要一开始就调整。历史导入的图谱质量门禁默认使用 `syncPolicy.graphQualityMode: "strict"`，手动写入仍可按全局 `graphQualityMode` 调整。
 
 ## 安全与端点声明
 
@@ -89,4 +89,5 @@ metadata:
 - `backfill_embeddings` 已实现且已注册。
 - `query_graph` 支持参数：`entity`、`rel`、`dir`、`path_to`、`max_depth`。
 - `query_graph` 会返回 `wiki_refs`、`evidence_ids`，冲突时返回 `conflict_hint`。
-- 新增图谱治理工具：`export_graph_view`、`lint_memory_wiki`、`list_graph_conflicts`、`resolve_graph_conflict`。
+- 图谱治理工具：`export_graph_view`、`lint_memory_wiki`、`list_graph_conflicts`、`resolve_graph_conflict`。
+- Wiki 投影页应包含结论、近期变化、状态分组/事件流和证据摘录；`lint_memory_wiki` 会检查缺失结构与旧式泛化 Summary。

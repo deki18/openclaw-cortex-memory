@@ -165,13 +165,17 @@ async function main() {
 
     assert(routed.ok === true, "routeTranscript should succeed");
     assert(receivedRequests.length >= 3, "staged gate should call LLM at least 3 times (A+B, C, D)");
-    assert(receivedRequests.some(body => body.includes("write-gate.ab.v1.1.5")), "stage A+B prompt version missing");
-    assert(receivedRequests.some(body => body.includes("write-gate.c.v1.5.0")), "stage C prompt version missing");
+    assert(receivedRequests.some(body => body.includes("write-gate.ab.v1.1.6")), "stage A+B prompt version missing");
+    assert(receivedRequests.some(body => body.includes("write-gate.c.v1.5.1")), "stage C prompt version missing");
     assert(receivedRequests.some(body => body.includes("write-gate.d.v1.1.0")), "stage D prompt version missing");
     assert(graphCalls.length >= 1, "skip branch should still attempt graph append when graph payload exists");
+    const promptBodies = receivedRequests.join("\n");
+    assert(!/[闂濠婵閸鈧]/.test(promptBodies), "write-gate prompts should not contain mojibake examples");
+    assert(promptBodies.includes("请优化 openclaw-cortex-memory"), "Chinese write-gate regression sample missing");
 
     const firstGraph = graphCalls[0];
     const graphRelations = Array.isArray(firstGraph.relations) ? firstGraph.relations : [];
+    assert(firstGraph.qualityMode === "strict", "sync graph append should default to strict quality mode");
     assert(graphRelations.length >= 1, "graph relations should exist");
     assert(firstGraph.summary && typeof firstGraph.summary === "string", "graph append should include summary");
     assert(firstGraph.source_text_nav && typeof firstGraph.source_text_nav === "object", "graph append should include source_text_nav");
@@ -282,6 +286,83 @@ async function main() {
     });
     assert(genericEntityResult.valid === false, "generic entities should be rejected");
 
+    const lifecycleStageAb = { write_plan: { candidates: [] } };
+    const lifecycleMock = await createMockLlmServer([JSON.stringify(lifecycleStageAb)]);
+    const lifecycleArchiveEvents = [];
+    const lifecycleGraphCalls = [];
+    let lifecycleRouted;
+    try {
+      const lifecycleSync = createSessionSync({
+        projectRoot: root,
+        dbPath: path.join(root, "tmp", "m1-lifecycle-fallback-memory"),
+        logger: {
+          debug: () => {},
+          info: () => {},
+          warn: () => {},
+        },
+        llm: {
+          model: "mock-llm",
+          apiKey: "mock-key",
+          baseURL: `http://127.0.0.1:${lifecycleMock.port}`,
+        },
+        requireLlmForWrite: true,
+        archiveStore: {
+          async storeEvents(events) {
+            lifecycleArchiveEvents.push(...events);
+            return {
+              stored: events.map((_, index) => ({ id: `archive_lifecycle_${index}` })),
+              skipped: [],
+            };
+          },
+        },
+        writeStore: {
+          async writeMemory() {
+            throw new Error("active write should not be used for lifecycle fallback");
+          },
+        },
+        graphMemoryStore: {
+          async append(input) {
+            lifecycleGraphCalls.push(input);
+            return { success: true };
+          },
+        },
+      });
+      const filler = Array.from(
+        { length: 35 },
+        (_, index) => `[assistant] 状态记录 ${index + 1}：普通进展记录。`,
+      ).join("\n");
+      const lifecycleTranscript = [
+        "[用户] 请优化 openclaw-cortex-memory 的历史记忆导入质量，并修复中文导入的问题。",
+        filler,
+        "[assistant] 已完成 prompt 乱码修复，并通过 npm run typecheck。",
+        "[用户] ok，效果可以，接受。",
+      ].join("\n");
+      lifecycleRouted = await lifecycleSync.routeTranscript({
+        sessionId: "m1-lifecycle-zh-session",
+        sourceFile: "m1-lifecycle-zh",
+        transcript: lifecycleTranscript,
+      });
+      assert(lifecycleRouted.ok === true, "Chinese lifecycle fallback should route successfully");
+      assert(lifecycleRouted.archiveEvent === 1, "Chinese lifecycle fallback should archive one event");
+      assert(lifecycleArchiveEvents.length === 1, "Chinese lifecycle fallback should send one archive event");
+      assert(
+        lifecycleArchiveEvents[0].cause.includes("优化 openclaw-cortex-memory"),
+        "Chinese lifecycle archive cause should preserve the user task",
+      );
+      assert(
+        lifecycleMock.receivedRequests[0].includes("请优化 openclaw-cortex-memory"),
+        "event snippet should preserve the first Chinese task line",
+      );
+      assert(lifecycleGraphCalls.length >= 1, "lifecycle fallback should derive graph when a concrete project is mentioned");
+      const lifecycleGraph = lifecycleGraphCalls[0];
+      assert(
+        Array.isArray(lifecycleGraph.entities) && lifecycleGraph.entities.includes("openclaw-cortex-memory"),
+        "lifecycle fallback graph should include the concrete project entity",
+      );
+    } finally {
+      await new Promise((resolve) => lifecycleMock.server.close(resolve));
+    }
+
     const evidenceDir = path.join(root, "docs", "progress-evidence");
     ensureDir(evidenceDir);
     const evidencePath = path.join(evidenceDir, "M1-ingest-regression-2026-04-10.json");
@@ -293,11 +374,18 @@ async function main() {
         relation_evidence_confidence_required: missingEvidenceResult.valid === false,
         typed_payload_valid: typedPayloadResult.valid === true,
         generic_entity_rejected: genericEntityResult.valid === false,
+        prompt_mojibake_removed: !/[闂濠婵閸鈧]/.test(promptBodies),
+        chinese_lifecycle_fallback_archive: lifecycleArchiveEvents.length === 1 && lifecycleRouted && lifecycleRouted.archiveEvent === 1,
+        chinese_snippet_preserved: lifecycleMock.receivedRequests[0].includes("请优化 openclaw-cortex-memory"),
+        lifecycle_fallback_graph_derived: lifecycleGraphCalls.length >= 1,
+        sync_graph_quality_mode_strict: firstGraph.qualityMode === "strict",
       },
       llm_stage_calls: receivedRequests.length,
       graph_append_calls: graphCalls.length,
+      lifecycle_graph_append_calls: lifecycleGraphCalls.length,
       sample_relations: graphRelations,
       routed_result: routed,
+      lifecycle_routed_result: lifecycleRouted,
       typed_entity_types: typedPayloadResult.normalized ? typedPayloadResult.normalized.entity_types : {},
       missing_evidence_reason: missingEvidenceResult.reason || "",
       generic_entity_reason: genericEntityResult.reason || "",

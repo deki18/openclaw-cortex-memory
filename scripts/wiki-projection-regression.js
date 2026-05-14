@@ -25,6 +25,25 @@ function ensureDir(dirPath) {
   }
 }
 
+function appendArchiveEvent(memoryRoot, event) {
+  const archivePath = path.join(memoryRoot, "sessions", "archive", "sessions.jsonl");
+  ensureDir(path.dirname(archivePath));
+  fs.appendFileSync(archivePath, `${JSON.stringify({
+    timestamp: new Date().toISOString(),
+    layer: "archive",
+    event_type: "milestone",
+    source_file: "scripts/wiki-projection-regression.js",
+    session_id: "m4-regression",
+    gate_source: "manual",
+    embedding_status: "pending",
+    quality_score: 0.9,
+    quality_level: "high",
+    char_count: 120,
+    token_count: 30,
+    ...event,
+  })}\n`, "utf-8");
+}
+
 async function main() {
   const root = process.cwd();
   const storePath = path.join(root, "dist", "src", "store", "graph_memory_store.js");
@@ -52,8 +71,41 @@ async function main() {
     },
   });
 
+  const archiveEvents = [
+    {
+      id: "evt_m4_1",
+      summary: "Wife birthday recorded as 08-12.",
+      cause: "User asked the agent to remember Wife birthday.",
+      process: "Agent extracted the birthday_on relation from the source note.",
+      result: "Wife birthday_on 08-12 was recorded.",
+      source_text: "User note: Wife birthday_on 08-12.",
+      confidence: 0.93,
+    },
+    {
+      id: "evt_m4_2",
+      summary: "Wife birthday corrected to 08-13.",
+      cause: "User corrected the previously stored birthday.",
+      process: "Graph conflict was accepted to replace the older value.",
+      result: "Wife birthday_on 08-13 is the active value.",
+      source_text: "User correction: Wife birthday_on 08-13.",
+      confidence: 0.94,
+    },
+    {
+      id: "evt_m4_3",
+      summary: "Wife birthday candidate 08-14 was rejected.",
+      cause: "A later candidate contradicted the accepted birthday.",
+      process: "Graph conflict was rejected by review.",
+      result: "Wife birthday_on 08-14 remains rejected history.",
+      source_text: "Rejected candidate: Wife birthday_on 08-14.",
+      confidence: 0.9,
+    },
+  ];
+  for (const event of archiveEvents) {
+    appendArchiveEvent(tmpRoot, event);
+  }
+
   const baseInput = {
-    sourceLayer: "active_only",
+    sourceLayer: "archive_event",
     sessionId: "m4-regression",
     sourceFile: "scripts/wiki-projection-regression.js",
     eventType: "personal_fact",
@@ -64,7 +116,8 @@ async function main() {
   const first = await store.append({
     ...baseInput,
     sourceEventId: "evt_m4_1",
-    summary: "User records Wife birthday_on 08-12.",
+    archiveEventId: "evt_m4_1",
+    summary: "Wife birthday_on 08-12.",
     entities: ["User", "Wife", "08-12"],
     entity_types: { User: "Person", Wife: "FamilyMember", "08-12": "Date" },
     relations: [
@@ -72,18 +125,19 @@ async function main() {
         source: "Wife",
         target: "08-12",
         type: "birthday_on",
-        evidence_span: "8月12日",
+        evidence_span: "Wife birthday_on 08-12",
         confidence: 0.93,
       },
     ],
-    sourceText: "我妻子生日是8月12日",
+    sourceText: "User note: Wife birthday_on 08-12.",
   });
   assert(first.success === true, "first append should succeed");
 
   const second = await store.append({
     ...baseInput,
     sourceEventId: "evt_m4_2",
-    summary: "User records Wife birthday_on 08-13.",
+    archiveEventId: "evt_m4_2",
+    summary: "Wife birthday_on 08-13.",
     entities: ["User", "Wife", "08-13"],
     entity_types: { User: "Person", Wife: "FamilyMember", "08-13": "Date" },
     relations: [
@@ -91,11 +145,11 @@ async function main() {
         source: "Wife",
         target: "08-13",
         type: "birthday_on",
-        evidence_span: "8月13日",
+        evidence_span: "Wife birthday_on 08-13",
         confidence: 0.94,
       },
     ],
-    sourceText: "我妻子生日是8月13日",
+    sourceText: "User correction: Wife birthday_on 08-13.",
   });
   const conflict1 = parsePendingConflictId(second.reason);
   assert(second.success === false && !!conflict1, "second append should produce pending conflict");
@@ -106,7 +160,8 @@ async function main() {
   const third = await store.append({
     ...baseInput,
     sourceEventId: "evt_m4_3",
-    summary: "User records Wife birthday_on 08-14.",
+    archiveEventId: "evt_m4_3",
+    summary: "Wife birthday_on 08-14.",
     entities: ["User", "Wife", "08-14"],
     entity_types: { User: "Person", Wife: "FamilyMember", "08-14": "Date" },
     relations: [
@@ -114,11 +169,11 @@ async function main() {
         source: "Wife",
         target: "08-14",
         type: "birthday_on",
-        evidence_span: "8月14日",
+        evidence_span: "Wife birthday_on 08-14",
         confidence: 0.9,
       },
     ],
-    sourceText: "我妻子生日是8月14日",
+    sourceText: "Rejected candidate: Wife birthday_on 08-14.",
   });
   const conflict2 = parsePendingConflictId(third.reason);
   assert(third.success === false && !!conflict2, "third append should produce second pending conflict");
@@ -148,6 +203,7 @@ async function main() {
   assert(fs.existsSync(queuePath), "rebuild queue should exist");
 
   const logText = readText(logPath);
+  const indexText = readText(indexPath);
   const wifeText = readText(wifePath);
   const topicText = readText(topicPath);
   const queueText = readText(queuePath);
@@ -161,25 +217,42 @@ async function main() {
   assert(logText.includes("conflict_accepted"), "log should contain conflict_accepted");
   assert(logText.includes("conflict_rejected"), "log should contain conflict_rejected");
 
-  assert(wifeText.includes("Current Facts"), "entity page should contain current facts section");
-  assert(wifeText.includes("Disputed Facts"), "entity page should contain disputed facts section");
-  assert(wifeText.includes("History"), "entity page should contain history section");
+  assert(indexText.includes("## Quality Snapshot"), "index should include quality snapshot");
+  assert(wifeText.includes("## Current Conclusion"), "entity page should contain current conclusion section");
+  assert(wifeText.includes("## Recent Changes"), "entity page should contain recent changes section");
+  assert(wifeText.includes("## High Confidence Facts"), "entity page should contain high confidence facts section");
+  assert(wifeText.includes("## Current Facts"), "entity page should contain current facts section");
+  assert(wifeText.includes("## Open Conflicts"), "entity page should contain open conflicts section");
+  assert(wifeText.includes("## Disputed Facts"), "entity page should contain disputed facts section");
+  assert(wifeText.includes("## History"), "entity page should contain history section");
+  assert(wifeText.includes("## Evidence Excerpts"), "entity page should contain evidence excerpts section");
   assert(wifeText.includes("08-13"), "accepted value should appear in entity page");
   assert(wifeText.includes("08-12"), "superseded value should appear in entity history");
   assert(wifeText.includes("08-14"), "rejected value should appear in entity history");
+  assert(wifeText.includes("Graph conflict was accepted"), "archive process should appear in entity evidence");
   assert(topicText.includes("## Summary"), "topic page should include summary section");
+  assert(topicText.includes("## Current Conclusion"), "topic page should include current conclusion section");
+  assert(topicText.includes("## Status Groups"), "topic page should include status groups section");
   assert(topicText.includes("## Timeline"), "topic page should include timeline section");
   assert(topicText.includes("## Latest Status"), "topic page should include latest status section");
+  assert(topicText.includes("## Evidence Excerpts"), "topic page should include evidence excerpts section");
   assert(timelineFiles.length > 0, "timeline pages should be generated");
   assert(firstTimelineText.includes("## Summary"), "timeline page should include summary section");
+  assert(firstTimelineText.includes("## Current Conclusion"), "timeline page should include current conclusion section");
+  assert(firstTimelineText.includes("## Event Flow"), "timeline page should include event flow section");
   assert(firstTimelineText.includes("## Timeline"), "timeline page should include timeline section");
   assert(firstTimelineText.includes("## Latest Status"), "timeline page should include latest status section");
+  assert(firstTimelineText.includes("## Evidence Excerpts"), "timeline page should include evidence excerpts section");
+  assert(firstTimelineText.includes("cause: User"), "timeline page should include archive cause");
+  assert(firstTimelineText.includes("process: "), "timeline page should include archive process");
+  assert(firstTimelineText.includes("result: "), "timeline page should include archive result");
   assert(Array.isArray(projectionIndex.timelines) && projectionIndex.timelines.length > 0, "projection index should include timelines");
+  assert(projectionIndex.quality_summary && projectionIndex.quality_summary.relations >= 3, "projection index should include quality summary");
   assert(queueText.trim().length === 0, "rebuild queue should be drained after maintenance");
 
   const evidenceDir = path.join(root, "docs", "progress-evidence");
   ensureDir(evidenceDir);
-  const evidencePath = path.join(evidenceDir, "M4-projection-regression-2026-04-10.json");
+  const evidencePath = path.join(evidenceDir, "M4-projection-regression-2026-05-14.json");
   const evidence = {
     generated_at: new Date().toISOString(),
     checks: {
@@ -189,6 +262,8 @@ async function main() {
       rebuild_queue_drained: true,
       graph_snapshot_generated: true,
       timeline_markdown_generated: true,
+      rich_wiki_sections_generated: true,
+      archive_flow_projected_to_wiki: true,
     },
     files: {
       log: logPath,
@@ -215,4 +290,3 @@ main().catch((error) => {
   console.error(error instanceof Error ? error.message : String(error));
   process.exit(1);
 });
-

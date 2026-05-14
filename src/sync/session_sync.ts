@@ -91,6 +91,7 @@ interface SessionSyncOptions {
       gateSource: "sync" | "session_end" | "manual";
       confidence?: number;
       sourceText?: string;
+      qualityMode?: GraphQualityMode;
     }): Promise<{ success: boolean; reason?: string }>;
   };
   writeStore: {
@@ -103,6 +104,7 @@ interface SessionSyncOptions {
   };
   syncPolicy?: {
     includeLocalActiveInput?: boolean;
+    graphQualityMode?: GraphQualityMode;
   };
 }
 
@@ -359,10 +361,14 @@ function normalizeOneLineText(value: string): string {
   return String(value || "").replace(/\s+/g, " ").trim();
 }
 
-const LOW_INFORMATION_LINE = /^(ok|okay|got it|roger|noted|sure|thanks|thank you|received|copy that|understood)\b/i;
-const LOW_VALUE_ONLY_LINE = /^(ok|okay|got it|roger|noted|thanks|thank you|received|copy that|understood|sounds good)[\s.!?,]*$/i;
-const ACTIVE_VALUE_SIGNAL_PATTERN = /(decision|trade-?off|constraint|requirement|fix|error|exception|blocked|rollback|deploy|progress|milestone|action item|owner|next step|todo|deadline|eta|issue|bug|metric|latency|error rate|cost|url|link|path|file|config|parameter|version|commit|pr|ticket)/i;
+const LOW_INFORMATION_LINE = /^(ok|okay|got it|roger|noted|sure|thanks|thank you|received|copy that|understood|好的|收到|明白|了解|谢谢|感谢|可以|行|嗯|嗯嗯|没问题)(?:\b|$)/i;
+const LOW_VALUE_ONLY_LINE = /^(ok|okay|got it|roger|noted|thanks|thank you|received|copy that|understood|sounds good|好的|收到|明白|了解|谢谢|感谢|可以|行|嗯|嗯嗯|没问题|辛苦了)[\s.!?,。！？、]*$/i;
+const ACTIVE_VALUE_SIGNAL_PATTERN = /(decision|trade-?off|constraint|requirement|fix|error|exception|blocked|rollback|deploy|progress|milestone|action item|owner|next step|todo|deadline|eta|issue|bug|metric|latency|error rate|cost|url|link|path|file|config|parameter|version|commit|pr|ticket|决策|决定|取舍|约束|需求|要求|修复|错误|异常|阻塞|回滚|部署|进展|里程碑|行动项|负责人|下一步|待办|截止|问题|缺陷|指标|延迟|成本|链接|路径|文件|配置|参数|版本|提交|工单|测试|验证|通过|失败|成功|优化|导入|记忆|wiki)/i;
 const ACTIVE_VALUE_EVIDENCE_PATTERN = /(https?:\/\/|www\.|[`#/:\\]|[A-Za-z]:\\|\/[A-Za-z0-9._\-\/]+|\b\d+(?:\.\d+)?%?\b|#\d{1,8})/;
+const EVENT_SNIPPET_SIGNAL_PATTERN = /(decision|fix|error|exception|blocked|deploy|progress|action item|owner|resolved|depends|complete|completed|implemented|passed|accepted|approved|review|investigate|optimi[sz]e|决策|决定|修复|错误|异常|阻塞|部署|进展|行动项|负责人|解决|依赖|完成|已完成|实现|已实现|通过|验证|接受|确认|评审|检查|分析|优化|提高|改进|导入|生成)/i;
+const USER_TASK_LINE_PATTERN = /(please|can you|need to|task|implement|fix|investigate|optimi[sz]e|deploy|enable|review|请|需要|帮我|麻烦|进入|开始|实现|修复|检查|分析|优化|部署|启用|评审|导入|生成|提高|改进|看一遍|处理|完成)/i;
+const COMPLETION_LINE_PATTERN = /(done|completed|fixed|implemented|deployed|resolved|report|summary|finished|已完成|完成了|修复了|实现了|已修复|已实现|已部署|已通过|通过了|验证通过|构建通过|测试通过|总结|报告|处理完成)/i;
+const ACCEPTANCE_LINE_PATTERN = /(approved|accepted|looks good|great|works|thank you|confirmed|ok|可以|好的|行|没问题|通过|接受|确认|效果可以|继续|谢谢|辛苦)/i;
 
 function denoiseTranscriptForWrite(transcript: string): string {
   const raw = (transcript || "").trim();
@@ -414,40 +420,81 @@ function hasValuableActiveContent(text: string): boolean {
   return true;
 }
 
+function limitSnippetText(text: string, maxChars = 8000): string {
+  if (text.length <= maxChars) {
+    return text;
+  }
+  const headChars = Math.max(1000, Math.floor(maxChars * 0.45));
+  const tailChars = Math.max(1000, maxChars - headChars - 32);
+  return `${text.slice(0, headChars).trim()}\n[...snip...]\n${text.slice(-tailChars).trim()}`;
+}
+
 function buildEventSnippet(text: string): string {
   const lines = text
     .split(/\r?\n/)
     .map(line => line.trim())
     .filter(Boolean)
     .filter(line => line.length >= 8);
-  const actionPattern = /(decision|fix|error|exception|blocked|deploy|progress|action item|owner|resolved|depends|complete)/i;
-  const picked = lines.filter(line => actionPattern.test(line));
-  const use = picked.length > 0 ? picked : lines.slice(-20);
-  return use.slice(-30).join("\n").slice(-8000);
+  const selected = new Map<number, string>();
+  const add = (index: number): void => {
+    if (index >= 0 && index < lines.length) {
+      selected.set(index, lines[index]);
+    }
+  };
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    if (
+      EVENT_SNIPPET_SIGNAL_PATTERN.test(line)
+      || ACTIVE_VALUE_EVIDENCE_PATTERN.test(line)
+      || USER_TASK_LINE_PATTERN.test(line)
+      || COMPLETION_LINE_PATTERN.test(line)
+      || ACCEPTANCE_LINE_PATTERN.test(line)
+    ) {
+      add(index);
+    }
+  }
+  for (let index = 0; index < Math.min(5, lines.length); index += 1) {
+    if (USER_TASK_LINE_PATTERN.test(lines[index]) || ACTIVE_VALUE_EVIDENCE_PATTERN.test(lines[index])) {
+      add(index);
+    }
+  }
+  for (let index = Math.max(0, lines.length - 12); index < lines.length; index += 1) {
+    add(index);
+  }
+  if (selected.size === 0) {
+    lines.slice(-20).forEach((line, offset) => selected.set(lines.length - Math.min(20, lines.length) + offset, line));
+  }
+  const ordered = [...selected.entries()]
+    .sort((a, b) => a[0] - b[0])
+    .map(([, line]) => line);
+  const capped = ordered.length > 50
+    ? [...ordered.slice(0, 5), ...ordered.slice(-45)]
+    : ordered;
+  return limitSnippetText(capped.join("\n"));
 }
 
 const TASK_INSTRUCTION_PATTERNS = [
   /please|can you|need to|task|implement|fix|investigate|optimi[sz]e|deploy|enable|review/i,
-  /please|can you|need to|task|implement|fix|investigate|optimi[sz]e|deploy|enable|review/i,
+  /请|需要|帮我|麻烦|进入|开始|实现|修复|检查|分析|优化|部署|启用|评审|导入|生成|提高|改进|看一遍|处理|完成/,
 ];
 const COMPLETION_REPORT_PATTERNS = [
   /done|completed|fixed|implemented|deployed|resolved|report|summary|finished/i,
-  /done|completed|fixed|implemented|deployed|resolved|report|summary|finished/i,
+  /已完成|完成了|修复了|实现了|已修复|已实现|已部署|已通过|通过了|验证通过|构建通过|测试通过|总结|报告|处理完成/,
 ];
 const USER_ACCEPTANCE_PATTERNS = [
   /approved|accepted|looks good|great|works|thank you|confirmed|ok/i,
-  /approved|accepted|looks good|great|works|thank you|confirmed/i,
+  /可以|好的|行|没问题|通过|接受|确认|效果可以|继续|谢谢|辛苦/,
 ];
 const FAILURE_PATTERNS = [
   /failed|error|exception|blocked|timeout|rollback|incident/i,
-  /failed|error|exception|blocked|timeout|rollback|incident/i,
+  /失败|报错|错误|异常|阻塞|超时|回滚|事故|不通过|无法/,
 ];
 const SUCCESS_PATTERNS = [
   /success|completed|fixed|resolved|passed|stable|recovered|works/i,
-  /success|completed|fixed|resolved|passed|stable|recovered|works/i,
+  /成功|完成|修复|解决|通过|稳定|恢复|可用|生效/,
 ];
-const USER_ROLE_HINT = /^(user|human|customer|client)/i;
-const AGENT_ROLE_HINT = /^(assistant|agent|ai|system|openclaw|claude|gpt)/i;
+const USER_ROLE_HINT = /^(user|human|customer|client|用户|人类)/i;
+const AGENT_ROLE_HINT = /^(assistant|agent|ai|system|openclaw|claude|gpt|助手|助理|模型|codex)/i;
 
 function matchesAnyPattern(text: string, patterns: RegExp[]): boolean {
   return patterns.some(pattern => pattern.test(text));
@@ -578,10 +625,7 @@ function appendLifecycleArchiveDecision(
   if (!lifecycle.lifecycleComplete) {
     return decisions;
   }
-  const fallbackGraph = buildStablePersonalFactGraph(transcript);
-  if (!fallbackGraph) {
-    return decisions;
-  }
+  const fallbackGraph = buildStablePersonalFactGraph(transcript) || buildLifecycleTaskGraph(lifecycle, transcript);
   const summary = lifecycle.failThenSuccess
     ? "Task lifecycle closed: user request, failure iteration, final completion, and user acceptance."
     : "Task lifecycle closed: user request, completion report, and user acceptance.";
@@ -595,23 +639,37 @@ function appendLifecycleArchiveDecision(
     ? summarizeForArchive(lifecycle.acceptanceText, 220)
     : "User acknowledged and accepted the delivery.";
   const confidence = lifecycle.failThenSuccess ? 0.88 : 0.76;
+  const candidateDigest = crypto.createHash("sha1")
+    .update([summary, cause, process, result].join("\n"))
+    .digest("hex")
+    .slice(0, 12);
   const fallbackDecision: GateDecisionPayload = {
-    candidate_id: `lifecycle_${crypto.createHash("sha1").update(summary).digest("hex").slice(0, 12)}`,
+    candidate_id: `lifecycle_${candidateDigest}`,
     target_layer: "archive_event",
+    candidate_text: buildLifecycleSourceSlice(lifecycle, transcript),
     event: {
       event_type: lifecycle.failThenSuccess ? "retrospective" : "milestone",
       summary,
       cause,
       process,
       result,
-      entities: fallbackGraph.entities,
-      relations: fallbackGraph.relations,
-      entity_types: fallbackGraph.entity_types,
-      confidence: typeof fallbackGraph.confidence === "number" ? fallbackGraph.confidence : confidence,
+      entities: fallbackGraph?.entities,
+      relations: fallbackGraph?.relations,
+      entity_types: fallbackGraph?.entity_types,
+      confidence: typeof fallbackGraph?.confidence === "number" ? fallbackGraph.confidence : confidence,
     },
+    graph: fallbackGraph
+      ? {
+        summary: ensureSummaryMentionsEntities(summary, fallbackGraph.entities),
+        entities: fallbackGraph.entities,
+        relations: fallbackGraph.relations,
+        entity_types: fallbackGraph.entity_types,
+        confidence: fallbackGraph.confidence,
+      }
+      : undefined,
     reason: "lifecycle_archive_fallback",
   };
-  logger.info("sync_archive_fallback_applied reason=task_lifecycle_complete");
+  logger.info(`sync_archive_fallback_applied reason=task_lifecycle_complete graph=${fallbackGraph ? "derived" : "none"}`);
   return [...decisions, fallbackDecision];
 }
 
@@ -705,14 +763,16 @@ interface GateDecisionPayload {
 }
 
 const WRITE_GATE_PROMPT_VERSION = "write-gate.v1.7.9";
-const WRITE_GATE_STAGE_AB_PROMPT_VERSION = "write-gate.ab.v1.1.5";
-const WRITE_GATE_STAGE_C_PROMPT_VERSION = "write-gate.c.v1.5.0";
+const WRITE_GATE_STAGE_AB_PROMPT_VERSION = "write-gate.ab.v1.1.6";
+const WRITE_GATE_STAGE_C_PROMPT_VERSION = "write-gate.c.v1.5.1";
 const WRITE_GATE_STAGE_D_PROMPT_VERSION = "write-gate.d.v1.1.0";
 const WRITE_GATE_GRAPH_REWRITE_PROMPT_VERSION = "write-gate.graph-rewrite.v1.1.0";
 const WRITE_GATE_REGRESSION_SAMPLES = [
   "Example A: \"Discussed three options today, no final decision yet\" => active_only",
   "Example B: \"Decided to use plan B and completed rollout, error rate dropped to 0.2%\" => archive_event",
   "Example C: \"ok received thanks\" => skip",
+  "Example D: \"请优化 openclaw-cortex-memory 的历史记忆导入质量；已修复并通过 npm run typecheck；用户确认可以\" => archive_event",
+  "Example E: \"收到，辛苦了\" => skip",
 ];
 
 function buildActiveValuePromptHint(schema: GraphSchemaConfig): string {
@@ -932,6 +992,146 @@ function buildStablePersonalFactGraph(text: string): {
     confidence: 0.9,
   };
 }
+
+function cleanLifecycleEntityName(value: string): string {
+  return (value || "")
+    .replace(/\s+/g, " ")
+    .replace(/^[`"'“”‘’\s]+|[`"'“”‘’\s]+$/g, "")
+    .replace(/[。.!?！？；;，,：:]+$/g, "")
+    .trim();
+}
+
+function compactLifecycleTaskName(text: string): string {
+  const source = cleanLifecycleEntityName(text);
+  if (!source) return "";
+  const withoutPolitePrefix = source
+    .replace(/^(please|can you|could you|need to|task:?)\s+/i, "")
+    .replace(/^(请|需要|帮我|麻烦|进入|开始)\s*/u, "")
+    .trim();
+  const firstClause = (withoutPolitePrefix || source)
+    .split(/[。.!?！？；;\n]/)
+    .map(item => item.trim())
+    .find(Boolean) || source;
+  if (firstClause.length <= 90) {
+    return cleanLifecycleEntityName(firstClause);
+  }
+  return cleanLifecycleEntityName(firstClause.slice(0, 90));
+}
+
+function classifyLifecycleTarget(rawValue: string): { name: string; type: string; evidence: string; score: number } | null {
+  const raw = cleanLifecycleEntityName(rawValue);
+  if (!raw || raw.length < 2) return null;
+  const pathLike = /[A-Za-z]:\\|[\\/]/.test(raw);
+  const basename = pathLike
+    ? cleanLifecycleEntityName(raw.split(/[\\/]/).filter(Boolean).pop() || raw)
+    : raw;
+  const name = cleanLifecycleEntityName(basename);
+  if (!name || /^(project|repo|repository|system|plugin|task|memory|wiki|项目|工程|仓库|插件|系统|任务)$/i.test(name)) {
+    return null;
+  }
+  if (/\.(json|jsonc|toml|ya?ml|ini|env|config)$/i.test(name)) {
+    return { name, type: "ConfigFile", evidence: raw, score: pathLike ? 95 : 85 };
+  }
+  if (/\.(ts|tsx|js|jsx|mjs|cjs|md|mdx|txt|py|go|rs|java|cs|gd)$/i.test(name)) {
+    return { name, type: "Document", evidence: raw, score: pathLike ? 90 : 80 };
+  }
+  if (/[A-Za-z][A-Za-z0-9]+(?:-[A-Za-z0-9]+)+/.test(name)) {
+    return { name, type: "Project", evidence: raw, score: 88 };
+  }
+  if (/openclaw|cortex|memory|wiki|plugin|gateway|worker|sdk/i.test(name)) {
+    return { name, type: "Project", evidence: raw, score: 76 };
+  }
+  if (/^[A-Za-z0-9_.:-]{3,80}$/.test(name)) {
+    return { name, type: "Resource", evidence: raw, score: 55 };
+  }
+  return null;
+}
+
+function pickLifecycleTarget(transcript: string): { name: string; type: string; evidence: string } | null {
+  const source = transcript || "";
+  const candidates: Array<{ name: string; type: string; evidence: string; score: number }> = [];
+  const addCandidate = (raw: string): void => {
+    const classified = classifyLifecycleTarget(raw);
+    if (!classified) return;
+    if (candidates.some(item => item.name.toLowerCase() === classified.name.toLowerCase())) {
+      return;
+    }
+    candidates.push(classified);
+  };
+  for (const match of source.matchAll(/`([^`]{2,180})`/g)) {
+    addCandidate(match[1] || "");
+  }
+  for (const match of source.matchAll(/[A-Za-z]:\\[^\s"'`<>]+|(?:\.{1,2}\/)?[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)+/g)) {
+    addCandidate(match[0] || "");
+  }
+  for (const match of source.matchAll(/\b[A-Za-z][A-Za-z0-9]+(?:-[A-Za-z0-9]+){1,8}\b/g)) {
+    addCandidate(match[0] || "");
+  }
+  for (const match of source.matchAll(/(?:项目|工程|仓库|插件)\s*[`"“]?([A-Za-z0-9_.:-]{2,100})[`"”]?/g)) {
+    addCandidate(match[1] || "");
+  }
+  candidates.sort((a, b) => b.score - a.score);
+  const picked = candidates[0];
+  return picked ? { name: picked.name, type: picked.type, evidence: picked.evidence } : null;
+}
+
+function buildLifecycleSourceSlice(lifecycle: ReturnType<typeof evaluateTaskLifecycle>, transcript: string): string {
+  const parts = [lifecycle.taskText, lifecycle.reportText, lifecycle.acceptanceText]
+    .map(item => item.trim())
+    .filter(Boolean);
+  return parts.length > 0 ? parts.join("\n") : buildEventSnippet(transcript);
+}
+
+function ensureSummaryMentionsEntities(summary: string, entities?: string[]): string {
+  const normalizedSummary = summary || "";
+  const missing = (entities || [])
+    .map(item => item.trim())
+    .filter(Boolean)
+    .filter(entity => !normalizedSummary.toLowerCase().includes(entity.toLowerCase()));
+  if (missing.length === 0) {
+    return normalizedSummary;
+  }
+  return `${normalizedSummary} Entities: ${missing.join(", ")}.`;
+}
+
+function buildLifecycleTaskGraph(
+  lifecycle: ReturnType<typeof evaluateTaskLifecycle>,
+  transcript: string,
+): {
+  entities: string[];
+  entity_types: Record<string, string>;
+  relations: GraphRelationPayload[];
+  confidence?: number;
+} | null {
+  const taskName = compactLifecycleTaskName(lifecycle.taskText || lifecycle.reportText || "");
+  const target = pickLifecycleTarget(transcript);
+  if (!taskName || !target || taskName.toLowerCase() === target.name.toLowerCase()) {
+    return null;
+  }
+  const relationType = target.type === "Project" ? "belongs_to" : "references";
+  const contextChunk = limitSnippetText(buildLifecycleSourceSlice(lifecycle, transcript), 420);
+  const evidenceSpan = target.evidence || target.name;
+  return {
+    entities: [taskName, target.name],
+    entity_types: {
+      [taskName]: "Task",
+      [target.name]: target.type,
+    },
+    relations: [
+      {
+        source: taskName,
+        target: target.name,
+        type: relationType,
+        relation_origin: "canonical",
+        evidence_span: evidenceSpan,
+        context_chunk: contextChunk || transcript.slice(0, 420).trim(),
+        confidence: 0.72,
+      },
+    ],
+    confidence: 0.72,
+  };
+}
+
 function parseArchiveEventPayload(value: unknown): ArchiveEventPayload | null {
   if (!value || typeof value !== "object") {
     return null;
@@ -1822,10 +2022,10 @@ async function extractGateDecisionsWithLlm(args: {
       "Task: execute Stage A+B only (denoise + candidate split + route classification).",
       "Route classes: active_only | archive_event | skip.",
       "Rules:",
-      "- Denoise first: remove pure acknowledgements/politeness/chitchat/repeated filler (for example: 婵犻潧鍊婚弲顐⑩枔?闂佽　鍋撻悹鍝勬惈閻?闁荤姴顑冮崹濂告⒓?ok/got it/thanks) when they contain no task facts.",
+      "- Denoise first: remove pure acknowledgements/politeness/chitchat/repeated filler (for example: 好的/收到/谢谢/ok/got it/thanks) when they contain no task facts.",
       `- Keep factual evidence during denoise using dictionary-grounded signals. ${activeValuePromptHint}`,
       `- ${entityDictionaryPromptHint}`,
-      "- Concrete entities must be source-grounded names or aliases from the dictionary above; reject generic placeholders (e.g., user/person/system/闂傚倸鍋嗛崳锝夈€?闂佸搫鍊介～澶愩€?闁诲骸婀遍崑妯肩礊?thing).",
+      "- Concrete entities must be source-grounded names or aliases from the dictionary above; reject generic placeholders (e.g., user/person/system/用户/系统/某项目/thing).",
       "- Semantic event split rule: one candidate = one principal event with a coherent subject + action/decision + object/outcome in the same phase.",
       "- Split into different candidates when topic/goal/subject changes, or when a new decision/outcome starts.",
       "- Merge sentences into one candidate when they describe the same event progression in one phase.",
@@ -1926,7 +2126,7 @@ async function extractGateDecisionsWithLlm(args: {
       "- write_plan.archive_payloads[] item (C2): {candidate_id,source_slice,event_type,summary,cause,process,result,entities,entity_types,relations,confidence}",
       "- write_plan.graph_payloads[] item (C3): {candidate_id,source_slice,summary,source_text_nav,entities,entity_types,relations,confidence}",
       "Top-level output schema:",
-      "{\"write_plan\":{\"active_payloads\":[{\"candidate_id\":\"c1\",\"source_slice\":\"...\",\"summary\":\"...\"}],\"archive_payloads\":[{\"candidate_id\":\"c2\",\"source_slice\":\"...\",\"event_type\":\"decision\",\"summary\":\"...\",\"cause\":\"...\",\"process\":\"...\",\"result\":\"...\",\"entities\":[\"A\"],\"entity_types\":{\"A\":\"Project\"},\"relations\":[],\"confidence\":0.82}],\"graph_payloads\":[{\"candidate_id\":\"c1\",\"source_slice\":\"...\",\"summary\":\"...\",\"source_text_nav\":{\"layer\":\"active_only\",\"session_id\":\"s1\",\"source_file\":\"daily_summary:2026-04-03.md\",\"source_memory_id\":\"evt_1\",\"source_event_id\":\"evt_1\"},\"entities\":[\"A\"],\"entity_types\":{\"A\":\"Project\"},\"relations\":[{\"source\":\"A\",\"target\":\"B\",\"type\":\"depends_on\",\"relation_origin\":\"canonical\",\"evidence_span\":\"A 婵炴挻纰嶇换鍡欑矉?B\",\"context_chunk\":\"闂佸憡顭囬崰鎰板几閸愨晝鈻斿┑鐘辫兌閻熸捇鏌?..\",\"confidence\":0.9}],\"confidence\":0.8}]}}",
+      "{\"write_plan\":{\"active_payloads\":[{\"candidate_id\":\"c1\",\"source_slice\":\"...\",\"summary\":\"...\"}],\"archive_payloads\":[{\"candidate_id\":\"c2\",\"source_slice\":\"...\",\"event_type\":\"decision\",\"summary\":\"...\",\"cause\":\"...\",\"process\":\"...\",\"result\":\"...\",\"entities\":[\"openclaw-cortex-memory\"],\"entity_types\":{\"openclaw-cortex-memory\":\"Project\"},\"relations\":[],\"confidence\":0.82}],\"graph_payloads\":[{\"candidate_id\":\"c1\",\"source_slice\":\"...\",\"summary\":\"任务A depends_on 资源B。\",\"source_text_nav\":{\"layer\":\"active_only\",\"session_id\":\"s1\",\"source_file\":\"daily_summary:2026-04-03.md\",\"source_memory_id\":\"evt_1\",\"source_event_id\":\"evt_1\"},\"entities\":[\"任务A\",\"资源B\"],\"entity_types\":{\"任务A\":\"Task\",\"资源B\":\"Resource\"},\"relations\":[{\"source\":\"任务A\",\"target\":\"资源B\",\"type\":\"depends_on\",\"relation_origin\":\"canonical\",\"evidence_span\":\"任务A 依赖 资源B\",\"context_chunk\":\"用户说明任务A依赖资源B，需要后续处理。\",\"confidence\":0.9}],\"confidence\":0.8}]}}",
       "Output JSON only. Do NOT output merge_hints/graph_rewrite.",
       "",
       "[CANDIDATES]",
@@ -2186,6 +2386,9 @@ export function createSessionSync(options: SessionSyncOptions): {
   const llmBaseUrl = normalizeBaseUrl(options.llm?.baseURL || options.llm?.baseUrl);
   const requireLlmForWrite = options.requireLlmForWrite !== false;
   const includeLocalActiveInput = options.syncPolicy?.includeLocalActiveInput === true;
+  const syncGraphQualityMode: GraphQualityMode = options.syncPolicy?.graphQualityMode
+    || options.graphQualityMode
+    || "strict";
   const graphSchema = loadGraphSchema(options.projectRoot);
   const relationPromptHint = buildRelationPromptHint(graphSchema);
   const activeValuePromptHint = buildActiveValuePromptHint(graphSchema);
@@ -2195,6 +2398,7 @@ export function createSessionSync(options: SessionSyncOptions): {
     `sync_gate_stage_versions=ab:${WRITE_GATE_STAGE_AB_PROMPT_VERSION},c:${WRITE_GATE_STAGE_C_PROMPT_VERSION},d:${WRITE_GATE_STAGE_D_PROMPT_VERSION},rw:${WRITE_GATE_GRAPH_REWRITE_PROMPT_VERSION}`,
   );
   options.logger.info(`sync_include_local_active_input=${includeLocalActiveInput}`);
+  options.logger.info(`sync_graph_quality_mode=${syncGraphQualityMode}`);
   if (!fs.existsSync(statePath)) {
     options.logger.warn("sync_state_missing: deleting state file triggers full re-import");
   }
@@ -2256,6 +2460,20 @@ export function createSessionSync(options: SessionSyncOptions): {
       relationPromptHint,
     });
     const routedDecisions = appendLifecycleArchiveDecision(decisions, normalizedTranscript, options.logger);
+    const routeCounts = routedDecisions.reduce((acc, decision) => {
+      acc[decision.target_layer] = (acc[decision.target_layer] || 0) + 1;
+      return acc;
+    }, { active_only: 0, archive_event: 0, skip: 0 } as Record<GateTargetLayer, number>);
+    const sourceSlicePresent = routedDecisions.filter(decision => {
+      if (decision.target_layer === "active_only") {
+        return Boolean((decision.active_source_slice || "").trim());
+      }
+      if (decision.target_layer === "archive_event") {
+        return Boolean((decision.candidate_text || "").trim());
+      }
+      return Boolean((decision.candidate_text || "").trim());
+    }).length;
+    const initialGraphPayloads = routedDecisions.filter(decision => Boolean(toAppendableGraphPayload(decision.graph))).length;
     if (routedDecisions.length === 0) {
       options.logger.info(`sync_skip reason=llm_extract_empty session=${args.sessionId}`);
       bumpReason("llm_extract_empty");
@@ -2377,6 +2595,7 @@ export function createSessionSync(options: SessionSyncOptions): {
           gateSource: "sync",
           confidence: appendableGraph.confidence,
           sourceText: argsForAppend.sourceText,
+          qualityMode: syncGraphQualityMode,
         });
       } catch (error) {
         graphSkipped += 1;
@@ -2606,20 +2825,24 @@ export function createSessionSync(options: SessionSyncOptions): {
       }
       if (decision.target_layer === "archive_event") {
         archiveAttempted += 1;
+        const isLifecycleFallback = decision.reason === "lifecycle_archive_fallback";
         if (!decision.event) {
           skipped += 1;
           bumpReason("archive_event_missing_payload");
           continue;
         }
         const archiveFallbackGraph = toAppendableGraphPayload({
-          summary: decision.event.summary,
+          summary: ensureSummaryMentionsEntities(
+            resolveGraphSummary(graphPayload || {}) || decision.event.summary,
+            decision.event.entities,
+          ),
           entities: decision.event.entities,
           entity_types: decision.event.entity_types,
           relations: decision.event.relations,
           confidence: decision.event.confidence,
         });
         graphPayload = mergeGraphPayload(graphPayload, archiveFallbackGraph) || graphPayload || archiveFallbackGraph;
-        if (!graphPayload) {
+        if (!graphPayload && !isLifecycleFallback) {
           skipped += 1;
           bumpReason("graph_payload_required_archive");
           options.logger.warn(`sync_skip reason=graph_payload_required_archive session=${args.sessionId} candidate_id=${decision.candidate_id || "unknown"}`);
@@ -2705,6 +2928,14 @@ export function createSessionSync(options: SessionSyncOptions): {
     );
     options.logger.info(
       `sync_gate_metrics session=${args.sessionId} active_attempted=${activeAttempted} archive_attempted=${archiveAttempted} graph_attempted=${graphAttempted} graph_stored=${graphStored} graph_skipped=${graphSkipped} graph_rewrite_requested=${graphRewriteRequested} graph_rewrite_triggered=${graphRewriteTriggered} graph_rewrite_applied=${graphRewriteApplied} graph_rewrite_failed=${graphRewriteFailed} skip_reason_kinds=${Object.keys(skipReasons).length}`,
+    );
+    const topSkipReasons = Object.entries(skipReasons)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 6)
+      .map(([reason, count]) => `${reason}:${count}`)
+      .join(",");
+    options.logger.info(
+      `sync_gate_quality_metrics session=${args.sessionId} llm_candidates=${decisions.length} routed_total=${routedDecisions.length} routed_active=${routeCounts.active_only || 0} routed_archive=${routeCounts.archive_event || 0} routed_skip=${routeCounts.skip || 0} source_slice_present=${sourceSlicePresent}/${routedDecisions.length} initial_graph_payloads=${initialGraphPayloads}/${routedDecisions.length} top_skip_reasons=${topSkipReasons || "none"}`,
     );
     return {
       imported,

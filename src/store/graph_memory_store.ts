@@ -48,6 +48,7 @@ interface GraphPayloadInput {
   gateSource: "sync" | "session_end" | "manual";
   confidence?: number;
   sourceText?: string;
+  qualityMode?: GraphQualityMode;
 }
 
 interface AppendResult {
@@ -162,6 +163,38 @@ const SINGLE_VALUE_RELATION_TYPES = new Set<string>([
   "anniversary_on",
   "has_spouse",
   "lives_in",
+  "owned_by",
+  "assigned_to",
+  "reviewed_by",
+  "approved_by",
+  "rejected_by",
+  "planned_for",
+  "scheduled_for",
+  "configured_in",
+  "migrates_to",
+  "replaced_by",
+  "supersedes",
+]);
+
+const TARGET_TYPE_SCOPED_SINGLE_VALUE_RELATION_TYPES = new Set<string>([
+  "prefers",
+]);
+
+const OPPOSING_RELATION_TYPES: Record<string, string[]> = {
+  approved_by: ["rejected_by"],
+  rejected_by: ["approved_by"],
+  blocks: ["supports", "unblocks"],
+  supports: ["blocks", "conflicts_with"],
+  unblocks: ["blocks"],
+  conflicts_with: ["supports"],
+  duplicates: ["supersedes", "replaced_by"],
+  supersedes: ["duplicates"],
+  replaced_by: ["duplicates"],
+};
+
+const CURRENT_STATE_RELATION_TYPES = new Set<string>([
+  ...SINGLE_VALUE_RELATION_TYPES,
+  ...TARGET_TYPE_SCOPED_SINGLE_VALUE_RELATION_TYPES,
 ]);
 
 function ensureDirForFile(filePath: string): void {
@@ -186,10 +219,25 @@ function relationKey(relation: GraphRelation): string {
   return `${source}|${type}|${target}`;
 }
 
-function relationBucketKey(relation: GraphRelation): string {
+function relationBucketKey(relation: GraphRelation, entityTypes?: Record<string, string>): string {
   const source = (relation.source || "").trim().toLowerCase();
   const type = (relation.type || "related_to").trim().toLowerCase();
+  if (TARGET_TYPE_SCOPED_SINGLE_VALUE_RELATION_TYPES.has(type)) {
+    const target = (relation.target || "").trim();
+    const targetType = target && entityTypes ? (entityTypes[target] || entityTypes[target.toLowerCase()] || "") : "";
+    return `${source}|${type}|target_type:${String(targetType || "unknown").trim().toLowerCase()}`;
+  }
   return `${source}|${type}`;
+}
+
+function opposingRelationBucketKey(relation: GraphRelation): string {
+  const source = (relation.source || "").trim().toLowerCase();
+  const target = (relation.target || "").trim().toLowerCase();
+  return `${source}|${target}`;
+}
+
+function getOpposingTypes(type: string): Set<string> {
+  return new Set((OPPOSING_RELATION_TYPES[type] || []).map(item => item.trim().toLowerCase()).filter(Boolean));
 }
 
 function normalizeSummary(value: string | undefined): string {
@@ -656,8 +704,11 @@ export function createGraphMemoryStore(options: GraphMemoryStoreOptions): {
     existingRelationKeys: string[];
   } {
     const existing = loadAllEffective();
-    const candidateSingleValued = (candidate.relations || []).filter(rel => SINGLE_VALUE_RELATION_TYPES.has((rel.type || "").trim().toLowerCase()));
-    if (candidateSingleValued.length === 0) {
+    const candidateCurrentState = (candidate.relations || []).filter(rel => {
+      const type = (rel.type || "").trim().toLowerCase();
+      return CURRENT_STATE_RELATION_TYPES.has(type) || getOpposingTypes(type).size > 0;
+    });
+    if (candidateCurrentState.length === 0) {
       return {
         hasConflict: false,
         reason: "",
@@ -667,34 +718,63 @@ export function createGraphMemoryStore(options: GraphMemoryStoreOptions): {
       };
     }
     const existingByBucket = new Map<string, Array<{ key: string; relation: GraphRelation }>>();
+    const existingByOpposingBucket = new Map<string, Array<{ key: string; relation: GraphRelation }>>();
     for (const record of existing) {
       for (const rel of record.relations || []) {
         const type = (rel.type || "").trim().toLowerCase();
-        if (!SINGLE_VALUE_RELATION_TYPES.has(type)) {
-          continue;
+        if (CURRENT_STATE_RELATION_TYPES.has(type)) {
+          const key = relationKey(rel);
+          const bucket = relationBucketKey(rel, record.entity_types);
+          if (!existingByBucket.has(bucket)) {
+            existingByBucket.set(bucket, []);
+          }
+          existingByBucket.get(bucket)?.push({ key, relation: rel });
         }
-        const key = relationKey(rel);
-        const bucket = relationBucketKey(rel);
-        if (!existingByBucket.has(bucket)) {
-          existingByBucket.set(bucket, []);
+        if (getOpposingTypes(type).size > 0) {
+          const key = relationKey(rel);
+          const bucket = opposingRelationBucketKey(rel);
+          if (!existingByOpposingBucket.has(bucket)) {
+            existingByOpposingBucket.set(bucket, []);
+          }
+          existingByOpposingBucket.get(bucket)?.push({ key, relation: rel });
         }
-        existingByBucket.get(bucket)?.push({ key, relation: rel });
       }
     }
     const conflictTypes = new Set<string>();
     const existingRelations: Array<{ key: string; relation: GraphRelation }> = [];
     const existingRelationKeySet = new Set<string>();
-    for (const rel of candidateSingleValued) {
+    const addConflict = (type: string, existingItem: { key: string; relation: GraphRelation }): void => {
+      if (existingRelationKeySet.has(existingItem.key)) {
+        return;
+      }
+      existingRelationKeySet.add(existingItem.key);
+      existingRelations.push(existingItem);
+      conflictTypes.add(type);
+    };
+    for (const rel of candidateCurrentState) {
+      const type = (rel.type || "").trim().toLowerCase();
       const candidateKey = relationKey(rel);
-      const bucket = relationBucketKey(rel);
-      const sameBucket = existingByBucket.get(bucket) || [];
-      for (const existingItem of sameBucket) {
-        if (existingItem.key === candidateKey) {
-          continue;
+      if (CURRENT_STATE_RELATION_TYPES.has(type)) {
+        const bucket = relationBucketKey(rel, candidate.entity_types);
+        const sameBucket = existingByBucket.get(bucket) || [];
+        for (const existingItem of sameBucket) {
+          if (existingItem.key === candidateKey) {
+            continue;
+          }
+          addConflict(type, existingItem);
         }
-        existingRelationKeySet.add(existingItem.key);
-        existingRelations.push(existingItem);
-        conflictTypes.add((rel.type || "").trim().toLowerCase());
+      }
+      const opposingTypes = getOpposingTypes(type);
+      if (opposingTypes.size > 0) {
+        const opposingBucket = opposingRelationBucketKey(rel);
+        const sameEndpoints = existingByOpposingBucket.get(opposingBucket) || [];
+        for (const existingItem of sameEndpoints) {
+          const existingType = (existingItem.relation.type || "").trim().toLowerCase();
+          if (existingItem.key === candidateKey || !opposingTypes.has(existingType)) {
+            continue;
+          }
+          addConflict(`${existingType}<->${type}`, existingItem);
+        }
       }
     }
     const existingRelationKeys = [...existingRelationKeySet].sort();
@@ -709,7 +789,7 @@ export function createGraphMemoryStore(options: GraphMemoryStoreOptions): {
     }
     return {
       hasConflict: true,
-      reason: `single_value_relation_conflict:${[...conflictTypes].sort().join(",")}`,
+      reason: `current_state_relation_conflict:${[...conflictTypes].sort().join(",")}`,
       conflictTypes: [...conflictTypes].sort(),
       existingRelations,
       existingRelationKeys,
@@ -752,7 +832,7 @@ export function createGraphMemoryStore(options: GraphMemoryStoreOptions): {
       confidence: input.confidence,
       schema: graphSchema,
       sourceText: input.sourceText,
-      qualityMode: options.qualityMode || "warn",
+      qualityMode: input.qualityMode || options.qualityMode || "warn",
     });
 
     if (!validation.valid) {

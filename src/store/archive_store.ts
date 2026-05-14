@@ -138,7 +138,7 @@ function clampTailText(text: string, maxChars: number): string {
   return source.slice(-Math.floor(maxChars)).trim();
 }
 
-const ARCHIVE_LOW_INFORMATION_LINE = /^(ok|okay|got it|roger|noted|sure|thanks|thank you|received|copy that|understood)\b/i;
+const ARCHIVE_LOW_INFORMATION_LINE = /^(ok|okay|got it|roger|noted|sure|thanks|thank you|received|copy that|understood|好的|收到|明白|了解|谢谢|感谢|可以|行|嗯|嗯嗯|没问题)(?:\b|$)/i;
 
 function denoiseArchiveSourceText(text: string): string {
   const raw = (text || "").trim();
@@ -168,28 +168,28 @@ function normalizeOneLineText(value: string): string {
   return String(value || "").replace(/\s+/g, " ").trim();
 }
 
-const TASK_INSTRUCTION_PATTERNS = [
-  /请|帮我|麻烦|需要|任务|需求|实现|修复|排查|优化|上线|部署|整理|编写|启用|查看/i,
+const ARCHIVE_TASK_INSTRUCTION_PATTERNS = [
+  /请|需要|帮我|麻烦|任务|需求|实现|修复|排查|优化|上线|部署|整理|编写|启用|查看|检查|分析|导入|生成|提高|改进/,
   /please|can you|need to|task|implement|fix|investigate|optimi[sz]e|deploy|enable|review/i,
 ];
-const COMPLETION_REPORT_PATTERNS = [
-  /已完成|完成了|处理完|搞定|已修复|修复了|已实现|已上线|已部署|结果|汇报|完成情况|报告/i,
+const ARCHIVE_COMPLETION_REPORT_PATTERNS = [
+  /已完成|完成了|处理完|搞定|已修复|修复了|已实现|已上线|已部署|结果|汇报|完成情况|报告|已通过|验证通过|测试通过/,
   /done|completed|fixed|implemented|deployed|resolved|report|summary|finished/i,
 ];
-const USER_ACCEPTANCE_PATTERNS = [
-  /确认|认可|通过|验收|OK|可以|好的|收到|辛苦|谢谢|没问题|就这样/i,
+const ARCHIVE_USER_ACCEPTANCE_PATTERNS = [
+  /确认|认可|通过|验收|OK|可以|好的|收到|辛苦|谢谢|没问题|就这样|接受|效果可以/,
   /approved|accepted|looks good|great|works|thank you|confirmed/i,
 ];
-const ACTION_PATTERNS = [
-  /决定|完成|修复|发布|上线|部署|提交|交付|验证|关闭|推进|落地|实施|启用/i,
+const ARCHIVE_ACTION_PATTERNS = [
+  /决定|完成|修复|发布|上线|部署|提交|交付|验证|关闭|推进|落地|实施|启用|导入|生成|优化|改进/,
   /decide|complete|fix|release|deploy|ship|deliver|verify|close|implement|enable|migrate/i,
 ];
-const FAILURE_PATTERNS = [
-  /失败|报错|错误|异常|阻塞|卡住|不行|超时|回滚|故障/i,
+const ARCHIVE_FAILURE_PATTERNS = [
+  /失败|报错|错误|异常|阻塞|卡住|不行|超时|回滚|故障|不通过|无法/,
   /failed|error|exception|blocked|timeout|rollback|incident/i,
 ];
-const SUCCESS_PATTERNS = [
-  /成功|完成|修复|解决|通过|已上线|稳定|正常|恢复/i,
+const ARCHIVE_SUCCESS_PATTERNS = [
+  /成功|完成|修复|解决|通过|已上线|稳定|正常|恢复|可用|生效/,
   /success|completed|fixed|resolved|passed|stable|recovered|works/i,
 ];
 
@@ -239,16 +239,16 @@ function scoreQuality(args: {
   const mergedText = [summary, cause, process, result, outcome, sourceText].filter(Boolean).join("\n");
 
   const hasStructuredTriplet = cause.length > 0 && process.length > 0 && result.length > 0;
-  const hasTaskInstruction = matchesAnyPattern(mergedText, TASK_INSTRUCTION_PATTERNS);
-  const hasCompletionReport = matchesAnyPattern(mergedText, COMPLETION_REPORT_PATTERNS);
-  const hasUserAcceptance = matchesAnyPattern(mergedText, USER_ACCEPTANCE_PATTERNS);
-  const hasAction = matchesAnyPattern(mergedText, ACTION_PATTERNS);
-  const hasFailure = matchesAnyPattern(mergedText, FAILURE_PATTERNS);
-  const hasSuccess = matchesAnyPattern(mergedText, SUCCESS_PATTERNS);
+  const hasTaskInstruction = matchesAnyPattern(mergedText, ARCHIVE_TASK_INSTRUCTION_PATTERNS);
+  const hasCompletionReport = matchesAnyPattern(mergedText, ARCHIVE_COMPLETION_REPORT_PATTERNS);
+  const hasUserAcceptance = matchesAnyPattern(mergedText, ARCHIVE_USER_ACCEPTANCE_PATTERNS);
+  const hasAction = matchesAnyPattern(mergedText, ARCHIVE_ACTION_PATTERNS);
+  const hasFailure = matchesAnyPattern(mergedText, ARCHIVE_FAILURE_PATTERNS);
+  const hasSuccess = matchesAnyPattern(mergedText, ARCHIVE_SUCCESS_PATTERNS);
   const hasOutcome = outcome.length >= 6 || hasSuccess;
 
-  const firstFailureIdx = hasFailure ? firstMatchIndex(mergedText, FAILURE_PATTERNS) : -1;
-  const firstSuccessIdx = hasSuccess ? firstMatchIndex(mergedText, SUCCESS_PATTERNS) : -1;
+  const firstFailureIdx = hasFailure ? firstMatchIndex(mergedText, ARCHIVE_FAILURE_PATTERNS) : -1;
+  const firstSuccessIdx = hasSuccess ? firstMatchIndex(mergedText, ARCHIVE_SUCCESS_PATTERNS) : -1;
   const failThenSuccess = hasFailure && hasSuccess && firstFailureIdx >= 0 && firstSuccessIdx > firstFailureIdx;
   const workflowComplete = hasStructuredTriplet || (hasTaskInstruction && hasCompletionReport && hasUserAcceptance);
 
@@ -286,6 +286,51 @@ function scoreQuality(args: {
     level: "low",
     signals: { hasStructuredTriplet, hasTaskInstruction, hasCompletionReport, hasUserAcceptance, workflowComplete, failThenSuccess },
   };
+}
+
+function normalizeArchiveDedupText(value: string): string {
+  return String(value || "")
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}:./\\#@_-]+/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function buildArchiveDedupText(args: {
+  eventType: string;
+  summary: string;
+  cause?: string;
+  process?: string;
+  result?: string;
+  outcome?: string;
+  canonicalId?: string;
+  entities?: string[];
+  relations?: Array<{ source: string; target: string; type: string }>;
+}): string {
+  const relationText = Array.isArray(args.relations)
+    ? args.relations
+      .map(relation => `${relation.source || ""}|${relation.type || ""}|${relation.target || ""}`)
+      .filter(item => item.replace(/\|/g, "").trim().length > 0)
+      .sort()
+      .join("\n")
+    : "";
+  const entityText = Array.isArray(args.entities)
+    ? args.entities.map(item => String(item || "").trim()).filter(Boolean).sort().join("\n")
+    : "";
+  return [
+    `canonical:${args.canonicalId || ""}`,
+    `event_type:${args.eventType}`,
+    `summary:${args.summary}`,
+    `cause:${args.cause || ""}`,
+    `process:${args.process || ""}`,
+    `result:${args.result || args.outcome || ""}`,
+    entityText ? `entities:${entityText}` : "",
+    relationText ? `relations:${relationText}` : "",
+  ]
+    .filter(Boolean)
+    .map(normalizeArchiveDedupText)
+    .filter(Boolean)
+    .join("\n");
 }
 
 async function requestEmbedding(args: {
@@ -554,7 +599,22 @@ export function createArchiveStore(options: ArchiveStoreOptions): {
       const id = `evt_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
       const sourceTextRaw = typeof event.source_text === "string" ? event.source_text : "";
       const sourceText = clampTailText(denoiseArchiveSourceText(sourceTextRaw), archiveSourceTextMaxChars);
-      const dedupText = [normalizedEventType, summary, sourceText].filter(Boolean).join("\n");
+      const canonicalId = event.canonical_id || buildCanonicalId({
+        eventType: normalizedEventType,
+        summary,
+        outcome: event.outcome,
+      });
+      const dedupText = buildArchiveDedupText({
+        eventType: normalizedEventType,
+        summary,
+        cause,
+        process,
+        result,
+        outcome: event.outcome,
+        canonicalId,
+        entities: event.entities,
+        relations: event.relations,
+      });
       const dedup = options.deduplicator.check({
         id,
         summary: dedupText || `${normalizedEventType}: ${summary}`,
@@ -589,11 +649,7 @@ export function createArchiveStore(options: ArchiveStoreOptions): {
         confidence,
         source_event_id: event.source_event_id,
         actor: event.actor || "system",
-        canonical_id: event.canonical_id || buildCanonicalId({
-          eventType: normalizedEventType,
-          summary,
-          outcome: event.outcome,
-        }),
+        canonical_id: canonicalId,
       };
 
       let embedding: number[] | undefined = undefined;

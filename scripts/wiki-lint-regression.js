@@ -21,6 +21,25 @@ function parsePendingConflictId(reason) {
   return hit ? hit[1] : "";
 }
 
+function appendArchiveEvent(memoryRoot, event) {
+  const archivePath = path.join(memoryRoot, "sessions", "archive", "sessions.jsonl");
+  ensureDir(path.dirname(archivePath));
+  fs.appendFileSync(archivePath, `${JSON.stringify({
+    timestamp: new Date().toISOString(),
+    layer: "archive",
+    event_type: "milestone",
+    source_file: "scripts/wiki-lint-regression.js",
+    session_id: "m5-regression",
+    gate_source: "manual",
+    embedding_status: "pending",
+    quality_score: 0.9,
+    quality_level: "high",
+    char_count: 120,
+    token_count: 30,
+    ...event,
+  })}\n`, "utf-8");
+}
+
 async function main() {
   const root = process.cwd();
   const storePath = path.join(root, "dist", "src", "store", "graph_memory_store.js");
@@ -52,13 +71,33 @@ async function main() {
     },
   });
 
+  appendArchiveEvent(tmpRoot, {
+    id: "evt_m5_1",
+    summary: "Wife birthday recorded as 08-12.",
+    cause: "User asked to remember Wife birthday.",
+    process: "Agent extracted Wife birthday_on 08-12.",
+    result: "Wife birthday_on 08-12 was recorded.",
+    source_text: "User note: Wife birthday_on 08-12.",
+    confidence: 0.93,
+  });
+  appendArchiveEvent(tmpRoot, {
+    id: "evt_m5_2",
+    summary: "Wife birthday candidate 08-13 is pending.",
+    cause: "A candidate contradicted the existing birthday.",
+    process: "Graph conflict was queued for review.",
+    result: "Wife birthday_on 08-13 is pending conflict.",
+    source_text: "User correction: Wife birthday_on 08-13.",
+    confidence: 0.94,
+  });
+
   await store.append({
     sourceEventId: "evt_m5_1",
-    sourceLayer: "active_only",
+    archiveEventId: "evt_m5_1",
+    sourceLayer: "archive_event",
     sessionId: "m5-regression",
     sourceFile: "scripts/wiki-lint-regression.js",
     eventType: "personal_fact",
-    summary: "User records Wife birthday_on 08-12.",
+    summary: "Wife birthday_on 08-12.",
     entities: ["User", "Wife", "08-12"],
     entity_types: { User: "Person", Wife: "FamilyMember", "08-12": "Date" },
     relations: [
@@ -66,22 +105,23 @@ async function main() {
         source: "Wife",
         target: "08-12",
         type: "birthday_on",
-        evidence_span: "8月12日",
+        evidence_span: "Wife birthday_on 08-12",
         confidence: 0.93,
       },
     ],
     gateSource: "manual",
     confidence: 0.95,
-    sourceText: "我妻子生日是8月12日",
+    sourceText: "User note: Wife birthday_on 08-12.",
   });
 
   const pending = await store.append({
     sourceEventId: "evt_m5_2",
-    sourceLayer: "active_only",
+    archiveEventId: "evt_m5_2",
+    sourceLayer: "archive_event",
     sessionId: "m5-regression",
     sourceFile: "scripts/wiki-lint-regression.js",
     eventType: "personal_fact",
-    summary: "User records Wife birthday_on 08-13.",
+    summary: "Wife birthday_on 08-13.",
     entities: ["User", "Wife", "08-13"],
     entity_types: { User: "Person", Wife: "FamilyMember", "08-13": "Date" },
     relations: [
@@ -89,13 +129,13 @@ async function main() {
         source: "Wife",
         target: "08-13",
         type: "birthday_on",
-        evidence_span: "8月13日",
+        evidence_span: "Wife birthday_on 08-13",
         confidence: 0.94,
       },
     ],
     gateSource: "manual",
     confidence: 0.95,
-    sourceText: "我妻子生日是8月13日",
+    sourceText: "User correction: Wife birthday_on 08-13.",
   });
   const pendingConflictId = parsePendingConflictId(pending.reason);
   assert(pendingConflictId, "should create pending conflict");
@@ -113,9 +153,17 @@ async function main() {
     [
       "# Entity: 08-12",
       "",
+      "## Summary",
+      "",
+      "08-12 has 1 related facts in graph projection.",
+      "",
       "## Current Facts",
       "",
       "- Wife --birthday_on/superseded--> 08-12 (stale)",
+      "",
+      "## Evidence Excerpts",
+      "",
+      "- (none)",
       "",
     ].join("\n"),
     "utf-8",
@@ -128,7 +176,15 @@ async function main() {
     source_layer: "active_only",
     session_id: "m5-regression",
     source_file: "manual-gap",
+    source_text_nav: {
+      layer: "active_only",
+      session_id: "m5-regression",
+      source_file: "manual-gap",
+      source_memory_id: "evt_m5_gap",
+      source_event_id: "evt_m5_gap",
+    },
     timestamp: new Date().toISOString(),
+    summary: "User related_to GapEntity.",
     entities: ["User", "GapEntity"],
     entity_types: { User: "Person", GapEntity: "Concept" },
     relations: [{ source: "User", target: "GapEntity", type: "related_to" }],
@@ -187,13 +243,23 @@ async function main() {
 
   const categories = Array.isArray(details.categories) ? details.categories : [];
   const issues = Array.isArray(details.issues) ? details.issues : [];
-  assert(categories.length >= 6, "lint report should include all categories");
+  assert(categories.includes("knowledge_quality"), "lint report should include knowledge_quality category");
   const issueCategories = new Set(issues.map(item => item.category));
-  const requiredIssueCategories = ["pending_conflicts", "projection_lag", "orphan_pages", "stale_claims", "missing_pages", "evidence_gaps"];
+  const requiredIssueCategories = [
+    "pending_conflicts",
+    "projection_lag",
+    "orphan_pages",
+    "stale_claims",
+    "missing_pages",
+    "evidence_gaps",
+    "knowledge_quality",
+  ];
   for (const category of requiredIssueCategories) {
     assert(issueCategories.has(category), `lint issues should cover category=${category}`);
   }
   assert(issues.every(item => typeof item.next_action === "string" && item.next_action.trim().length > 0), "every lint issue should include next_action");
+  const knowledgeIssue = issues.find(item => item.category === "knowledge_quality");
+  assert(knowledgeIssue && JSON.stringify(knowledgeIssue.metadata || {}).includes("legacy_generic_summary"), "knowledge quality issue should report legacy generic summaries");
 
   if (typeof plugin.unregister === "function") {
     await plugin.unregister();
@@ -201,12 +267,13 @@ async function main() {
 
   const evidenceDir = path.join(root, "docs", "progress-evidence");
   ensureDir(evidenceDir);
-  const evidencePath = path.join(evidenceDir, "M5-lint-regression-2026-04-10.json");
+  const evidencePath = path.join(evidenceDir, "M5-lint-regression-2026-05-14.json");
   const evidence = {
     generated_at: new Date().toISOString(),
     checks: {
       lint_categories_covered: categories.length,
       all_required_categories_reported: true,
+      knowledge_quality_reported: true,
       next_action_present_for_all_issues: true,
     },
     summary: details.summary,
@@ -226,4 +293,3 @@ main().catch((error) => {
   console.error(error instanceof Error ? error.message : String(error));
   process.exit(1);
 });
-

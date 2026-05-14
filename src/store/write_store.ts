@@ -99,6 +99,8 @@ interface PersistedRecord {
   quality_level: "low" | "medium" | "high";
   quality_score: number;
   text_hash: string;
+  semantic_hash?: string;
+  semantic_simhash?: string;
   char_count: number;
   token_count: number;
   vector_chunks_total?: number;
@@ -106,7 +108,11 @@ interface PersistedRecord {
   embedding?: number[];
 }
 
-const ACTIVE_LOW_INFORMATION_LINE = /^(ok|okay|got it|roger|noted|sure|thanks|thank you|received|copy that|understood)\b/i;
+const ACTIVE_LOW_INFORMATION_LINE = /^(ok|okay|got it|roger|noted|sure|thanks|thank you|received|copy that|understood|好的|收到|明白|了解|谢谢|感谢|可以|行|嗯|嗯嗯|没问题)(?:\b|$)/i;
+const ACTIVE_LOW_VALUE_ONLY = /^(ok|okay|got it|roger|noted|thanks|thank you|received|copy that|understood|sounds good|好的|收到|明白|了解|谢谢|感谢|可以|行|嗯|嗯嗯|没问题|辛苦了)[\s.!?,。！？、]*$/i;
+const ACTIVE_SEMANTIC_SIGNAL = /(decision|trade-?off|constraint|requirement|fix|error|exception|blocked|rollback|deploy|progress|milestone|action item|owner|next step|todo|deadline|eta|issue|bug|metric|latency|error rate|cost|url|link|path|file|config|parameter|version|commit|pr|ticket|test|verify|passed|failed|success|import|memory|wiki|决策|决定|取舍|约束|需求|要求|修复|错误|异常|阻塞|回滚|部署|进展|里程碑|行动项|负责人|下一步|待办|截止|问题|缺陷|指标|延迟|成本|链接|路径|文件|配置|参数|版本|提交|工单|测试|验证|通过|失败|成功|优化|导入|记忆|wiki)/i;
+const ACTIVE_EVIDENCE_SIGNAL = /(https?:\/\/|www\.|[`#/:\\]|[A-Za-z]:\\|\/[A-Za-z0-9._\-\/]+|\b\d+(?:\.\d+)?%?\b|#\d{1,8}|npm run|pnpm |yarn |node |git )/i;
+const ACTIVE_WORKFLOW_SIGNAL = /(done|completed|fixed|implemented|resolved|passed|verified|accepted|approved|已完成|完成了|修复了|实现了|已修复|已实现|已通过|通过了|验证通过|测试通过|接受|确认)/i;
 
 function denoiseActiveText(input: string): string {
   const raw = (input || "").trim();
@@ -145,16 +151,135 @@ function normalizeSummary(input: string): string {
   return String(input || "").replace(/\s+/g, " ").trim();
 }
 
-function scoreQuality(text: string): { score: number; level: "low" | "medium" | "high" } {
+function normalizeSemanticText(input: string): string {
+  return String(input || "")
+    .replace(/^\[[^\]]+\]\s*/gm, "")
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}:./\\#@_-]+/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function buildSimilarityTokens(input: string): string[] {
+  const normalized = normalizeSemanticText(input);
+  if (!normalized) return [];
+  const tokens = normalized.split(/\s+/).filter(Boolean);
+  const output = new Set<string>();
+  for (const token of tokens) {
+    output.add(token);
+    const cjkChars = [...token].filter(char => /[\u3400-\u9fff]/.test(char));
+    if (cjkChars.length > 1) {
+      for (let index = 0; index < cjkChars.length - 1; index += 1) {
+        output.add(`${cjkChars[index]}${cjkChars[index + 1]}`);
+      }
+    }
+  }
+  return [...output];
+}
+
+function hashToken64(value: string): bigint {
+  const digest = crypto.createHash("sha1").update(value).digest();
+  let output = 0n;
+  for (let index = 0; index < 8; index += 1) {
+    output = (output << 8n) + BigInt(digest[index]);
+  }
+  return output;
+}
+
+function computeSimhashHex(text: string): string {
+  const tokens = buildSimilarityTokens(text);
+  const vector = Array.from({ length: 64 }, () => 0);
+  for (const token of tokens) {
+    const hash = hashToken64(token);
+    for (let bit = 0; bit < 64; bit += 1) {
+      vector[bit] += (hash & (1n << BigInt(bit))) !== 0n ? 1 : -1;
+    }
+  }
+  let result = 0n;
+  for (let bit = 0; bit < 64; bit += 1) {
+    if (vector[bit] >= 0) {
+      result |= 1n << BigInt(bit);
+    }
+  }
+  return result.toString(16).padStart(16, "0");
+}
+
+function hammingDistanceHex(left: string, right: string): number {
+  let value = BigInt(`0x${left || "0"}`) ^ BigInt(`0x${right || "0"}`);
+  let count = 0;
+  while (value > 0n) {
+    count += Number(value & 1n);
+    value >>= 1n;
+  }
+  return count;
+}
+
+function seedHash(seed: number, token: string): number {
+  return crypto.createHash("sha1").update(`${seed}:${token}`).digest().readUInt32BE(0);
+}
+
+function computeMinhash(text: string, signatures = 48): number[] {
+  const tokens = buildSimilarityTokens(text);
+  if (tokens.length === 0) return Array.from({ length: signatures }, () => 0);
+  const output: number[] = [];
+  for (let seed = 0; seed < signatures; seed += 1) {
+    let min = Number.MAX_SAFE_INTEGER;
+    for (const token of tokens) {
+      const value = seedHash(seed, token);
+      if (value < min) min = value;
+    }
+    output.push(min === Number.MAX_SAFE_INTEGER ? 0 : min);
+  }
+  return output;
+}
+
+function minhashSimilarity(left: number[], right: number[]): number {
+  if (left.length === 0 || right.length === 0) return 0;
+  const size = Math.min(left.length, right.length);
+  let same = 0;
+  for (let index = 0; index < size; index += 1) {
+    if (left[index] === right[index]) same += 1;
+  }
+  return same / size;
+}
+
+function buildActiveDedupText(args: { text: string; summary?: string; sourceText?: string }): string {
+  const summary = normalizeSummary(args.summary || "");
+  const text = normalizeSummary(args.text || "");
+  const sourceText = normalizeSummary(args.sourceText || "");
+  const base = summary || text;
+  return base || sourceText;
+}
+
+function scoreQuality(args: { text: string; summary?: string; sourceText?: string }): { score: number; level: "low" | "medium" | "high" } {
+  const text = args.text;
+  const summary = normalizeSummary(args.summary || "");
+  const sourceText = normalizeSummary(args.sourceText || "");
+  const merged = [summary, text, sourceText].filter(Boolean).join("\n");
+  const normalized = normalizeSemanticText(merged);
+  if (!normalized || ACTIVE_LOW_VALUE_ONLY.test(normalized)) {
+    return { score: 0, level: "low" };
+  }
   const length = text.length;
-  const uniqueChars = new Set(text.toLowerCase()).size;
+  const uniqueChars = new Set(normalized).size;
+  const hasSemanticSignal = ACTIVE_SEMANTIC_SIGNAL.test(merged);
+  const hasEvidence = ACTIVE_EVIDENCE_SIGNAL.test(merged);
+  const hasWorkflowSignal = ACTIVE_WORKFLOW_SIGNAL.test(merged);
   let score = 0;
-  if (length >= 20) score += 0.35;
-  if (length >= 60) score += 0.2;
-  if (length >= 120) score += 0.2;
-  if (uniqueChars >= 10) score += 0.15;
-  if (/\d/.test(text)) score += 0.05;
-  if (/[a-zA-Z\u4e00-\u9fa5]/.test(text)) score += 0.05;
+  if (length >= 20) score += 0.18;
+  if (length >= 60) score += 0.14;
+  if (length >= 120) score += 0.1;
+  if (uniqueChars >= 10) score += 0.08;
+  if (uniqueChars >= 24) score += 0.04;
+  if (hasSemanticSignal) score += 0.26;
+  if (hasEvidence) score += 0.16;
+  if (hasWorkflowSignal) score += 0.12;
+  if (summary && sourceText && sourceText.toLowerCase().includes(summary.toLowerCase().slice(0, Math.min(32, summary.length)))) {
+    score += 0.06;
+  }
+  if (!hasSemanticSignal && !hasEvidence && !hasWorkflowSignal) {
+    score = Math.min(score, 0.35);
+  }
   const normalizedScore = Math.max(0, Math.min(1, Number(score.toFixed(2))));
   if (normalizedScore >= 0.75) {
     return { score: normalizedScore, level: "high" };
@@ -360,7 +485,7 @@ export function createWriteStore(options: WriteStoreOptions): { writeMemory(args
     const sourceTextRaw = typeof args.sourceText === "string" ? args.sourceText.trim() : "";
     const sourceText = sourceTextRaw || cleaned;
 
-    const quality = scoreQuality(cleaned);
+    const quality = scoreQuality({ text: cleaned, summary: args.summary, sourceText });
     const activeMinQualityScore = typeof options.writePolicy?.activeMinQualityScore === "number"
       ? Math.max(0, Math.min(1, options.writePolicy.activeMinQualityScore))
       : 0.45;
@@ -369,6 +494,10 @@ export function createWriteStore(options: WriteStoreOptions): { writeMemory(args
     }
 
     const textHash = computeHash(cleaned);
+    const semanticDedupText = buildActiveDedupText({ text: cleaned, summary: args.summary, sourceText });
+    const semanticHash = computeHash(normalizeSemanticText(semanticDedupText));
+    const semanticSimhash = computeSimhashHex(semanticDedupText);
+    const semanticMinhash = computeMinhash(semanticDedupText);
     try {
       const dedupTailLines = typeof options.writePolicy?.activeDedupTailLines === "number"
         ? Math.max(20, Math.min(5000, Math.floor(options.writePolicy.activeDedupTailLines)))
@@ -383,6 +512,30 @@ export function createWriteStore(options: WriteStoreOptions): { writeMemory(args
             parsed.text_hash === textHash
           ) {
             return { status: "skipped", reason: "duplicate", error_code: "E203", quality };
+          }
+          const existingSemanticHash = typeof parsed.semantic_hash === "string"
+            ? parsed.semantic_hash
+            : computeHash(normalizeSemanticText(String(parsed.summary || parsed.source_text || "")));
+          if (existingSemanticHash && existingSemanticHash === semanticHash) {
+            return { status: "skipped", reason: "duplicate_semantic", error_code: "E203", quality };
+          }
+          const existingSemanticText = buildActiveDedupText({
+            text: String(parsed.summary || parsed.source_text || ""),
+            summary: typeof parsed.summary === "string" ? parsed.summary : undefined,
+            sourceText: typeof parsed.source_text === "string" ? parsed.source_text : undefined,
+          });
+          const existingSimhash = typeof parsed.semantic_simhash === "string"
+            ? parsed.semantic_simhash
+            : computeSimhashHex(existingSemanticText);
+          if (
+            normalizeSemanticText(semanticDedupText).length >= 24 &&
+            normalizeSemanticText(existingSemanticText).length >= 24 &&
+            hammingDistanceHex(semanticSimhash, existingSimhash) <= 3
+          ) {
+            return { status: "skipped", reason: "duplicate_simhash", error_code: "E203", quality };
+          }
+          if (minhashSimilarity(semanticMinhash, computeMinhash(existingSemanticText)) >= 0.92) {
+            return { status: "skipped", reason: "duplicate_minhash", error_code: "E203", quality };
           }
         } catch {}
       }
@@ -409,6 +562,8 @@ export function createWriteStore(options: WriteStoreOptions): { writeMemory(args
       quality_level: quality.level,
       quality_score: quality.score,
       text_hash: textHash,
+      semantic_hash: semanticHash,
+      semantic_simhash: semanticSimhash,
       char_count: sourceText.length,
       token_count: estimateTokenCount(sourceText),
     };

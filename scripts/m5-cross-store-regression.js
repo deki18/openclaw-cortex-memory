@@ -288,8 +288,8 @@ async function runCrossStoreIsolationCheck(root, sessionSyncPath) {
     assert(archiveCalls.length === 1, "archiveStore should be called once");
     assert(graphCalls.length >= 2, "graph append should be attempted for both candidates");
     assert(receivedRequests.length >= 3, "staged gate should call LLM at least 3 times (A+B, C, D)");
-    assert(receivedRequests.some(body => body.includes("write-gate.ab.v1.1.5")), "stage A+B prompt version missing");
-    assert(receivedRequests.some(body => body.includes("write-gate.c.v1.5.0")), "stage C prompt version missing");
+    assert(receivedRequests.some(body => body.includes("write-gate.ab.v1.1.6")), "stage A+B prompt version missing");
+    assert(receivedRequests.some(body => body.includes("write-gate.c.v1.5.1")), "stage C prompt version missing");
     assert(receivedRequests.some(body => body.includes("write-gate.d.v1.1.0")), "stage D prompt version missing");
 
     return {

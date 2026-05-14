@@ -43,6 +43,7 @@ interface GraphMemoryRecordLike {
   summary?: string;
   source_text_nav?: SourceTextNav;
   source_event_id?: string;
+  archive_event_id?: string;
   timestamp?: string;
   source_layer?: "archive_event" | "active_only";
   source_file?: string;
@@ -89,6 +90,35 @@ interface SupersededLike {
   conflict_id?: string;
 }
 
+interface ArchiveEventLike {
+  id?: string;
+  timestamp?: string;
+  event_type?: string;
+  summary?: string;
+  cause?: string;
+  process?: string;
+  result?: string;
+  outcome?: string;
+  source_text?: string;
+  session_id?: string;
+  source_file?: string;
+  confidence?: number;
+  source_event_id?: string;
+}
+
+interface ArchiveEventDetail {
+  archive_event_id: string;
+  archive_timestamp?: string;
+  archive_event_type?: string;
+  archive_summary?: string;
+  archive_cause?: string;
+  archive_process?: string;
+  archive_result?: string;
+  archive_outcome?: string;
+  archive_source_file?: string;
+  archive_confidence?: number;
+}
+
 interface RelationDetail {
   source_event_id?: string;
   source_layer?: "archive_event" | "active_only";
@@ -104,6 +134,16 @@ interface RelationDetail {
   context_chunk?: string;
   confidence?: number;
   conflict_id?: string;
+  archive_event_id?: string;
+  archive_timestamp?: string;
+  archive_event_type?: string;
+  archive_summary?: string;
+  archive_cause?: string;
+  archive_process?: string;
+  archive_result?: string;
+  archive_outcome?: string;
+  archive_source_file?: string;
+  archive_confidence?: number;
 }
 
 interface ProjectedRelation {
@@ -124,6 +164,16 @@ interface ProjectedRelation {
   confidence?: number;
   source_type?: string;
   target_type?: string;
+  archive_event_id?: string;
+  archive_timestamp?: string;
+  archive_event_type?: string;
+  archive_summary?: string;
+  archive_cause?: string;
+  archive_process?: string;
+  archive_result?: string;
+  archive_outcome?: string;
+  archive_source_file?: string;
+  archive_confidence?: number;
 }
 
 interface TimelineGroup {
@@ -199,6 +249,71 @@ function entityTypeLookup(types?: Record<string, string>): Map<string, string> {
     }
   }
   return output;
+}
+
+function normalizeOptionalText(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const text = value.trim().replace(/\s+/g, " ");
+  return text || undefined;
+}
+
+function buildArchiveEventLookup(memoryRoot: string): Map<string, ArchiveEventDetail> {
+  const archivePath = path.join(memoryRoot, "sessions", "archive", "sessions.jsonl");
+  const events = readJsonl<ArchiveEventLike>(archivePath);
+  const lookup = new Map<string, ArchiveEventDetail>();
+  for (const event of events) {
+    const id = normalizeOptionalText(event.id);
+    if (!id) continue;
+    const detail: ArchiveEventDetail = {
+      archive_event_id: id,
+      archive_timestamp: normalizeOptionalText(event.timestamp),
+      archive_event_type: normalizeOptionalText(event.event_type),
+      archive_summary: normalizeOptionalText(event.summary),
+      archive_cause: normalizeOptionalText(event.cause),
+      archive_process: normalizeOptionalText(event.process),
+      archive_result: normalizeOptionalText(event.result || event.outcome),
+      archive_outcome: normalizeOptionalText(event.outcome),
+      archive_source_file: normalizeOptionalText(event.source_file),
+      archive_confidence: typeof event.confidence === "number" ? event.confidence : undefined,
+    };
+    const keys = [
+      id,
+      normalizeOptionalText(event.source_event_id),
+    ].filter((item): item is string => !!item);
+    for (const key of keys) {
+      lookup.set(normalizeKey(key), detail);
+    }
+  }
+  return lookup;
+}
+
+function findArchiveEventDetail(
+  lookup: Map<string, ArchiveEventDetail>,
+  keys: Array<string | undefined>,
+): ArchiveEventDetail | undefined {
+  for (const key of keys) {
+    const normalized = normalizeKey(key);
+    if (!normalized) continue;
+    const hit = lookup.get(normalized);
+    if (hit) return hit;
+  }
+  return undefined;
+}
+
+function archiveEventFields(detail: ArchiveEventDetail | undefined): Partial<RelationDetail> {
+  if (!detail) return {};
+  return {
+    archive_event_id: detail.archive_event_id,
+    archive_timestamp: detail.archive_timestamp,
+    archive_event_type: detail.archive_event_type,
+    archive_summary: detail.archive_summary,
+    archive_cause: detail.archive_cause,
+    archive_process: detail.archive_process,
+    archive_result: detail.archive_result,
+    archive_outcome: detail.archive_outcome,
+    archive_source_file: detail.archive_source_file,
+    archive_confidence: detail.archive_confidence,
+  };
 }
 
 function sanitizeInline(value: string | undefined, fallback = "n/a"): string {
@@ -378,6 +493,7 @@ function buildProjectedRelations(args: {
   const records = readJsonl<GraphMemoryRecordLike>(path.join(args.memoryRoot, "graph", "memory.jsonl"));
   const conflicts = readJsonl<GraphConflictLike>(path.join(args.memoryRoot, "graph", "conflict_queue.jsonl"));
   const superseded = readJsonl<SupersededLike>(path.join(args.memoryRoot, "graph", "superseded_relations.jsonl"));
+  const archiveEvents = buildArchiveEventLookup(args.memoryRoot);
 
   const byEvent = new Map<string, RelationDetail>();
   const byRelation = new Map<string, RelationDetail>();
@@ -403,6 +519,14 @@ function buildProjectedRelations(args: {
     const sourceEventId = String(record.source_event_id || "").trim();
     const timestamp = toIso(record.timestamp, nowIso);
     const typeMap = entityTypeLookup(record.entity_types);
+    const archiveEvent = record.source_layer === "archive_event"
+      ? findArchiveEventDetail(archiveEvents, [
+        record.archive_event_id,
+        record.source_event_id,
+        record.source_text_nav?.source_memory_id,
+        record.source_text_nav?.source_event_id,
+      ])
+      : undefined;
     for (const rel of record.relations || []) {
       const source = String(rel.source || "").trim();
       const target = String(rel.target || "").trim();
@@ -423,6 +547,7 @@ function buildProjectedRelations(args: {
         evidence_span: typeof rel.evidence_span === "string" ? rel.evidence_span.trim() : undefined,
         context_chunk: typeof rel.context_chunk === "string" ? rel.context_chunk.trim() : undefined,
         confidence: typeof rel.confidence === "number" ? rel.confidence : undefined,
+        ...archiveEventFields(archiveEvent),
       };
       if (sourceEventId) {
         upsert(byEvent, relationEventKey(key, sourceEventId), detail);
@@ -438,6 +563,13 @@ function buildProjectedRelations(args: {
     conflictUpdatedAt.set(conflictId, updatedAt);
     const candidate = conflict.candidate || {};
     const typeMap = entityTypeLookup(candidate.entity_types);
+    const archiveEvent = conflict.source_layer === "archive_event"
+      ? findArchiveEventDetail(archiveEvents, [
+        conflict.source_event_id,
+        candidate.source_text_nav?.source_memory_id,
+        candidate.source_text_nav?.source_event_id,
+      ])
+      : undefined;
     for (const rel of candidate.relations || []) {
       const source = String(rel.source || "").trim();
       const target = String(rel.target || "").trim();
@@ -459,6 +591,7 @@ function buildProjectedRelations(args: {
         context_chunk: typeof rel.context_chunk === "string" ? rel.context_chunk.trim() : undefined,
         confidence: typeof rel.confidence === "number" ? rel.confidence : undefined,
         conflict_id: conflictId,
+        ...archiveEventFields(archiveEvent),
       });
     }
   }
@@ -521,6 +654,16 @@ function buildProjectedRelations(args: {
       confidence: typeof edge.confidence === "number" ? edge.confidence : detail?.confidence,
       source_type: detail?.source_type,
       target_type: detail?.target_type,
+      archive_event_id: detail?.archive_event_id,
+      archive_timestamp: detail?.archive_timestamp,
+      archive_event_type: detail?.archive_event_type,
+      archive_summary: detail?.archive_summary,
+      archive_cause: detail?.archive_cause,
+      archive_process: detail?.archive_process,
+      archive_result: detail?.archive_result,
+      archive_outcome: detail?.archive_outcome,
+      archive_source_file: detail?.archive_source_file,
+      archive_confidence: detail?.archive_confidence,
     });
   }
 
@@ -649,6 +792,157 @@ function renderRelationLine(args: {
   return `- ${source} --${typeLink}/${relation.status}--> ${target} (${attrs.join(", ")})`;
 }
 
+const RELATION_STATUS_ORDER: RelationStatus[] = ["active", "pending_conflict", "superseded", "rejected"];
+
+function relationStatusCounts(relations: ProjectedRelation[]): Record<RelationStatus, number> {
+  return {
+    active: relations.filter(item => item.status === "active").length,
+    pending_conflict: relations.filter(item => item.status === "pending_conflict").length,
+    superseded: relations.filter(item => item.status === "superseded").length,
+    rejected: relations.filter(item => item.status === "rejected").length,
+  };
+}
+
+function formatStatusCounts(relations: ProjectedRelation[]): string {
+  const counts = relationStatusCounts(relations);
+  return `active=${counts.active}, pending_conflict=${counts.pending_conflict}, superseded=${counts.superseded}, rejected=${counts.rejected}`;
+}
+
+function sortRecentDesc(relations: ProjectedRelation[]): ProjectedRelation[] {
+  return [...relations].sort((a, b) => Date.parse(b.timestamp) - Date.parse(a.timestamp));
+}
+
+function sortByConfidenceDesc(relations: ProjectedRelation[]): ProjectedRelation[] {
+  return [...relations].sort((a, b) => {
+    const bc = typeof b.confidence === "number" ? b.confidence : -1;
+    const ac = typeof a.confidence === "number" ? a.confidence : -1;
+    if (bc !== ac) return bc - ac;
+    return Date.parse(b.timestamp) - Date.parse(a.timestamp);
+  });
+}
+
+function latestRelation(relations: ProjectedRelation[]): ProjectedRelation | undefined {
+  return sortRecentDesc(relations)[0];
+}
+
+function relationPlain(relation: ProjectedRelation): string {
+  return `${sanitizeInline(relation.source)} --${sanitizeInline(relation.type)}/${relation.status}--> ${sanitizeInline(relation.target)}`;
+}
+
+function relationNarrative(relation: ProjectedRelation): string {
+  return sanitizeInline(relation.archive_result || relation.summary || relation.archive_summary || relation.context_chunk || relation.evidence_span);
+}
+
+function renderCurrentConclusionLines(args: {
+  relations: ProjectedRelation[];
+  page: WikiPageKind;
+  currentEntity?: string;
+  currentTopic?: string;
+}): string[] {
+  if (args.relations.length === 0) return ["- (none)"];
+  const latest = latestRelation(args.relations);
+  const active = sortByConfidenceDesc(args.relations.filter(item => item.status === "active")).slice(0, 3);
+  const pending = args.relations.filter(item => item.status === "pending_conflict");
+  const lines: string[] = [
+    `- Status counts: ${formatStatusCounts(args.relations)}${latest ? `; latest=${latest.timestamp}` : ""}`,
+  ];
+  if (active.length > 0) {
+    lines.push("- Current accepted facts:");
+    lines.push(...active.map(item => `  ${renderRelationLine({
+      relation: item,
+      page: args.page,
+      currentEntity: args.currentEntity,
+      currentTopic: args.currentTopic,
+    })}`));
+  } else if (latest) {
+    lines.push(`- No active fact yet. Latest recorded item: ${relationPlain(latest)}.`);
+  }
+  if (pending.length > 0) {
+    lines.push(`- Needs review: ${pending.length} pending conflict(s) should be resolved before treating them as current.`);
+  }
+  return lines;
+}
+
+function renderRecentChangeLines(relations: ProjectedRelation[], limit = 6): string[] {
+  const recent = sortRecentDesc(relations).slice(0, limit);
+  if (recent.length === 0) return ["- (none)"];
+  const lines: string[] = [];
+  for (const relation of recent) {
+    lines.push(`- ${relation.timestamp} | ${relationPlain(relation)} | ${relationNarrative(relation)}`);
+    if (relation.archive_event_type || relation.archive_event_id) {
+      lines.push(`  archive_event: ${sanitizeInline(relation.archive_event_type)} ${sanitizeInline(relation.archive_event_id)}`);
+    }
+  }
+  return lines;
+}
+
+function renderHighConfidenceLines(args: {
+  relations: ProjectedRelation[];
+  page: WikiPageKind;
+  currentEntity?: string;
+  currentTopic?: string;
+  limit?: number;
+}): string[] {
+  const candidates = sortByConfidenceDesc(
+    args.relations.filter(item => item.status === "active" && typeof item.confidence === "number" && item.confidence >= 0.75),
+  ).slice(0, args.limit || 6);
+  if (candidates.length === 0) return ["- (none)"];
+  return candidates.map(item => renderRelationLine({
+    relation: item,
+    page: args.page,
+    currentEntity: args.currentEntity,
+    currentTopic: args.currentTopic,
+  }));
+}
+
+function renderEvidenceExcerptLines(relations: ProjectedRelation[], limit = 8): string[] {
+  const candidates = sortByConfidenceDesc(relations)
+    .filter(item => item.evidence_span || item.context_chunk || item.archive_cause || item.archive_process || item.archive_result)
+    .slice(0, limit);
+  if (candidates.length === 0) return ["- (none)"];
+  const lines: string[] = [];
+  for (const relation of candidates) {
+    const fields = [
+      `confidence=${typeof relation.confidence === "number" ? relation.confidence : "n/a"}`,
+      `evidence=${sanitizeInline(relation.evidence_span)}`,
+      `context=${sanitizeInline(relation.context_chunk || relation.evidence_span)}`,
+      `source_event_id=${sanitizeInline(relation.source_event_id)}`,
+    ];
+    if (relation.archive_event_id) fields.push(`archive_event_id=${sanitizeInline(relation.archive_event_id)}`);
+    lines.push(`- ${relationPlain(relation)} | ${fields.join(" | ")}`);
+    const archiveBits = [
+      relation.archive_cause ? `cause=${sanitizeInline(relation.archive_cause)}` : "",
+      relation.archive_process ? `process=${sanitizeInline(relation.archive_process)}` : "",
+      relation.archive_result ? `result=${sanitizeInline(relation.archive_result)}` : "",
+    ].filter(Boolean);
+    if (archiveBits.length > 0) {
+      lines.push(`  archive_flow: ${archiveBits.join(" | ")}`);
+    }
+  }
+  return lines;
+}
+
+function renderStatusGroupLines(args: {
+  relations: ProjectedRelation[];
+  page: WikiPageKind;
+  currentEntity?: string;
+  currentTopic?: string;
+}): string[] {
+  if (args.relations.length === 0) return ["- (none)"];
+  const lines: string[] = [];
+  for (const status of RELATION_STATUS_ORDER) {
+    const items = sortByConfidenceDesc(args.relations.filter(item => item.status === status));
+    lines.push(`- ${status}: ${items.length}`);
+    lines.push(...items.slice(0, 4).map(item => `  ${renderRelationLine({
+      relation: item,
+      page: args.page,
+      currentEntity: args.currentEntity,
+      currentTopic: args.currentTopic,
+    })}`));
+  }
+  return lines;
+}
+
 function timelineLines(relations: ProjectedRelation[]): string[] {
   if (relations.length === 0) return ["- (none)"];
   const out: string[] = [];
@@ -660,7 +954,25 @@ function timelineLines(relations: ProjectedRelation[]): string[] {
     ].filter(Boolean).join(", ");
     out.push(`- ${relation.timestamp} | ${relation.status}`);
     out.push(`  evidence_ids: ${evidenceIds || "n/a"}`);
+    out.push(`  summary: ${relationNarrative(relation)}`);
+    if (relation.archive_cause) out.push(`  cause: ${sanitizeInline(relation.archive_cause)}`);
+    if (relation.archive_process) out.push(`  process: ${sanitizeInline(relation.archive_process)}`);
+    if (relation.archive_result) out.push(`  result: ${sanitizeInline(relation.archive_result)}`);
     out.push(`  context_chunk: ${sanitizeInline(relation.context_chunk || relation.evidence_span)}`);
+  }
+  return out;
+}
+
+function eventFlowLines(relations: ProjectedRelation[]): string[] {
+  if (relations.length === 0) return ["- (none)"];
+  const out: string[] = [];
+  for (const relation of [...relations].sort((a, b) => Date.parse(a.timestamp) - Date.parse(b.timestamp))) {
+    out.push(`- ${relation.timestamp} | ${relationPlain(relation)}`);
+    out.push(`  summary: ${relationNarrative(relation)}`);
+    if (relation.archive_cause) out.push(`  cause: ${sanitizeInline(relation.archive_cause)}`);
+    if (relation.archive_process) out.push(`  process: ${sanitizeInline(relation.archive_process)}`);
+    if (relation.archive_result) out.push(`  result: ${sanitizeInline(relation.archive_result)}`);
+    out.push(`  evidence: ${sanitizeInline(relation.evidence_span || relation.context_chunk)}`);
   }
   return out;
 }
@@ -831,13 +1143,26 @@ export function projectWikiKnowledge(args: ProjectWikiKnowledgeArgs): ProjectWik
     const body = [
       `# Entity: ${entity}`,
       "",
+      ...section("Current Conclusion", renderCurrentConclusionLines({
+        relations: value.relations,
+        page: "entity",
+        currentEntity: entity,
+      })),
       "## Summary",
       "",
-      `${entity} has ${value.relations.length} related facts in graph projection.`,
+      `${entity} has ${value.relations.length} related facts in graph projection (${formatStatusCounts(value.relations)}).`,
       "",
+      ...section("Recent Changes", renderRecentChangeLines(value.relations)),
+      ...section("High Confidence Facts", renderHighConfidenceLines({
+        relations: value.relations,
+        page: "entity",
+        currentEntity: entity,
+      })),
       ...section("Current Facts", active),
+      ...section("Open Conflicts", pending),
       ...section("Disputed Facts", pending),
       ...section("History", history),
+      ...section("Evidence Excerpts", renderEvidenceExcerptLines(value.relations)),
       ...section("Related Entities", relatedEntitiesSectionLines({
         relations: value.relations,
         page: "entity",
@@ -870,18 +1195,29 @@ export function projectWikiKnowledge(args: ProjectWikiKnowledgeArgs): ProjectWik
       "",
       "## Summary",
       "",
-      `${topic} has ${topicRelations.length} relations. Latest status is ${latestStatus(topicRelations)}.`,
+      `${topic} has ${topicRelations.length} relations (${formatStatusCounts(topicRelations)}). Latest status is ${latestStatus(topicRelations)}.`,
       "",
-      ...section("Timeline", timelineLines(topicRelations)),
       "## Latest Status",
       "",
       `- ${latestStatus(topicRelations)}`,
       "",
+      ...section("Current Conclusion", renderCurrentConclusionLines({
+        relations: topicRelations,
+        page: "topic",
+        currentTopic: topic,
+      })),
+      ...section("Status Groups", renderStatusGroupLines({
+        relations: topicRelations,
+        page: "topic",
+        currentTopic: topic,
+      })),
+      ...section("Timeline", timelineLines(topicRelations)),
       ...section("Relations", topicRelations.map(item => renderRelationLine({
         relation: item,
         page: "topic",
         currentTopic: topic,
       }))),
+      ...section("Evidence Excerpts", renderEvidenceExcerptLines(topicRelations)),
       ...section("Related Entities", relatedEntitiesSectionLines({
         relations: topicRelations,
         page: "topic",
@@ -920,17 +1256,23 @@ export function projectWikiKnowledge(args: ProjectWikiKnowledgeArgs): ProjectWik
       "",
       "## Summary",
       "",
-      `${group.source} ${group.relation_type} timeline has ${group.relations.length} entries. Latest status is ${latest}.`,
+      `${group.source} ${group.relation_type} timeline has ${group.relations.length} entries (${formatStatusCounts(group.relations)}). Latest status is ${latest}.`,
       "",
-      ...section("Timeline", timelineLines(group.relations)),
       "## Latest Status",
       "",
       `- ${latest}`,
       "",
+      ...section("Current Conclusion", renderCurrentConclusionLines({
+        relations: group.relations,
+        page: "timeline",
+      })),
+      ...section("Event Flow", eventFlowLines(group.relations)),
+      ...section("Timeline", timelineLines(group.relations)),
       ...section("Relations", group.relations.map(rel => renderRelationLine({
         relation: rel,
         page: "timeline",
       }))),
+      ...section("Evidence Excerpts", renderEvidenceExcerptLines(group.relations)),
       ...section("Related Entities", relatedEntitiesSectionLines({
         relations: group.relations,
         page: "timeline",
@@ -959,6 +1301,11 @@ export function projectWikiKnowledge(args: ProjectWikiKnowledgeArgs): ProjectWik
     "",
     `Generated at: ${new Date().toISOString()}`,
     "",
+    "## Quality Snapshot",
+    "",
+    `- Relations: ${relations.length} (${formatStatusCounts(relations)})`,
+    `- Pages: entities=${entityEntries.length}, topics=${topicEntries.length}, timelines=${timelineEntries.length}`,
+    "",
     "## Entities",
     "",
     ...(entityEntries.length > 0 ? entityEntries.map(item => `- [${item.name}](entities/${item.file})`) : ["- (none)"]),
@@ -977,6 +1324,13 @@ export function projectWikiKnowledge(args: ProjectWikiKnowledgeArgs): ProjectWik
   const projectionIndex = {
     updated_at: new Date().toISOString(),
     graph_updated_at: args.graphView.updated_at,
+    quality_summary: {
+      relations: relations.length,
+      status_counts: relationStatusCounts(relations),
+      entities: entityEntries.length,
+      topics: topicEntries.length,
+      timelines: timelineEntries.length,
+    },
     entities: entityEntries.map(item => ({ name: item.name, path: `entities/${item.file}` })),
     topics: topicEntries.map(item => ({ type: item.type, path: `topics/${item.file}` })),
     timelines: timelineEntries.map(item => ({

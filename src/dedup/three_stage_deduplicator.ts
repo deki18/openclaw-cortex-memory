@@ -39,11 +39,22 @@ interface DeduplicatorOptions {
 }
 
 function tokenize(text: string): string[] {
-  return text
+  const normalized = text
     .toLowerCase()
     .replace(/[^\p{L}\p{N}\s]/gu, " ")
     .split(/\s+/)
     .filter(Boolean);
+  const tokens = new Set<string>();
+  for (const token of normalized) {
+    tokens.add(token);
+    const cjkChars = [...token].filter(char => /[\u3400-\u9fff]/.test(char));
+    if (cjkChars.length > 1) {
+      for (let index = 0; index < cjkChars.length - 1; index += 1) {
+        tokens.add(`${cjkChars[index]}${cjkChars[index + 1]}`);
+      }
+    }
+  }
+  return [...tokens];
 }
 
 function buildShingles(tokens: string[], size: number): string[] {

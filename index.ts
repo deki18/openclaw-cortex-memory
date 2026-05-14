@@ -99,6 +99,7 @@ interface CortexMemoryConfig {
   };
   syncPolicy?: {
     includeLocalActiveInput?: boolean;
+    graphQualityMode?: "off" | "warn" | "strict";
   };
   memoryDecay?: {
     enabled?: boolean;
@@ -288,6 +289,7 @@ const defaultConfig: Partial<CortexMemoryConfig> = {
   },
   syncPolicy: {
     includeLocalActiveInput: false,
+    graphQualityMode: "strict",
   },
   memoryDecay: {
     enabled: true,
@@ -959,9 +961,12 @@ function validateConfig(cfg: CortexMemoryConfig): string[] {
       errors.push("writePolicy.archiveSourceTextMaxChars must be >= 1000.");
     }
   }
-  if (cfg.syncPolicy && cfg.syncPolicy.includeLocalActiveInput !== undefined) {
-    if (typeof cfg.syncPolicy.includeLocalActiveInput !== "boolean") {
+  if (cfg.syncPolicy) {
+    if (cfg.syncPolicy.includeLocalActiveInput !== undefined && typeof cfg.syncPolicy.includeLocalActiveInput !== "boolean") {
       errors.push("syncPolicy.includeLocalActiveInput must be boolean.");
+    }
+    if (cfg.syncPolicy.graphQualityMode !== undefined && !["off", "warn", "strict"].includes(cfg.syncPolicy.graphQualityMode)) {
+      errors.push("syncPolicy.graphQualityMode must be one of: off, warn, strict.");
     }
   }
   if (cfg.memoryDecay) {
@@ -1369,7 +1374,7 @@ function registerTools(): void {
     },
     {
       name: "lint_memory_wiki",
-      description: "Run wiki memory lint checks and return structured repair guidance",
+      description: "Run wiki memory lint checks for graph consistency, evidence coverage, page quality, and structured repair guidance",
       parameters: {
         type: "object",
         properties: {},
@@ -2145,6 +2150,7 @@ export function register(pluginApi: OpenClawPluginApi, userConfig?: Partial<Cort
     },
     syncPolicy: {
       includeLocalActiveInput: effectiveConfig.syncPolicy?.includeLocalActiveInput ?? defaultConfig.syncPolicy?.includeLocalActiveInput,
+      graphQualityMode: effectiveConfig.syncPolicy?.graphQualityMode ?? defaultConfig.syncPolicy?.graphQualityMode,
     },
     memoryDecay: {
       enabled: effectiveConfig.memoryDecay?.enabled ?? defaultConfig.memoryDecay?.enabled,

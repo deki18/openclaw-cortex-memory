@@ -2,17 +2,20 @@ import * as fs from "fs";
 import * as path from "path";
 import type { GraphViewData } from "../store/graph_memory_store";
 
+type LintIssueCategory =
+  | "pending_conflicts"
+  | "projection_lag"
+  | "orphan_pages"
+  | "stale_claims"
+  | "missing_pages"
+  | "evidence_gaps"
+  | "projection_consistency"
+  | "markdown_structure"
+  | "knowledge_quality";
+
 interface LintIssue {
   id: string;
-  category:
-    | "pending_conflicts"
-    | "projection_lag"
-    | "orphan_pages"
-    | "stale_claims"
-    | "missing_pages"
-    | "evidence_gaps"
-    | "projection_consistency"
-    | "markdown_structure";
+  category: LintIssueCategory;
   severity: "info" | "warn" | "error";
   summary: string;
   next_action: string;
@@ -30,16 +33,7 @@ interface LintMemoryWikiResult {
     total_issues: number;
     by_category: Record<string, number>;
   };
-  categories: Array<
-    "pending_conflicts"
-    | "projection_lag"
-    | "orphan_pages"
-    | "stale_claims"
-    | "missing_pages"
-    | "evidence_gaps"
-    | "projection_consistency"
-    | "markdown_structure"
-  >;
+  categories: LintIssueCategory[];
   issues: LintIssue[];
 }
 
@@ -88,19 +82,35 @@ function hasRequiredTimelineSections(markdown: string): boolean {
     && markdown.includes("## Latest Status");
 }
 
+function missingRequiredSections(markdown: string, sections: string[]): string[] {
+  return sections.filter(section => !markdown.includes(section));
+}
+
+function extractSection(markdown: string, title: string): string {
+  const marker = `## ${title}`;
+  const start = markdown.indexOf(marker);
+  if (start < 0) return "";
+  const rest = markdown.slice(start + marker.length);
+  const next = rest.search(/\n##\s+/);
+  return (next >= 0 ? rest.slice(0, next) : rest).trim();
+}
+
+function sectionHasUsefulContent(markdown: string, title: string): boolean {
+  const body = extractSection(markdown, title);
+  if (!body) return false;
+  return !/^\s*- \(none\)\s*$/m.test(body) || body.split(/\r?\n/).filter(line => line.trim()).length > 1;
+}
+
+function hasLegacyGenericSummary(markdown: string): boolean {
+  return /has \d+ related facts in graph projection\.\s*$/m.test(markdown)
+    || /has \d+ relations\. Latest status is [a-z_]+\.\s*$/m.test(markdown)
+    || /timeline has \d+ entries\. Latest status is [a-z_]+\.\s*$/m.test(markdown);
+}
+
 export function lintMemoryWiki(args: LintMemoryWikiArgs): LintMemoryWikiResult {
   const now = new Date().toISOString();
   const issues: LintIssue[] = [];
-  const categories: Array<
-    "pending_conflicts"
-    | "projection_lag"
-    | "orphan_pages"
-    | "stale_claims"
-    | "missing_pages"
-    | "evidence_gaps"
-    | "projection_consistency"
-    | "markdown_structure"
-  > = [
+  const categories: LintIssueCategory[] = [
     "pending_conflicts",
     "projection_lag",
     "orphan_pages",
@@ -109,6 +119,7 @@ export function lintMemoryWiki(args: LintMemoryWikiArgs): LintMemoryWikiResult {
     "evidence_gaps",
     "projection_consistency",
     "markdown_structure",
+    "knowledge_quality",
   ];
 
   const conflictPath = path.join(args.memoryRoot, "graph", "conflict_queue.jsonl");
@@ -203,6 +214,54 @@ export function lintMemoryWiki(args: LintMemoryWikiArgs): LintMemoryWikiResult {
         error_code: "wiki_markdown_check_failed",
         missing: structuralMissing,
         invalid_sections: sectionMissing,
+      },
+    });
+  }
+
+  const knowledgeQualityProblems: string[] = [];
+  const collectQualityProblems = (dirPath: string, fileNames: string[], requiredSections: string[], kind: string): void => {
+    for (const file of fileNames) {
+      const filePath = path.join(dirPath, file);
+      const markdown = fs.readFileSync(filePath, "utf-8");
+      const relPath = path.relative(wikiRoot, filePath).replace(/\\/g, "/");
+      const missing = missingRequiredSections(markdown, requiredSections);
+      if (missing.length > 0) {
+        knowledgeQualityProblems.push(`${relPath}:missing_sections=${missing.map(item => item.replace(/^##\s*/, "")).join(",")}`);
+      }
+      if (hasLegacyGenericSummary(markdown)) {
+        knowledgeQualityProblems.push(`${relPath}:legacy_generic_summary`);
+      }
+      if ((kind === "entity" || kind === "topic" || kind === "timeline") && !sectionHasUsefulContent(markdown, "Evidence Excerpts")) {
+        knowledgeQualityProblems.push(`${relPath}:empty_evidence_excerpts`);
+      }
+    }
+  };
+  collectQualityProblems(entitiesDir, entityFiles, [
+    "## Current Conclusion",
+    "## Recent Changes",
+    "## High Confidence Facts",
+    "## Evidence Excerpts",
+  ], "entity");
+  collectQualityProblems(topicsDir, topicFiles, [
+    "## Current Conclusion",
+    "## Status Groups",
+    "## Evidence Excerpts",
+  ], "topic");
+  collectQualityProblems(timelinesDir, timelineFiles, [
+    "## Current Conclusion",
+    "## Event Flow",
+    "## Evidence Excerpts",
+  ], "timeline");
+  if (knowledgeQualityProblems.length > 0) {
+    issues.push({
+      id: "lint_wiki_knowledge_quality",
+      category: "knowledge_quality",
+      severity: "warn",
+      summary: `${knowledgeQualityProblems.length} wiki page quality checks failed.`,
+      next_action: "Regenerate wiki projection so pages include conclusions, recent changes, status groups, event flow, and evidence excerpts.",
+      metadata: {
+        error_code: "wiki_knowledge_quality_check_failed",
+        problems: knowledgeQualityProblems.slice(0, 50),
       },
     });
   }
