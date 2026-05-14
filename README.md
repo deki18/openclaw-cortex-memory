@@ -183,14 +183,15 @@ openclaw plugins uninstall openclaw-cortex-memory --keep-data
           "autoSync": true,
           "autoReflect": false,
           "graphQualityMode": "warn",
-          "syncPolicy": {
-            "includeLocalActiveInput": false,
-            "graphQualityMode": "strict"
-          },
-          "wikiProjection": {
+          "readFusion": {
             "enabled": true,
-            "mode": "incremental",
-            "maxBatch": 100
+            "authoritative": true
+          },
+          "memoryDecay": {
+            "enabled": true,
+            "antiDecay": {
+              "enabled": true
+            }
           },
           "embedding": {
             "provider": "api",
