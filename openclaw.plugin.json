@@ -1,7 +1,7 @@
 {
   "id": "openclaw-cortex-memory",
   "name": "Cortex Memory",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Long-term memory system with semantic, episodic, and procedural memory for AI Agents",
   "main": "dist/index.js",
   "author": "deki18",
@@ -17,6 +17,26 @@
     "cli": true,
     "channels": false,
     "memory": true
+  },
+  "contracts": {
+    "tools": [
+      "search_memory",
+      "store_event",
+      "query_graph",
+      "export_graph_view",
+      "lint_memory_wiki",
+      "list_graph_conflicts",
+      "resolve_graph_conflict",
+      "get_hot_context",
+      "get_auto_context",
+      "reflect_memory",
+      "sync_memory",
+      "backfill_embeddings",
+      "delete_memory",
+      "cortex_diagnostics",
+      "diagnostics",
+      "cortex_memory_status"
+    ]
   },
   "runtimeRequirements": {
     "requiresCredentials": true,
