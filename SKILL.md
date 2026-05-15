@@ -49,7 +49,7 @@ metadata:
 
 | 工具 | 关键参数 |
 |------|------|
-| `search_memory` | `query`, `top_k` |
+| `search_memory` | `query`, `top_k`, `fusion_mode`, `track_hits` |
 | `store_event` | `summary`, `entities`, `entity_types`, `outcome`, `relations` |
 | `query_graph` | `entity`, `rel`, `dir`, `path_to`, `max_depth` |
 | `export_graph_view` | `write_snapshot` |
@@ -72,6 +72,7 @@ metadata:
 4. 需要图谱状态快照或排查投影不一致时，调 `export_graph_view` 与 `lint_memory_wiki`。
 5. 会话收尾或批量导入后再调 `sync_memory` / `reflect_memory`。
 6. 诊断发现向量缺失时调 `backfill_embeddings`。
+7. 调试检索时可用 `fusion_mode: "candidates"` 保留候选明细；评测或诊断时可用 `track_hits: false` 避免更新 anti-decay 命中统计。
 
 ## 配置策略
 
@@ -89,5 +90,7 @@ metadata:
 - `backfill_embeddings` 已实现且已注册。
 - `query_graph` 支持参数：`entity`、`rel`、`dir`、`path_to`、`max_depth`。
 - `query_graph` 会返回 `wiki_refs`、`evidence_ids`，冲突时返回 `conflict_hint`。
+- `search_memory` 兼容返回 `vector_semantic_results` / `vector_keyword_results`，并额外返回 `channel_results`，其中 `keyword` 是跨 archive/rules/graph/vector 的全局关键词通道。
+- Wiki 是图谱关系的投影页，不是第二套记忆库；`search_memory` 命中图谱事实时可返回 `wiki_ref` / `wiki_refs` 展示链接，但事实读取以 graph 存储为准。
 - 图谱治理工具：`export_graph_view`、`lint_memory_wiki`、`list_graph_conflicts`、`resolve_graph_conflict`。
 - Wiki 投影页应包含结论、近期变化、状态分组/事件流和证据摘录；`lint_memory_wiki` 会检查缺失结构与旧式泛化 Summary。

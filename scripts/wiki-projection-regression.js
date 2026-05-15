@@ -47,8 +47,11 @@ function appendArchiveEvent(memoryRoot, event) {
 async function main() {
   const root = process.cwd();
   const storePath = path.join(root, "dist", "src", "store", "graph_memory_store.js");
+  const readStorePath = path.join(root, "dist", "src", "store", "read_store.js");
   assert(fs.existsSync(storePath), "dist/src/store/graph_memory_store.js not found. Run npm run build first.");
+  assert(fs.existsSync(readStorePath), "dist/src/store/read_store.js not found. Run npm run build first.");
   const { createGraphMemoryStore } = require(storePath);
+  const { createReadStore } = require(readStorePath);
 
   const tmpRoot = path.join(root, "tmp", `m4-wiki-projection-memory-${Date.now().toString(36)}`);
   ensureDir(tmpRoot);
@@ -250,6 +253,32 @@ async function main() {
   assert(projectionIndex.quality_summary && projectionIndex.quality_summary.relations >= 3, "projection index should include quality summary");
   assert(queueText.trim().length === 0, "rebuild queue should be drained after maintenance");
 
+  const readStore = createReadStore({
+    projectRoot: root,
+    dbPath: tmpRoot,
+    logger,
+  });
+  const searchResult = await readStore.searchMemory({
+    query: "Wife birthday_on 08-13",
+    topK: 10,
+    mode: "lightweight",
+    fusionMode: "off",
+    trackHits: false,
+  });
+  const searchRows = Array.isArray(searchResult.results) ? searchResult.results : [];
+  assert(!searchRows.some(row => row && row.source === "sessions_graph_wiki"), "search should not return wiki markdown projection docs");
+  const graphHit = searchRows.find(row =>
+    row &&
+    row.source === "sessions_graph" &&
+    typeof row.text === "string" &&
+    row.text.includes("08-13")
+  );
+  assert(graphHit, "search should hit graph relation doc for active birthday fact");
+  assert(Array.isArray(graphHit.wiki_refs) && graphHit.wiki_refs.length > 0, "graph search hit should include wiki_refs display links");
+  assert(graphHit.wiki_refs.some(ref => ref === "wiki/entities/wife.md" || ref === "wiki/topics/birthday_on.md"), "graph search hit should link projected wiki pages");
+  assert(Array.isArray(graphHit.evidence_ids) && graphHit.evidence_ids.some(id => String(id).startsWith("graph:relation:")), "graph search hit should include graph relation evidence");
+  assert(graphHit.evidence_ids.some(id => String(id).startsWith("wiki:")), "graph search hit should include wiki display evidence ids");
+
   const evidenceDir = path.join(root, "docs", "progress-evidence");
   ensureDir(evidenceDir);
   const evidencePath = path.join(evidenceDir, "M4-projection-regression-2026-05-14.json");
@@ -264,6 +293,7 @@ async function main() {
       timeline_markdown_generated: true,
       rich_wiki_sections_generated: true,
       archive_flow_projected_to_wiki: true,
+      search_hits_graph_doc_with_wiki_refs: true,
     },
     files: {
       log: logPath,

@@ -8,10 +8,42 @@ interface LoggerLike {
   warn: (message: string, ...args: unknown[]) => void;
 }
 
+const EXTERNAL_MODEL_TIMEOUT_MS = 20000;
+
+export type ReadStoreFusionMode = "auto" | "authoritative" | "candidates" | "off";
+
+export interface ReadStoreSearchTiming {
+  load_docs_ms?: number;
+  load_hit_stats_ms?: number;
+  query_planning_ms?: number;
+  embedding_ms?: number;
+  lance_vector_ms?: number;
+  vector_index_ms?: number;
+  archive_link_ms?: number;
+  ranking_ms?: number;
+  rerank_ms?: number;
+  fusion_ms?: number;
+  hit_stats_update_ms?: number;
+  total_ms?: number;
+}
+
+export interface ReadStoreChannelResults {
+  vector_semantic: unknown[];
+  vector_keyword: unknown[];
+  keyword: unknown[];
+  semantic: unknown[];
+  archive: unknown[];
+  graph: unknown[];
+  rules: unknown[];
+  vector: unknown[];
+}
+
 export interface ReadStoreSearchArgs {
   query: string;
   topK: number;
-  mode?: "default" | "lightweight";
+  mode?: "default" | "lightweight" | "auto";
+  fusionMode?: ReadStoreFusionMode;
+  trackHits?: boolean;
 }
 
 export interface ReadStoreHotArgs {
@@ -21,6 +53,7 @@ export interface ReadStoreHotArgs {
 export interface ReadStoreAutoArgs {
   includeHot: boolean;
   sessionId: string;
+  recentMessages?: Array<{ role?: string; text?: string; content?: string; timestamp?: string }>;
   cachedAutoSearch?: {
     query: string;
     results: unknown[];
@@ -42,6 +75,7 @@ interface ReadDocument {
   sourceMemoryId?: string;
   sourceMemoryCanonicalId?: string;
   embedding?: number[];
+  embeddingNorm?: number;
   eventType?: string;
   qualityScore?: number;
   charCount?: number;
@@ -64,6 +98,7 @@ interface ReadDocument {
   }>;
   factStatus?: "active" | "pending_conflict" | "superseded" | "rejected";
   wikiRef?: string;
+  wikiRefs?: string[];
   wikiAnchor?: string;
   evidenceIds?: string[];
 }
@@ -310,7 +345,7 @@ const DEFAULT_READ_TUNING: ResolvedReadTuning = {
     ],
   },
   autoContext: {
-    queryMaxChars: 80,
+    queryMaxChars: 240,
     lightweightSearch: true,
   },
 };
@@ -373,10 +408,20 @@ export interface ReadStore {
     semantic_results: unknown[];
     keyword_results: unknown[];
     strategy: string;
+    timing_ms: ReadStoreSearchTiming;
+    channel_results: ReadStoreChannelResults;
+    debug: {
+      mode: "default" | "lightweight" | "auto";
+      fusion_mode: ReadStoreFusionMode;
+      track_hits: boolean;
+      planned_queries: string[];
+      fulltext_fallback_used: boolean;
+      vector_source: "lancedb" | "jsonl_index" | "none";
+    };
   }>;
   getHotContext(args: ReadStoreHotArgs): Promise<{ context: unknown[] }>;
   getAutoContext(args: ReadStoreAutoArgs): Promise<{
-    auto_search?: { query: string; results: unknown[]; age_seconds: number };
+    auto_search?: { query: string; results: unknown[]; age_seconds: number; timing_ms?: ReadStoreSearchTiming; debug?: unknown };
     hot_context?: unknown[];
   }>;
 }
@@ -402,21 +447,42 @@ function scoreText(query: string, text: string): number {
   if (t.includes(q)) {
     score += 5;
   }
-  const tokens = q.split(/\s+/).filter(Boolean);
+  const tokens = [...new Set(tokenize(q))];
   for (const token of tokens) {
     if (t.includes(token)) {
-      score += 1;
+      score += /[\u4e00-\u9fa5]/.test(token) && token.length <= 4 ? 0.65 : 1;
     }
   }
   return score;
 }
 
+function buildCjkNgrams(token: string): string[] {
+  if (!/[\u4e00-\u9fa5]/.test(token)) {
+    return [];
+  }
+  const chars = [...token];
+  const grams: string[] = [];
+  for (const size of [2, 3, 4]) {
+    if (chars.length < size) continue;
+    for (let index = 0; index <= chars.length - size; index += 1) {
+      grams.push(chars.slice(index, index + size).join(""));
+    }
+  }
+  return grams;
+}
+
 function tokenize(text: string): string[] {
-  return text
+  const rawTokens = text
     .toLowerCase()
     .split(/[^a-z0-9\u4e00-\u9fa5]+/i)
     .map(token => token.trim())
     .filter(Boolean);
+  const tokens: string[] = [];
+  for (const token of rawTokens) {
+    tokens.push(token);
+    tokens.push(...buildCjkNgrams(token));
+  }
+  return tokens;
 }
 
 function buildBm25Stats(
@@ -436,7 +502,8 @@ function buildBm25Stats(
       continue;
     }
     const termSet = new Set(tokens);
-    for (const term of queryTerms) {
+    const queryTermSet = new Set(queryTerms);
+    for (const term of queryTermSet) {
       if (termSet.has(term)) {
         docFreq.set(term, (docFreq.get(term) || 0) + 1);
       }
@@ -465,7 +532,7 @@ function bm25Score(args: {
   const k1 = 1.2;
   const b = 0.75;
   let score = 0;
-  for (const term of args.queryTerms) {
+  for (const term of uniqueStrings(args.queryTerms)) {
     const tf = termFreq.get(term) || 0;
     if (tf <= 0) continue;
     const df = args.docFreq.get(term) || 0;
@@ -622,6 +689,74 @@ function uniqueStrings(values: string[]): string[] {
   return output;
 }
 
+interface WikiProjectionRefIndex {
+  entityByName: Map<string, string>;
+  topicByType: Map<string, string>;
+}
+
+function normalizeWikiDisplayRef(value: string): string {
+  const normalized = (value || "").trim().replace(/\\/g, "/").replace(/^\/+/, "");
+  if (!normalized) return "";
+  return normalized.startsWith("wiki/") ? normalized : `wiki/${normalized}`;
+}
+
+function normalizeWikiEvidenceRef(value: string): string {
+  return normalizeWikiDisplayRef(value).replace(/^wiki\//, "");
+}
+
+function readWikiProjectionRefIndex(projectionIndexPath: string, logger: LoggerLike): WikiProjectionRefIndex {
+  const index: WikiProjectionRefIndex = {
+    entityByName: new Map<string, string>(),
+    topicByType: new Map<string, string>(),
+  };
+  const content = safeReadFile(projectionIndexPath).trim();
+  if (!content) {
+    return index;
+  }
+  try {
+    const parsed = JSON.parse(content) as Record<string, unknown>;
+    const entities = Array.isArray(parsed.entities) ? parsed.entities : [];
+    const topics = Array.isArray(parsed.topics) ? parsed.topics : [];
+    for (const item of entities) {
+      if (!item || typeof item !== "object") continue;
+      const row = item as Record<string, unknown>;
+      const name = typeof row.name === "string" ? row.name.trim() : "";
+      const wikiPath = typeof row.path === "string" ? normalizeWikiDisplayRef(row.path) : "";
+      if (!name || !wikiPath) continue;
+      index.entityByName.set(name.toLowerCase(), wikiPath);
+    }
+    for (const item of topics) {
+      if (!item || typeof item !== "object") continue;
+      const row = item as Record<string, unknown>;
+      const type = typeof row.type === "string" ? row.type.trim() : "";
+      const wikiPath = typeof row.path === "string" ? normalizeWikiDisplayRef(row.path) : "";
+      if (!type || !wikiPath) continue;
+      index.topicByType.set(type.toLowerCase(), wikiPath);
+    }
+  } catch (error) {
+    logger.debug(`Skipping invalid wiki projection index ${projectionIndexPath}: ${error}`);
+  }
+  return index;
+}
+
+function wikiRefsForGraphRelation(
+  index: WikiProjectionRefIndex,
+  relation: { source: string; target: string; type: string },
+): string[] {
+  return uniqueStrings([
+    index.entityByName.get(relation.source.trim().toLowerCase()) || "",
+    index.entityByName.get(relation.target.trim().toLowerCase()) || "",
+    index.topicByType.get(relation.type.trim().toLowerCase()) || "",
+  ]);
+}
+
+function docWikiRefs(doc: ReadDocument): string[] {
+  return uniqueStrings([
+    ...(Array.isArray(doc.wikiRefs) ? doc.wikiRefs : []),
+    doc.wikiRef || "",
+  ]);
+}
+
 function buildGraphEvidenceIds(args: {
   source: string;
   target: string;
@@ -629,6 +764,7 @@ function buildGraphEvidenceIds(args: {
   sourceEventId?: string;
   evidenceSpan?: string;
   wikiRef?: string;
+  wikiRefs?: string[];
   wikiAnchor?: string;
 }): string[] {
   const relationKey = graphRelationKey({
@@ -636,184 +772,22 @@ function buildGraphEvidenceIds(args: {
     target: args.target,
     type: args.type,
   });
+  const wikiRefs = uniqueStrings([
+    ...(Array.isArray(args.wikiRefs) ? args.wikiRefs : []),
+    args.wikiRef || "",
+  ]);
   const evidenceIds = [
     relationKey ? `graph:relation:${relationKey}` : "",
     args.sourceEventId ? `graph:event:${args.sourceEventId}` : "",
     args.evidenceSpan
       ? `graph:evidence:${args.sourceEventId || relationKey}`
       : "",
-    args.wikiRef
-      ? `wiki:${args.wikiRef}${args.wikiAnchor ? `#${args.wikiAnchor}` : ""}`
-      : "",
+    ...wikiRefs.map(ref => {
+      const wikiRef = normalizeWikiEvidenceRef(ref);
+      return wikiRef ? `wiki:${wikiRef}${args.wikiAnchor ? `#${args.wikiAnchor}` : ""}` : "";
+    }),
   ];
   return uniqueStrings(evidenceIds);
-}
-
-function toMemoryRelativePath(memoryRoot: string, filePath: string): string {
-  return path.relative(memoryRoot, filePath).replace(/\\/g, "/");
-}
-
-function toAnchorToken(value: string): string {
-  const token = (value || "")
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9\u4e00-\u9fa5]+/gi, "-")
-    .replace(/^-+|-+$/g, "");
-  return token || "facts";
-}
-
-function parseWikiRelationLine(line: string): {
-  relation: {
-    source: string;
-    target: string;
-    type: string;
-    evidence_span?: string;
-    confidence?: number;
-    fact_status?: "active" | "pending_conflict" | "superseded" | "rejected";
-    source_event_id?: string;
-    conflict_id?: string;
-    relation_key?: string;
-  };
-} | null {
-  const text = line.trim();
-  if (!text.startsWith("- ")) return null;
-  if (text === "- (none)") return null;
-  const body = text
-    .replace(/^-+\s*/, "")
-    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, "$1");
-  const matched = body.match(/^(.+?)\s+--([^\/]+)\/([^-\s]+)-->\s+(.+?)\s*(?:\((.*)\))?$/);
-  if (!matched) {
-    return null;
-  }
-  const source = matched[1].trim();
-  const type = matched[2].trim();
-  const status = normalizeFactStatus(matched[3]);
-  const target = matched[4].trim();
-  const attrs = (matched[5] || "").trim();
-  if (!source || !target || !type) {
-    return null;
-  }
-  const attributeMap = new Map<string, string>();
-  if (attrs) {
-    const parts = attrs.split(",").map(item => item.trim()).filter(Boolean);
-    for (const part of parts) {
-      const eq = part.indexOf("=");
-      if (eq <= 0) continue;
-      const key = part.slice(0, eq).trim().toLowerCase();
-      const value = part.slice(eq + 1).trim();
-      if (!key) continue;
-      attributeMap.set(key, value);
-    }
-  }
-  const evidenceSpanRaw = attributeMap.get("evidence") || "";
-  const confidenceRaw = attributeMap.get("confidence") || "";
-  const sourceEventIdRaw = attributeMap.get("source_event_id") || "";
-  const conflictIdRaw = attributeMap.get("conflict_id") || "";
-  const confidenceNum = confidenceRaw ? Number(confidenceRaw) : NaN;
-  const relationKey = graphRelationKey({ source, target, type });
-  return {
-    relation: {
-      source,
-      target,
-      type,
-      evidence_span: evidenceSpanRaw && evidenceSpanRaw.toLowerCase() !== "n/a" ? evidenceSpanRaw : undefined,
-      confidence: Number.isFinite(confidenceNum) ? confidenceNum : undefined,
-      fact_status: status || undefined,
-      source_event_id: sourceEventIdRaw && sourceEventIdRaw.toLowerCase() !== "n/a" ? sourceEventIdRaw : undefined,
-      conflict_id: conflictIdRaw && conflictIdRaw.toLowerCase() !== "n/a" ? conflictIdRaw : undefined,
-      relation_key: relationKey,
-    },
-  };
-}
-
-function parseWikiProjectionDocuments(memoryRoot: string, logger: LoggerLike): ReadDocument[] {
-  const wikiRoot = path.join(memoryRoot, "wiki");
-  const folders: Array<{ dir: string; kind: "entity" | "topic" | "timeline" }> = [
-    { dir: path.join(wikiRoot, "entities"), kind: "entity" },
-    { dir: path.join(wikiRoot, "topics"), kind: "topic" },
-    { dir: path.join(wikiRoot, "timelines"), kind: "timeline" },
-  ];
-  const docs: ReadDocument[] = [];
-  for (const { dir, kind } of folders) {
-    if (!fs.existsSync(dir)) continue;
-    let files: string[] = [];
-    try {
-      files = fs.readdirSync(dir)
-        .filter(file => file.toLowerCase().endsWith(".md"))
-        .sort((a, b) => a.localeCompare(b));
-    } catch (error) {
-      logger.debug(`Skipping wiki projection directory ${dir}: ${error}`);
-      continue;
-    }
-    for (const file of files) {
-      const filePath = path.join(dir, file);
-      const markdown = safeReadFile(filePath);
-      if (!markdown.trim()) continue;
-      const relativePath = toMemoryRelativePath(memoryRoot, filePath);
-      const mtime = (() => {
-        try {
-          return fs.statSync(filePath).mtimeMs;
-        } catch {
-          return NaN;
-        }
-      })();
-      let section = "Facts";
-      const sectionCounters = new Map<string, number>();
-      const lines = markdown.split(/\r?\n/);
-      for (const rawLine of lines) {
-        const line = rawLine.trim();
-        if (!line) continue;
-        if (line.startsWith("## ")) {
-          section = line.replace(/^##\s+/, "").trim() || "Facts";
-          continue;
-        }
-        const parsed = parseWikiRelationLine(line);
-        if (!parsed) continue;
-        const sectionToken = toAnchorToken(section);
-        const index = (sectionCounters.get(sectionToken) || 0) + 1;
-        sectionCounters.set(sectionToken, index);
-        const anchor = `${sectionToken}-${index}`;
-        const relation = parsed.relation;
-        const factStatus = relation.fact_status || "active";
-        const evidenceIds = buildGraphEvidenceIds({
-          source: relation.source,
-          target: relation.target,
-          type: relation.type,
-          sourceEventId: relation.source_event_id,
-          evidenceSpan: relation.evidence_span,
-          wikiRef: relativePath,
-          wikiAnchor: anchor,
-        });
-        docs.push({
-          id: `wiki:${relativePath}#${anchor}`,
-          text: [
-            `# Wiki Projection`,
-            `wiki_kind: ${kind}`,
-            `wiki_path: ${relativePath}`,
-            `wiki_section: ${section}`,
-            `fact_status: ${factStatus}`,
-            `${relation.source} ${relation.type} ${relation.target}`,
-            line,
-          ].join("\n"),
-          source: "sessions_graph_wiki",
-          timestamp: Number.isFinite(mtime) ? Math.floor(mtime) : undefined,
-          layer: "archive",
-          sourceFile: relativePath,
-          sourceMemoryId: relation.relation_key || `wiki:${relativePath}`,
-          sourceEventId: relation.source_event_id,
-          eventType: "graph_wiki_projection",
-          qualityScore: 0.95,
-          entities: uniqueStrings([relation.source, relation.target]),
-          relations: [relation],
-          factStatus,
-          wikiRef: relativePath,
-          wikiAnchor: anchor,
-          evidenceIds,
-        });
-      }
-    }
-  }
-  return docs;
 }
 
 function extractPrioritizedRuleLines(text: string, maxRules: number): string[] {
@@ -1007,6 +981,7 @@ interface RankedResultRow {
   event_type: string;
   fact_status: "active" | "pending_conflict" | "superseded" | "rejected" | string;
   wiki_ref: string;
+  wiki_refs: string[];
   quality_score: number;
   timestamp: string;
   evidence_ids: string[];
@@ -1016,6 +991,19 @@ interface RankedResultRow {
   matched_keywords: string[];
   query_plan_keywords?: string[];
   fulltext_fallback_used?: boolean;
+}
+
+function emptyChannelResults(): ReadStoreChannelResults {
+  return {
+    vector_semantic: [],
+    vector_keyword: [],
+    keyword: [],
+    semantic: [],
+    archive: [],
+    graph: [],
+    rules: [],
+    vector: [],
+  };
 }
 
 interface FusionOutput {
@@ -1044,6 +1032,13 @@ interface HitStatState {
   items: Record<string, HitStatItem>;
 }
 
+interface VectorFallbackIndex {
+  signature: string;
+  docs: ReadDocument[];
+  vectorEntries: Array<{ doc: ReadDocument; embedding: number[]; norm: number }>;
+  bySourceMemoryId: Map<string, ReadDocument[]>;
+}
+
 const READ_FUSION_PROMPT_VERSION = "read-fusion.v1.2.0";
 const READ_FUSION_REGRESSION_SAMPLES = [
   "Example A: if archive and vector refer to the same source_memory_id, keep one main conclusion and keep the rest as supporting evidence.",
@@ -1051,25 +1046,30 @@ const READ_FUSION_REGRESSION_SAMPLES = [
   "Example C: if summary/excerpt is insufficient, return event ids in need_fulltext_event_ids for full-text lookup.",
 ];
 
+function vectorNorm(values: number[]): number {
+  let sum = 0;
+  for (const value of values) {
+    sum += value * value;
+  }
+  return Math.sqrt(sum);
+}
+
 function cosineSimilarity(left: number[], right: number[]): number {
-  if (left.length === 0 || right.length === 0) {
+  return cosineSimilarityWithNorm(left, right, vectorNorm(left), vectorNorm(right));
+}
+
+function cosineSimilarityWithNorm(left: number[], right: number[], leftNorm: number, rightNorm: number): number {
+  if (left.length === 0 || right.length === 0 || leftNorm === 0 || rightNorm === 0) {
     return 0;
   }
   const size = Math.min(left.length, right.length);
   let dot = 0;
-  let leftNorm = 0;
-  let rightNorm = 0;
   for (let i = 0; i < size; i += 1) {
     const a = left[i];
     const b = right[i];
     dot += a * b;
-    leftNorm += a * a;
-    rightNorm += b * b;
   }
-  if (leftNorm === 0 || rightNorm === 0) {
-    return 0;
-  }
-  return dot / (Math.sqrt(leftNorm) * Math.sqrt(rightNorm));
+  return dot / (leftNorm * rightNorm);
 }
 
 async function requestEmbedding(args: {
@@ -1093,7 +1093,7 @@ async function requestEmbedding(args: {
       endpoint,
       apiKey: args.apiKey,
       body,
-      timeoutMs: 10000,
+      timeoutMs: EXTERNAL_MODEL_TIMEOUT_MS,
     });
     if (!response.ok) {
       lastError = new Error(response.status > 0 ? `embedding_http_${response.status}` : (response.error || "embedding_network_error"));
@@ -1137,7 +1137,7 @@ async function requestRerank(args: {
       endpoint,
       apiKey: args.apiKey,
       body,
-      timeoutMs: 12000,
+      timeoutMs: EXTERNAL_MODEL_TIMEOUT_MS,
     });
     if (!response.ok) {
       lastError = new Error(response.status > 0 ? `rerank_http_${response.status}` : (response.error || "rerank_network_error"));
@@ -1292,24 +1292,50 @@ function planQueryKeywords(query: string): string[] {
 }
 
 function shouldTriggerFulltextFallback(
-  ranked: Array<{ score: number; reason_tags?: string[]; source?: string }>,
+  ranked: Array<{ score: number; reason_tags?: string[]; source?: string; score_breakdown?: Record<string, number> }>,
   topK: number,
 ): boolean {
   const scoped = ranked.slice(0, Math.max(1, topK));
   if (scoped.length === 0) return true;
-  const summaryHits = scoped.filter(item =>
-    Array.isArray(item.reason_tags) && item.reason_tags.includes("summary_hit"),
-  ).length;
+  const isStrongSummaryHit = (item: { score: number; reason_tags?: string[]; score_breakdown?: Record<string, number> }): boolean => {
+    if (!Array.isArray(item.reason_tags) || !item.reason_tags.includes("summary_hit")) {
+      return false;
+    }
+    const score = Number(item.score || 0);
+    const summaryScore = Number(item.score_breakdown?.summary || 0);
+    const bm25ScoreValue = Number(item.score_breakdown?.bm25 || 0);
+    return score >= 1.2 && (summaryScore >= 1 || bm25ScoreValue >= 0.15);
+  };
+  const summaryHits = scoped.filter(isStrongSummaryHit).length;
   const sessionScoped = scoped.filter(item =>
     item.source === "sessions_active" || item.source === "sessions_archive",
   );
   if (sessionScoped.length === 0) {
     return summaryHits === 0;
   }
-  const sessionSummaryHits = sessionScoped.filter(item =>
-    Array.isArray(item.reason_tags) && item.reason_tags.includes("summary_hit"),
-  ).length;
+  const sessionSummaryHits = sessionScoped.filter(isStrongSummaryHit).length;
   return summaryHits === 0 || sessionSummaryHits === 0;
+}
+
+function normalizeFusionMode(value: unknown): ReadStoreFusionMode {
+  if (value === "authoritative" || value === "candidates" || value === "off") {
+    return value;
+  }
+  return "auto";
+}
+
+function roundTiming(timing: ReadStoreSearchTiming): ReadStoreSearchTiming {
+  const output: ReadStoreSearchTiming = {};
+  for (const [key, value] of Object.entries(timing)) {
+    if (typeof value !== "number" || !Number.isFinite(value)) continue;
+    output[key as keyof ReadStoreSearchTiming] = Number(value.toFixed(2));
+  }
+  return output;
+}
+
+function appendTiming(timing: ReadStoreSearchTiming, key: keyof ReadStoreSearchTiming, startedAt: number): void {
+  const elapsed = Date.now() - startedAt;
+  timing[key] = (timing[key] || 0) + elapsed;
 }
 
 function mergeKeyFromDoc(doc: ReadDocument): string {
@@ -1337,6 +1363,7 @@ function docEvidenceIds(doc: ReadDocument): string[] {
   if (Array.isArray(doc.evidenceIds) && doc.evidenceIds.length > 0) {
     return uniqueStrings(doc.evidenceIds);
   }
+  const wikiRefs = docWikiRefs(doc);
   const relation = Array.isArray(doc.relations) && doc.relations.length > 0 ? doc.relations[0] : null;
   const source = relation?.source || "";
   const target = relation?.target || "";
@@ -1348,14 +1375,17 @@ function docEvidenceIds(doc: ReadDocument): string[] {
         type,
         sourceEventId: relation?.source_event_id || doc.sourceEventId,
         evidenceSpan: relation?.evidence_span,
-        wikiRef: doc.wikiRef,
+        wikiRefs,
         wikiAnchor: doc.wikiAnchor,
       })
     : [];
   return uniqueStrings([
     ...evidence,
     doc.sourceEventId ? `graph:event:${doc.sourceEventId}` : "",
-    doc.wikiRef ? `wiki:${doc.wikiRef}${doc.wikiAnchor ? `#${doc.wikiAnchor}` : ""}` : "",
+    ...wikiRefs.map(ref => {
+      const wikiRef = normalizeWikiEvidenceRef(ref);
+      return wikiRef ? `wiki:${wikiRef}${doc.wikiAnchor ? `#${doc.wikiAnchor}` : ""}` : "";
+    }),
     `doc:${doc.id}`,
   ]);
 }
@@ -1497,6 +1527,7 @@ async function searchLanceDb(args: {
       const ts = typeof record.timestamp === "string" ? Date.parse(record.timestamp) : NaN;
       const entities = parseJsonStringArray(record.entities_json);
       const relations = parseJsonRelations(record.relations_json);
+      const embedding = Array.isArray(record.vector) ? (record.vector as number[]).filter(item => Number.isFinite(item)) : undefined;
       docs.push({
         id,
         text: summary,
@@ -1509,7 +1540,8 @@ async function searchLanceDb(args: {
         sourceField: record.source_field === "summary" || record.source_field === "evidence"
           ? record.source_field
           : undefined,
-        embedding: Array.isArray(record.vector) ? (record.vector as number[]).filter(item => Number.isFinite(item)) : undefined,
+        embedding,
+        embeddingNorm: embedding && embedding.length > 0 ? vectorNorm(embedding) : undefined,
         eventType: typeof record.event_type === "string" ? record.event_type : undefined,
         qualityScore: typeof record.quality_score === "number" ? record.quality_score : undefined,
         charCount: typeof record.char_count === "number" ? record.char_count : undefined,
@@ -1557,6 +1589,7 @@ function parseVectorFallback(filePath: string, logger: LoggerLike): ReadDocument
             })
             .filter((item): item is { source: string; target: string; type: string } => Boolean(item))
         : [];
+      const embedding = Array.isArray(parsed.embedding) ? parsed.embedding.filter(item => Number.isFinite(item as number)) as number[] : undefined;
       docs.push({
         id,
         text: summary,
@@ -1569,7 +1602,8 @@ function parseVectorFallback(filePath: string, logger: LoggerLike): ReadDocument
         sourceField: parsed.source_field === "summary" || parsed.source_field === "evidence"
           ? parsed.source_field
           : undefined,
-        embedding: Array.isArray(parsed.embedding) ? parsed.embedding.filter(item => Number.isFinite(item as number)) as number[] : undefined,
+        embedding,
+        embeddingNorm: embedding && embedding.length > 0 ? vectorNorm(embedding) : undefined,
         eventType: typeof parsed.event_type === "string" ? parsed.event_type.trim() : undefined,
         qualityScore: typeof parsed.quality_score === "number" ? parsed.quality_score : undefined,
         charCount: typeof parsed.char_count === "number" ? parsed.char_count : undefined,
@@ -1680,7 +1714,7 @@ async function requestFusion(args: {
       endpoint,
       apiKey: args.llm.apiKey,
       body,
-      timeoutMs: 20000,
+      timeoutMs: EXTERNAL_MODEL_TIMEOUT_MS,
     });
     if (!response.ok) {
       lastError = new Error(response.status > 0 ? `fusion_http_${response.status}` : (response.error || "fusion_network_error"));
@@ -1738,7 +1772,7 @@ export function createReadStore(options: ReadStoreOptions): ReadStore {
   const vectorFallbackPath = path.join(memoryRoot, "vector", "lancedb_events.jsonl");
   const hitStatsPath = path.join(memoryRoot, ".read_hit_stats.json");
   let docsCache: { signature: string; docs: ReadDocument[] } | null = null;
-  let vectorFallbackCache: { signature: string; docs: ReadDocument[] } | null = null;
+  let vectorFallbackCache: VectorFallbackIndex | null = null;
   let bm25TokenCacheSignature = "";
   let bm25TokenCache = new Map<string, string[]>();
   let hitStatsCache: HitStatState | null = null;
@@ -1785,24 +1819,6 @@ export function createReadStore(options: ReadStoreOptions): ReadStore {
     } catch {
       hitStatsCache = { items: {} };
       return hitStatsCache;
-    }
-  }
-
-  function directorySignature(dirPath: string, extension: string): string {
-    try {
-      if (!fs.existsSync(dirPath)) {
-        return `${dirPath}:missing`;
-      }
-      const files = fs.readdirSync(dirPath)
-        .filter(file => file.toLowerCase().endsWith(extension.toLowerCase()))
-        .sort((a, b) => a.localeCompare(b));
-      if (files.length === 0) {
-        return `${dirPath}:empty`;
-      }
-      const signatures = files.map(file => fileSignature(path.join(dirPath, file)));
-      return `${dirPath}:${signatures.join("|")}`;
-    } catch {
-      return `${dirPath}:error`;
     }
   }
 
@@ -1872,9 +1888,6 @@ export function createReadStore(options: ReadStoreOptions): ReadStore {
     const graphMemoryPath = path.join(memoryRoot, "graph", "memory.jsonl");
     const supersededRelationPath = path.join(memoryRoot, "graph", "superseded_relations.jsonl");
     const conflictQueuePath = path.join(memoryRoot, "graph", "conflict_queue.jsonl");
-    const wikiEntitiesDir = path.join(memoryRoot, "wiki", "entities");
-    const wikiTopicsDir = path.join(memoryRoot, "wiki", "topics");
-    const wikiTimelinesDir = path.join(memoryRoot, "wiki", "timelines");
     const wikiProjectionIndexPath = path.join(memoryRoot, "wiki", ".projection_index.json");
     const signature = [
       fileSignature(cortexRulesPath),
@@ -1883,9 +1896,6 @@ export function createReadStore(options: ReadStoreOptions): ReadStore {
       fileSignature(graphMemoryPath),
       fileSignature(supersededRelationPath),
       fileSignature(conflictQueuePath),
-      directorySignature(wikiEntitiesDir, ".md"),
-      directorySignature(wikiTopicsDir, ".md"),
-      directorySignature(wikiTimelinesDir, ".md"),
       fileSignature(wikiProjectionIndexPath),
     ].join("|");
     if (docsCache && docsCache.signature === signature) {
@@ -1907,6 +1917,7 @@ export function createReadStore(options: ReadStoreOptions): ReadStore {
         } catch {}
       }
     }
+    const wikiRefIndex = readWikiProjectionRefIndex(wikiProjectionIndexPath, options.logger);
     const graphDocs: ReadDocument[] = [];
     const supersededRelationKeys = new Set<string>();
     if (fs.existsSync(supersededRelationPath)) {
@@ -1997,6 +2008,7 @@ export function createReadStore(options: ReadStoreOptions): ReadStore {
               relation_key: relationKey,
             };
             const relationEntities = uniqueStrings([...entities, source, target]);
+            const wikiRefs = wikiRefsForGraphRelation(wikiRefIndex, { source, target, type });
             const entityLines = relationEntities.length > 0
               ? relationEntities.map((entity, index) => {
                   const entityType = entityTypes[entity];
@@ -2054,12 +2066,15 @@ export function createReadStore(options: ReadStoreOptions): ReadStore {
               eventType: eventType || undefined,
               qualityScore: typeof parsed.confidence === "number" && Number.isFinite(parsed.confidence) ? parsed.confidence : 1,
               factStatus,
+              wikiRef: wikiRefs[0] || undefined,
+              wikiRefs,
               evidenceIds: buildGraphEvidenceIds({
                 source,
                 target,
                 type,
                 sourceEventId: relation.source_event_id,
                 evidenceSpan,
+                wikiRefs,
               }),
             });
           }
@@ -2138,6 +2153,7 @@ export function createReadStore(options: ReadStoreOptions): ReadStore {
               conflict_id: conflictId || undefined,
               relation_key: relationKey,
             };
+            const wikiRefs = wikiRefsForGraphRelation(wikiRefIndex, { source, target, type });
             const evidenceIds = uniqueStrings([
               ...buildGraphEvidenceIds({
                 source,
@@ -2145,6 +2161,7 @@ export function createReadStore(options: ReadStoreOptions): ReadStore {
                 type,
                 sourceEventId: sourceEventId || undefined,
                 evidenceSpan,
+                wikiRefs,
               }),
               conflictId ? `graph:conflict:${conflictId}` : "",
             ]);
@@ -2193,6 +2210,8 @@ export function createReadStore(options: ReadStoreOptions): ReadStore {
               eventType: candidateEventType || "graph_conflict",
               qualityScore: typeof confidenceValue === "number" ? confidenceValue : 0.8,
               factStatus: status,
+              wikiRef: wikiRefs[0] || undefined,
+              wikiRefs,
               evidenceIds,
             });
           }
@@ -2203,28 +2222,99 @@ export function createReadStore(options: ReadStoreOptions): ReadStore {
     }
     const entitySummaryDocs = buildEntityGraphSummaryDocs(
       graphDocs.filter(item => item.factStatus === "active"),
-    );
-    const wikiProjectionDocs = parseWikiProjectionDocuments(memoryRoot, options.logger);
+    ).map(doc => {
+      const wikiRefs = uniqueStrings(
+        (Array.isArray(doc.entities) ? doc.entities : [])
+          .map(entity => wikiRefIndex.entityByName.get(entity.trim().toLowerCase()) || ""),
+      );
+      if (wikiRefs.length === 0) {
+        return doc;
+      }
+      const wikiAnchor = "current-facts";
+      return {
+        ...doc,
+        wikiRef: wikiRefs[0],
+        wikiRefs,
+        wikiAnchor,
+        evidenceIds: uniqueStrings([
+          ...(Array.isArray(doc.evidenceIds) ? doc.evidenceIds : []),
+          ...wikiRefs.map(ref => {
+            const wikiRef = normalizeWikiEvidenceRef(ref);
+            return wikiRef ? `wiki:${wikiRef}#${wikiAnchor}` : "";
+          }),
+        ]),
+      };
+    });
     const docs = [
       ...parseMarkdownFile(cortexRulesPath, "CORTEX_RULES.md"),
       ...parseJsonlFile(activeSessionsPath, "sessions_active", options.logger),
       ...parseJsonlFile(archiveSessionsPath, "sessions_archive", options.logger),
       ...graphDocs,
       ...entitySummaryDocs,
-      ...wikiProjectionDocs,
     ];
     docsCache = { signature, docs };
     return docs;
   }
 
-  function loadVectorFallbackCached(): ReadDocument[] {
+  function buildVectorFallbackIndex(signature: string, docs: ReadDocument[]): VectorFallbackIndex {
+    const bySourceMemoryId = new Map<string, ReadDocument[]>();
+    const vectorEntries: Array<{ doc: ReadDocument; embedding: number[]; norm: number }> = [];
+    for (const doc of docs) {
+      const key = (doc.sourceMemoryId || "").trim();
+      if (key) {
+        const list = bySourceMemoryId.get(key) || [];
+        list.push(doc);
+        bySourceMemoryId.set(key, list);
+      }
+      if (Array.isArray(doc.embedding) && doc.embedding.length > 0) {
+        const norm = doc.embeddingNorm || vectorNorm(doc.embedding);
+        if (norm > 0) {
+          vectorEntries.push({ doc, embedding: doc.embedding, norm });
+        }
+      }
+    }
+    return { signature, docs, vectorEntries, bySourceMemoryId };
+  }
+
+  function loadVectorFallbackCached(): VectorFallbackIndex {
     const signature = fileSignature(vectorFallbackPath);
     if (vectorFallbackCache && vectorFallbackCache.signature === signature) {
-      return vectorFallbackCache.docs;
+      return vectorFallbackCache;
     }
     const docs = parseVectorFallback(vectorFallbackPath, options.logger);
-    vectorFallbackCache = { signature, docs };
-    return docs;
+    vectorFallbackCache = buildVectorFallbackIndex(signature, docs);
+    return vectorFallbackCache;
+  }
+
+  function selectVectorFallbackDocs(
+    index: VectorFallbackIndex,
+    queryVector: number[] | null,
+    queryNorm: number,
+    limit: number,
+  ): ReadDocument[] {
+    if (!queryVector || queryVector.length === 0 || queryNorm <= 0 || index.vectorEntries.length === 0) {
+      return index.docs;
+    }
+    const cappedLimit = Math.max(1, Math.floor(limit));
+    const selected = new Map<string, ReadDocument>();
+    const ranked = index.vectorEntries
+      .map(entry => ({
+        doc: entry.doc,
+        score: cosineSimilarityWithNorm(queryVector, entry.embedding, queryNorm, entry.norm),
+      }))
+      .filter(item => Number.isFinite(item.score))
+      .sort((a, b) => b.score - a.score)
+      .slice(0, cappedLimit);
+    for (const item of ranked) {
+      selected.set(item.doc.id, item.doc);
+      const sourceMemoryId = (item.doc.sourceMemoryId || "").trim();
+      if (!sourceMemoryId) continue;
+      for (const sibling of index.bySourceMemoryId.get(sourceMemoryId) || []) {
+        if (selected.size >= cappedLimit) break;
+        selected.set(sibling.id, sibling);
+      }
+    }
+    return [...selected.values()];
   }
 
   function getBm25Tokens(doc: ReadDocument, signature: string, channel: "summary" | "fulltext"): string[] {
@@ -2254,32 +2344,81 @@ export function createReadStore(options: ReadStoreOptions): ReadStore {
     semantic_results: unknown[];
     keyword_results: unknown[];
     strategy: string;
+    timing_ms: ReadStoreSearchTiming;
+    channel_results: ReadStoreChannelResults;
+    debug: {
+      mode: "default" | "lightweight" | "auto";
+      fusion_mode: ReadStoreFusionMode;
+      track_hits: boolean;
+      planned_queries: string[];
+      fulltext_fallback_used: boolean;
+      vector_source: "lancedb" | "jsonl_index" | "none";
+    };
   }> {
+    const startedAt = Date.now();
+    const timing: ReadStoreSearchTiming = {};
     const query = args.query?.trim();
-    if (!query) {
+    const mode: "default" | "lightweight" | "auto" = args.mode === "lightweight" ? "lightweight" : (args.mode === "auto" ? "auto" : "default");
+    const fusionMode = normalizeFusionMode(args.fusionMode);
+    const trackHits = args.trackHits !== false;
+    const finish = (payload: {
+      results: unknown[];
+      semantic_results: unknown[];
+      keyword_results: unknown[];
+      strategy: string;
+      channel_results?: ReadStoreChannelResults;
+    }, debug: {
+      planned_queries?: string[];
+      fulltext_fallback_used?: boolean;
+      vector_source?: "lancedb" | "jsonl_index" | "none";
+    } = {}) => {
+      timing.total_ms = Date.now() - startedAt;
       return {
+        ...payload,
+        channel_results: payload.channel_results || emptyChannelResults(),
+        timing_ms: roundTiming(timing),
+        debug: {
+          mode,
+          fusion_mode: fusionMode,
+          track_hits: trackHits,
+          planned_queries: debug.planned_queries || [],
+          fulltext_fallback_used: Boolean(debug.fulltext_fallback_used),
+          vector_source: debug.vector_source || "none",
+        },
+      };
+    };
+    if (!query) {
+      return finish({
         results: [],
         semantic_results: [],
         keyword_results: [],
         strategy: "vector_sentence_and_keyword_parallel",
-      };
+      });
     }
-    const mode = args.mode === "lightweight" ? "lightweight" : "default";
     const lightweightMode = mode === "lightweight";
+    const externalModelMode = mode === "default";
+    const loadDocsStartedAt = Date.now();
     const docs = loadAllDocuments();
+    appendTiming(timing, "load_docs_ms", loadDocsStartedAt);
+    const hitStatsStartedAt = Date.now();
     const hitStats = loadHitStats();
+    appendTiming(timing, "load_hit_stats_ms", hitStatsStartedAt);
+    const planningStartedAt = Date.now();
     const intent = classifyIntent(query);
     const preferredTypes = preferredEventTypes(intent);
     const plannedQueriesRaw = lightweightMode ? [query] : planQueryKeywords(query);
     const plannedQueries = plannedQueriesRaw.length > 0 ? plannedQueriesRaw : [query];
+    appendTiming(timing, "query_planning_ms", planningStartedAt);
     const summaryChannelWeight = 1;
     const fulltextChannelWeight = 0.35;
     const maxCandidatePool = Math.max(1, Math.max(args.topK, 20));
     let queryEmbedding: number[] | null = null;
+    let queryEmbeddingNorm = 0;
     const embeddingModel = options.embedding?.model || "";
     const embeddingApiKey = options.embedding?.apiKey || "";
     const embeddingBaseUrl = normalizeBaseUrl(options.embedding?.baseURL || options.embedding?.baseUrl);
-    if (!lightweightMode && embeddingModel && embeddingApiKey && embeddingBaseUrl) {
+    if (externalModelMode && embeddingModel && embeddingApiKey && embeddingBaseUrl) {
+      const embeddingStartedAt = Date.now();
       try {
         queryEmbedding = await requestEmbedding({
           text: query,
@@ -2288,17 +2427,37 @@ export function createReadStore(options: ReadStoreOptions): ReadStore {
           baseUrl: embeddingBaseUrl,
           dimensions: options.embedding?.dimensions,
         });
+        queryEmbeddingNorm = queryEmbedding && queryEmbedding.length > 0 ? vectorNorm(queryEmbedding) : 0;
       } catch (error) {
         options.logger.warn(`Embedding query failed, fallback to lexical search: ${error}`);
+      } finally {
+        appendTiming(timing, "embedding_ms", embeddingStartedAt);
       }
     }
-    const vectorDocsFromLance = queryEmbedding && queryEmbedding.length > 0
-      ? await searchLanceDb({ memoryRoot, queryEmbedding, limit: Math.max(20, args.topK * 8), logger: options.logger })
-      : [];
-    const vectorDocsFallback = vectorDocsFromLance.length > 0
-      ? []
-      : loadVectorFallbackCached();
+    let vectorDocsFromLance: ReadDocument[] = [];
+    if (queryEmbedding && queryEmbedding.length > 0) {
+      const lanceStartedAt = Date.now();
+      vectorDocsFromLance = await searchLanceDb({ memoryRoot, queryEmbedding, limit: Math.max(20, args.topK * 8), logger: options.logger });
+      appendTiming(timing, "lance_vector_ms", lanceStartedAt);
+    }
+    let vectorFallbackIndex: VectorFallbackIndex | null = null;
+    let vectorDocsFallback: ReadDocument[] = [];
+    if (vectorDocsFromLance.length === 0) {
+      const indexStartedAt = Date.now();
+      vectorFallbackIndex = loadVectorFallbackCached();
+      vectorDocsFallback = selectVectorFallbackDocs(
+        vectorFallbackIndex,
+        queryEmbedding,
+        queryEmbeddingNorm,
+        Math.max(20, args.topK * 8),
+      );
+      appendTiming(timing, "vector_index_ms", indexStartedAt);
+    }
+    const vectorSource: "lancedb" | "jsonl_index" | "none" = vectorDocsFromLance.length > 0
+      ? "lancedb"
+      : (vectorDocsFallback.length > 0 ? "jsonl_index" : "none");
     const vectorDocs = [...vectorDocsFromLance, ...vectorDocsFallback];
+    const archiveLinkStartedAt = Date.now();
     const archiveSourceById = new Map<string, { sourceText?: string; summaryText?: string; sourceFile?: string }>();
     for (const doc of docs) {
       if (doc.source !== "sessions_archive") continue;
@@ -2325,6 +2484,7 @@ export function createReadStore(options: ReadStoreOptions): ReadStore {
         doc.sourceFile = linked.sourceFile;
       }
     }
+    appendTiming(timing, "archive_link_ms", archiveLinkStartedAt);
 
     const graphDocs = docs
       .filter(doc => doc.source.startsWith("sessions_graph"))
@@ -2345,7 +2505,7 @@ export function createReadStore(options: ReadStoreOptions): ReadStore {
     const bm25Signature = `${docsCache?.signature || "na"}|vector:${vectorDocs.length}:${vectorDocs.slice(0, 40).map(item => `${item.id}:${item.text.length}`).join(",")}`;
 
     const rankByQuery = (plannedQuery: string, includeFulltext: boolean): RankedResultRow[] => {
-      const bm25Terms = tokenize(plannedQuery);
+      const bm25Terms = uniqueStrings(tokenize(plannedQuery));
       const bm25StatsSummary = buildBm25Stats(
         bm25Corpus,
         bm25Terms,
@@ -2395,7 +2555,7 @@ export function createReadStore(options: ReadStoreOptions): ReadStore {
           : 0;
         const lexicalCombined = summaryCombined * summaryChannelWeight + fulltextCombined * fulltextChannelWeight;
         const semantic = plannedQuery === query && queryEmbedding && Array.isArray(doc.embedding) && doc.embedding.length > 0
-          ? Math.max(0, cosineSimilarity(queryEmbedding, doc.embedding) * 5)
+          ? Math.max(0, cosineSimilarityWithNorm(queryEmbedding, doc.embedding, queryEmbeddingNorm, doc.embeddingNorm || vectorNorm(doc.embedding)) * 5)
           : 0;
         if (lexicalCombined <= 0 && semantic <= 0) {
           return null;
@@ -2478,7 +2638,9 @@ export function createReadStore(options: ReadStoreOptions): ReadStore {
       }
 
       return [...weightedMap.entries()]
-        .map(([mergeKey, candidate]) => ({
+        .map(([mergeKey, candidate]) => {
+          const wikiRefs = docWikiRefs(candidate.doc);
+          return {
           id: candidate.doc.id,
           merge_key: mergeKey,
           source_memory_id: candidate.doc.sourceMemoryId || "",
@@ -2493,7 +2655,8 @@ export function createReadStore(options: ReadStoreOptions): ReadStore {
           layer: candidate.doc.layer || "",
           event_type: candidate.doc.eventType || "",
           fact_status: docFactStatus(candidate.doc),
-          wiki_ref: candidate.doc.wikiRef || "",
+          wiki_ref: wikiRefs[0] || "",
+          wiki_refs: wikiRefs,
           quality_score: candidate.quality,
           timestamp: candidate.doc.timestamp ? new Date(candidate.doc.timestamp).toISOString() : "",
           evidence_ids: docEvidenceIds(candidate.doc),
@@ -2527,11 +2690,13 @@ export function createReadStore(options: ReadStoreOptions): ReadStore {
             `query_term:${plannedQuery}`,
           ].filter(Boolean),
           matched_keywords: [plannedQuery],
-        }))
+          };
+        })
         .sort((a, b) => b.score - a.score)
         .slice(0, maxCandidatePool);
     };
 
+    const rankingStartedAt = Date.now();
     const queryRuns = await Promise.all(plannedQueries.map(async plannedQuery => {
       const stage1 = rankByQuery(plannedQuery, false);
       const needFallback = shouldTriggerFulltextFallback(stage1, args.topK);
@@ -2558,6 +2723,12 @@ export function createReadStore(options: ReadStoreOptions): ReadStore {
           ...(Array.isArray(existing.evidence_ids) ? existing.evidence_ids.map(v => String(v)) : []),
           ...(Array.isArray(item.evidence_ids) ? item.evidence_ids.map(v => String(v)) : []),
         ]);
+        const mergedWikiRefs = uniqueStrings([
+          ...(Array.isArray(existing.wiki_refs) ? existing.wiki_refs.map(v => String(v)) : []),
+          ...(Array.isArray(item.wiki_refs) ? item.wiki_refs.map(v => String(v)) : []),
+          existing.wiki_ref || "",
+          item.wiki_ref || "",
+        ]);
         const mergedKeywords = uniqueStrings([
           ...(Array.isArray(existing.matched_keywords) ? existing.matched_keywords.map(v => String(v)) : []),
           ...(Array.isArray(item.matched_keywords) ? item.matched_keywords.map(v => String(v)) : []),
@@ -2567,6 +2738,8 @@ export function createReadStore(options: ReadStoreOptions): ReadStore {
           score: Math.max(existing.score || 0, item.score || 0),
           reason_tags: mergedReasonTags,
           evidence_ids: mergedEvidenceIds,
+          wiki_ref: mergedWikiRefs[0] || "",
+          wiki_refs: mergedWikiRefs,
           matched_keywords: mergedKeywords,
         });
       }
@@ -2607,6 +2780,12 @@ export function createReadStore(options: ReadStoreOptions): ReadStore {
           ...(Array.isArray(existing.evidence_ids) ? existing.evidence_ids.map(v => String(v)) : []),
           ...(Array.isArray(item.evidence_ids) ? item.evidence_ids.map(v => String(v)) : []),
         ]);
+        const mergedWikiRefs = uniqueStrings([
+          ...(Array.isArray(existing.wiki_refs) ? existing.wiki_refs.map(v => String(v)) : []),
+          ...(Array.isArray(item.wiki_refs) ? item.wiki_refs.map(v => String(v)) : []),
+          existing.wiki_ref || "",
+          item.wiki_ref || "",
+        ]);
         const matchedKeywords = uniqueStrings([
           ...(Array.isArray(existing.matched_keywords) ? existing.matched_keywords.map(v => String(v)) : []),
           run.plannedQuery,
@@ -2619,6 +2798,8 @@ export function createReadStore(options: ReadStoreOptions): ReadStore {
           score: Math.max(existing.score || 0, item.score || 0),
           reason_tags: mergedReasonTags,
           evidence_ids: mergedEvidenceIds,
+          wiki_ref: mergedWikiRefs[0] || "",
+          wiki_refs: mergedWikiRefs,
           matched_keywords: matchedKeywords,
           fulltext_fallback_used: Boolean(existing.fulltext_fallback_used) || run.fulltextFallback,
         });
@@ -2651,6 +2832,8 @@ export function createReadStore(options: ReadStoreOptions): ReadStore {
       })
       .sort((a, b) => Number(b.score || 0) - Number(a.score || 0))
       .slice(0, maxCandidatePool);
+    const fulltextFallbackUsed = queryRuns.some(run => run.fulltextFallback);
+    appendTiming(timing, "ranking_ms", rankingStartedAt);
     const isVectorSource = (value: string): boolean => value.startsWith("vector_");
     const semanticResults = lexicalRanked
       .filter(item => isVectorSource(item.source) && Array.isArray(item.reason_tags) && item.reason_tags.includes("vector_hit"))
@@ -2658,14 +2841,39 @@ export function createReadStore(options: ReadStoreOptions): ReadStore {
     const keywordResults = lexicalRanked
       .filter(item => isVectorSource(item.source) && Array.isArray(item.reason_tags) && item.reason_tags.includes("lexical_hit"))
       .slice(0, Math.max(1, args.topK));
+    const channelLimit = Math.max(1, args.topK);
+    const channelResults: ReadStoreChannelResults = {
+      vector_semantic: semanticResults,
+      vector_keyword: keywordResults,
+      keyword: lexicalRanked
+        .filter(item => Array.isArray(item.reason_tags) && item.reason_tags.includes("lexical_hit"))
+        .slice(0, channelLimit),
+      semantic: lexicalRanked
+        .filter(item => Array.isArray(item.reason_tags) && item.reason_tags.includes("vector_hit"))
+        .slice(0, channelLimit),
+      archive: lexicalRanked
+        .filter(item => item.source === "sessions_active" || item.source === "sessions_archive")
+        .slice(0, channelLimit),
+      graph: lexicalRanked
+        .filter(item => item.source.startsWith("sessions_graph"))
+        .slice(0, channelLimit),
+      rules: lexicalRanked
+        .filter(item => item.source === "CORTEX_RULES.md")
+        .slice(0, channelLimit),
+      vector: lexicalRanked
+        .filter(item => isVectorSource(item.source))
+        .slice(0, channelLimit),
+    };
     const rerankerModel = options.reranker?.model || "";
     const rerankerApiKey = options.reranker?.apiKey || "";
     const rerankerBaseUrl = normalizeBaseUrl(options.reranker?.baseURL || options.reranker?.baseUrl);
-    const fusionEnabled = !lightweightMode && options.fusion?.enabled !== false;
+    const fusionEnabled = externalModelMode && fusionMode !== "off" && options.fusion?.enabled !== false;
     const llmModel = options.llm?.model || "";
     const llmApiKey = options.llm?.apiKey || "";
     const llmBaseUrl = normalizeBaseUrl(options.llm?.baseURL || options.llm?.baseUrl);
-    const fusionAuthoritative = options.fusion?.authoritative !== false;
+    const fusionAuthoritative = fusionMode === "authoritative"
+      ? true
+      : (fusionMode === "candidates" ? false : options.fusion?.authoritative !== false);
     const skipRerankerForFusion = fusionEnabled && fusionAuthoritative && llmModel && llmApiKey && llmBaseUrl;
     let rerankedSimple: Array<{ id: string; merge_key?: string; text: string; source: string; score: number }> = lexicalRanked.map(item => ({
       id: item.id,
@@ -2674,7 +2882,8 @@ export function createReadStore(options: ReadStoreOptions): ReadStore {
       source: item.source,
       score: item.score,
     }));
-    if (!lightweightMode && rerankerModel && rerankerApiKey && rerankerBaseUrl && lexicalRanked.length > 1 && !skipRerankerForFusion) {
+    if (externalModelMode && rerankerModel && rerankerApiKey && rerankerBaseUrl && lexicalRanked.length > 1 && !skipRerankerForFusion) {
+      const rerankStartedAt = Date.now();
       try {
         rerankedSimple = await requestRerank({
           query,
@@ -2689,10 +2898,16 @@ export function createReadStore(options: ReadStoreOptions): ReadStore {
         });
       } catch (error) {
         options.logger.warn(`Reranker failed, keep hybrid ranking: ${error}`);
+      } finally {
+        appendTiming(timing, "rerank_ms", rerankStartedAt);
       }
     }
     const ranked = rerankedSimple.slice(0, Math.max(1, args.topK)).map(item => {
       const hit = lexicalRanked.find(entry => entry.id === item.id);
+      const hitWikiRefs = uniqueStrings([
+        ...(Array.isArray(hit?.wiki_refs) ? hit.wiki_refs.map(v => String(v)) : []),
+        hit?.wiki_ref || "",
+      ]);
       return {
       id: item.id,
       merge_key: hit?.merge_key || item.merge_key || item.id,
@@ -2709,7 +2924,8 @@ export function createReadStore(options: ReadStoreOptions): ReadStore {
       layer: hit?.layer || "",
       event_type: hit?.event_type || "",
       fact_status: hit?.fact_status || "active",
-      wiki_ref: hit?.wiki_ref || "",
+      wiki_ref: hitWikiRefs[0] || "",
+      wiki_refs: hitWikiRefs,
       quality_score: hit?.quality_score ?? 0,
       timestamp: hit?.timestamp || "",
       evidence_ids: Array.isArray(hit?.evidence_ids) ? hit?.evidence_ids : [],
@@ -2726,7 +2942,8 @@ export function createReadStore(options: ReadStoreOptions): ReadStore {
         source_file: hit?.source_file || "",
         layer: hit?.layer || "",
         fact_status: hit?.fact_status || "active",
-        wiki_ref: hit?.wiki_ref || "",
+        wiki_ref: hitWikiRefs[0] || "",
+        wiki_refs: hitWikiRefs,
         evidence_ids: Array.isArray(hit?.evidence_ids) ? hit?.evidence_ids : [],
         score_breakdown: hit?.score_breakdown || {},
         reason_tags: Array.isArray(hit?.reason_tags) ? hit?.reason_tags : [],
@@ -2759,6 +2976,7 @@ export function createReadStore(options: ReadStoreOptions): ReadStore {
           event_type: item.event_type,
           fact_status: item.fact_status || "active",
           wiki_ref: item.wiki_ref || "",
+          wiki_refs: Array.isArray(item.wiki_refs) ? item.wiki_refs : [],
           quality_score: item.quality_score,
           timestamp: item.timestamp,
           evidence_ids: Array.isArray(item.evidence_ids) ? item.evidence_ids : [],
@@ -2776,6 +2994,7 @@ export function createReadStore(options: ReadStoreOptions): ReadStore {
             layer: item.layer,
             fact_status: item.fact_status || "active",
             wiki_ref: item.wiki_ref || "",
+            wiki_refs: Array.isArray(item.wiki_refs) ? item.wiki_refs : [],
             evidence_ids: Array.isArray(item.evidence_ids) ? item.evidence_ids : [],
             score_breakdown: item.score_breakdown || {},
             reason_tags: Array.isArray(item.reason_tags) ? item.reason_tags : [],
@@ -2807,6 +3026,7 @@ export function createReadStore(options: ReadStoreOptions): ReadStore {
           event_type: item.event_type,
           fact_status: item.fact_status || "active",
           wiki_ref: item.wiki_ref || "",
+          wiki_refs: Array.isArray(item.wiki_refs) ? item.wiki_refs : [],
           quality_score: item.quality_score,
           timestamp: item.timestamp,
           evidence_ids: Array.isArray(item.evidence_ids) ? item.evidence_ids : [],
@@ -2824,6 +3044,7 @@ export function createReadStore(options: ReadStoreOptions): ReadStore {
             layer: item.layer,
             fact_status: item.fact_status || "active",
             wiki_ref: item.wiki_ref || "",
+            wiki_refs: Array.isArray(item.wiki_refs) ? item.wiki_refs : [],
             evidence_ids: Array.isArray(item.evidence_ids) ? item.evidence_ids : [],
             score_breakdown: item.score_breakdown || {},
             reason_tags: Array.isArray(item.reason_tags) ? item.reason_tags : [],
@@ -2832,7 +3053,16 @@ export function createReadStore(options: ReadStoreOptions): ReadStore {
       }
     }
     ranked.sort((a, b) => b.score - a.score);
+    const trackResultHits = (ids: string[]): void => {
+      if (!trackHits) {
+        return;
+      }
+      const hitStartedAt = Date.now();
+      markHit(ids);
+      appendTiming(timing, "hit_stats_update_ms", hitStartedAt);
+    };
     if (fusionEnabled && llmModel && llmApiKey && llmBaseUrl && ranked.length > 1) {
+      const fusionStartedAt = Date.now();
       try {
         const maxCandidates = Math.max(4, Math.min(20, options.fusion?.maxCandidates ?? 10));
         const fusion = await requestFusion({
@@ -2875,8 +3105,10 @@ export function createReadStore(options: ReadStoreOptions): ReadStore {
           const wikiRefs = uniqueStrings(
             fusion.evidence_ids.flatMap(item => {
               const linked = ranked.find(candidate => candidate.id === item);
-              const wikiRef = typeof linked?.wiki_ref === "string" ? linked.wiki_ref : "";
-              return wikiRef ? [wikiRef] : [];
+              return uniqueStrings([
+                ...(Array.isArray(linked?.wiki_refs) ? linked.wiki_refs.map(v => String(v)) : []),
+                typeof linked?.wiki_ref === "string" ? linked.wiki_ref : "",
+              ]);
             }),
           );
           const fulltextFetchHints = (Array.isArray(fusion.need_fulltext_event_ids) ? fusion.need_fulltext_event_ids : [])
@@ -2922,40 +3154,46 @@ export function createReadStore(options: ReadStoreOptions): ReadStore {
             fused_need_fulltext_event_ids: fusion.need_fulltext_event_ids || [],
             fulltext_fetch_hints: fulltextFetchHints,
           };
-          const authoritative = options.fusion?.authoritative !== false;
-          if (authoritative) {
-            markHit(Array.isArray(fusion.evidence_ids) ? fusion.evidence_ids : []);
-            return {
-              results: [fusedItem],
-              semantic_results: semanticResults,
-              keyword_results: keywordResults,
-              strategy: "vector_sentence_and_keyword_parallel",
-            };
+          if (fusionAuthoritative) {
+            trackResultHits(Array.isArray(fusion.evidence_ids) ? fusion.evidence_ids : []);
+            appendTiming(timing, "fusion_ms", fusionStartedAt);
+            return finish({
+            results: [fusedItem],
+            semantic_results: semanticResults,
+            keyword_results: keywordResults,
+            channel_results: channelResults,
+            strategy: "vector_sentence_and_keyword_parallel",
+          }, { planned_queries: plannedQueries, fulltext_fallback_used: fulltextFallbackUsed, vector_source: vectorSource });
           }
           const merged = [fusedItem, ...ranked];
-          markHit([
+          trackResultHits([
             ...(Array.isArray(fusion.evidence_ids) ? fusion.evidence_ids : []),
             ...ranked.map(item => item.id),
           ]);
-          return {
-            results: merged.slice(0, Math.max(1, args.topK)),
-            semantic_results: semanticResults,
-            keyword_results: keywordResults,
-            strategy: "vector_sentence_and_keyword_parallel",
-          };
+          appendTiming(timing, "fusion_ms", fusionStartedAt);
+          return finish({
+          results: merged.slice(0, Math.max(1, args.topK)),
+          semantic_results: semanticResults,
+          keyword_results: keywordResults,
+          channel_results: channelResults,
+          strategy: "vector_sentence_and_keyword_parallel",
+        }, { planned_queries: plannedQueries, fulltext_fallback_used: fulltextFallbackUsed, vector_source: vectorSource });
         }
+        appendTiming(timing, "fusion_ms", fusionStartedAt);
       } catch (error) {
         options.logger.warn(`LLM fusion failed, fallback to reranked results: ${error}`);
+        appendTiming(timing, "fusion_ms", fusionStartedAt);
       }
     }
     const finalRanked = ranked.slice(0, Math.max(1, args.topK));
-    markHit(finalRanked.map(item => item.id));
-    return {
+    trackResultHits(finalRanked.map(item => item.id));
+    return finish({
       results: finalRanked,
       semantic_results: semanticResults,
       keyword_results: keywordResults,
+      channel_results: channelResults,
       strategy: "vector_sentence_and_keyword_parallel",
-    };
+    }, { planned_queries: plannedQueries, fulltext_fallback_used: fulltextFallbackUsed, vector_source: vectorSource });
   }
 
   async function getHotContext(args: ReadStoreHotArgs): Promise<{ context: unknown[] }> {
@@ -2989,11 +3227,11 @@ export function createReadStore(options: ReadStoreOptions): ReadStore {
   }
 
   async function getAutoContext(args: ReadStoreAutoArgs): Promise<{
-    auto_search?: { query: string; results: unknown[]; age_seconds: number };
+    auto_search?: { query: string; results: unknown[]; age_seconds: number; timing_ms?: ReadStoreSearchTiming; debug?: unknown };
     hot_context?: unknown[];
   }> {
     const result: {
-      auto_search?: { query: string; results: unknown[]; age_seconds: number };
+      auto_search?: { query: string; results: unknown[]; age_seconds: number; timing_ms?: ReadStoreSearchTiming; debug?: unknown };
       hot_context?: unknown[];
     } = {};
     if (args.cachedAutoSearch) {
@@ -3004,21 +3242,44 @@ export function createReadStore(options: ReadStoreOptions): ReadStore {
       };
     }
     if (!result.auto_search) {
+      const maxQueryChars = Math.max(20, readTuning.autoContext.queryMaxChars);
+      const recentMessages = Array.isArray(args.recentMessages) ? args.recentMessages : [];
+      const recentQuery = recentMessages
+        .slice(-8)
+        .map(message => {
+          const role = typeof message.role === "string" && message.role.trim() ? message.role.trim() : "message";
+          const text = typeof message.text === "string"
+            ? message.text.trim()
+            : (typeof message.content === "string" ? message.content.trim() : "");
+          return text ? `${role}: ${text.replace(/\s+/g, " ")}` : "";
+        })
+        .filter(Boolean)
+        .join("\n");
       const docs = loadAllDocuments()
         .filter(doc => doc.source === "sessions_archive" && doc.sessionId === args.sessionId)
         .sort((a, b) => (b.timestamp ?? 0) - (a.timestamp ?? 0));
       const latest = docs[0];
-      if (latest && latest.text.trim()) {
-        const autoQuery = latest.text.slice(0, Math.max(20, readTuning.autoContext.queryMaxChars));
+      const fallbackQuery = latest && latest.text.trim()
+        ? latest.text.trim()
+        : "";
+      const sourceQuery = recentQuery || fallbackQuery;
+      if (sourceQuery) {
+        const autoQuery = sourceQuery.length > maxQueryChars
+          ? sourceQuery.slice(sourceQuery.length - maxQueryChars)
+          : sourceQuery;
         const light = await searchMemory({
           query: autoQuery,
           topK: 3,
-          mode: readTuning.autoContext.lightweightSearch ? "lightweight" : "default",
+          mode: readTuning.autoContext.lightweightSearch ? "auto" : "default",
+          fusionMode: "off",
+          trackHits: false,
         });
         result.auto_search = {
           query: autoQuery,
           results: light.results,
           age_seconds: 0,
+          timing_ms: light.timing_ms,
+          debug: light.debug,
         };
       }
     }

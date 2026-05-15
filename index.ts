@@ -344,7 +344,7 @@ const defaultConfig: Partial<CortexMemoryConfig> = {
       ],
     },
     autoContext: {
-      queryMaxChars: 80,
+      queryMaxChars: 240,
       lightweightSearch: true,
     },
   },
@@ -359,6 +359,7 @@ interface CachedSearchResult {
 }
 
 let autoSearchCacheBySession = new Map<string, CachedSearchResult>();
+const messageHookInFlightBySession = new Map<string, Promise<void>>();
 const AUTO_SEARCH_CACHE_TTL = 60000;
 const MAX_AUTO_SEARCH_CACHE_SESSIONS = 200;
 const HOOK_GUARD_TIMEOUT_MS = 2000;
@@ -1205,7 +1206,19 @@ async function onMessageHandler(payload: unknown, context: ToolContext): Promise
   if (isInternalSession(sessionId)) {
     return;
   }
-  await runWithTimeout(resolveEngine().onMessage(payload, context), HOOK_GUARD_TIMEOUT_MS, "onMessage hook");
+  const existing = messageHookInFlightBySession.get(sessionId);
+  if (existing) {
+    logger.debug(`onMessage hook dedup: skip while previous run is in-flight session=${sessionId}`);
+    return;
+  }
+  let task: Promise<void>;
+  task = resolveEngine().onMessage(payload, context).finally(() => {
+    if (messageHookInFlightBySession.get(sessionId) === task) {
+      messageHookInFlightBySession.delete(sessionId);
+    }
+  });
+  messageHookInFlightBySession.set(sessionId, task);
+  await runWithTimeout(task, HOOK_GUARD_TIMEOUT_MS, "onMessage hook");
 }
 
 async function onSessionEndHandler(payload: unknown, context: ToolContext): Promise<void> {
@@ -1236,6 +1249,15 @@ function registerTools(): void {
         properties: {
           query: { type: "string", description: "Search query" },
           top_k: { type: "integer", description: "Number of results to return" },
+          fusion_mode: {
+            type: "string",
+            enum: ["auto", "authoritative", "candidates", "off"],
+            description: "LLM fusion behavior: auto honors config, authoritative returns fused answer only, candidates returns fusion plus ranked candidates, off disables fusion",
+          },
+          track_hits: {
+            type: "boolean",
+            description: "Whether to update anti-decay hit statistics; set false for diagnostics or benchmarks",
+          },
         },
         required: ["query"],
         additionalProperties: false,
@@ -1245,7 +1267,7 @@ function registerTools(): void {
         logger.info(`params.args: ${JSON.stringify(params.args)}`);
         const args = params.args || params;
         logger.info(`args after extraction: ${JSON.stringify(args)}`);
-        return resolveEngine().searchMemory(args as { query: string; top_k?: number }, params.context);
+        return resolveEngine().searchMemory(args as { query: string; top_k?: number; fusion_mode?: "auto" | "authoritative" | "candidates" | "off"; track_hits?: boolean }, params.context);
       },
     },
     {
@@ -1835,6 +1857,8 @@ function registerFallbackTools(): void {
       properties: {
         query: { type: "string", description: "Search query" },
         top_k: { type: "integer", description: "Number of results" },
+        fusion_mode: { type: "string", enum: ["auto", "authoritative", "candidates", "off"], description: "Ignored by builtin fallback" },
+        track_hits: { type: "boolean", description: "Ignored by builtin fallback" },
       },
       required: ["query"],
       additionalProperties: false,
@@ -2026,6 +2050,7 @@ export async function disable(): Promise<void> {
   unregisterTools();
   stopAutoReflectScheduler();
   isEnabled = false;
+  messageHookInFlightBySession.clear();
   memoryEngine = null;
   
   if (config?.fallbackToBuiltin && builtinMemory) {
@@ -2061,6 +2086,7 @@ export async function unregister(): Promise<void> {
   api = null;
   config = null;
   autoSearchCacheBySession.clear();
+  messageHookInFlightBySession.clear();
   memoryEngine = null;
   builtinMemory = null;
   registeredTools = [];

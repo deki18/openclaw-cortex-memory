@@ -16,6 +16,8 @@ export interface ToolResult {
 export interface SearchMemoryArgs {
   query: string;
   top_k?: number;
+  fusion_mode?: "auto" | "authoritative" | "candidates" | "off";
+  track_hits?: boolean;
 }
 
 export interface StoreEventArgs {

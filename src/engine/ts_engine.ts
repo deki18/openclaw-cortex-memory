@@ -279,6 +279,30 @@ export function createTsEngine(deps: TsEngineDeps): MemoryEngine {
     }
   }
 
+  function getRecentSessionMessages(sessionId: string, limit: number): Array<{ role?: string; content?: string; timestamp?: string }> {
+    const messages = sessionMessageBuffer.get(sessionId) || [];
+    return messages.slice(Math.max(0, messages.length - Math.max(1, limit)));
+  }
+
+  function isHistoricalMemoryQuery(text: string): boolean {
+    return /(上次|之前|以前|你记得|记得|历史|上个月|去年|上个星期|昨天|前天|查一下|回忆|记忆|偏好|项目上下文|既有决策|决策|决定|修复|方案|last time|previous|previously|before|remember|history|prior|preference|decision|fix|what did we)/i.test(text);
+  }
+
+  function buildAutoSearchQuery(sessionId: string, latestUserText: string, historical: boolean): string {
+    if (!historical) {
+      return latestUserText.trim();
+    }
+    const recent = getRecentSessionMessages(sessionId, 8)
+      .map(message => {
+        const role = typeof message.role === "string" && message.role.trim() ? message.role.trim() : "message";
+        const content = typeof message.content === "string" ? message.content.trim().replace(/\s+/g, " ") : "";
+        return content ? `${role}: ${content}` : "";
+      })
+      .filter(Boolean)
+      .join("\n");
+    return (recent || latestUserText).slice(-240).trim();
+  }
+
   function asRecord(value: unknown): Record<string, unknown> | null {
     if (typeof value === "object" && value !== null) {
       return value as Record<string, unknown>;
@@ -1855,9 +1879,25 @@ export function createTsEngine(deps: TsEngineDeps): MemoryEngine {
       typeof argsInput?.top_k === "number" ? Number(argsInput.top_k) : undefined,
       typeof argsInput?.topK === "number" ? Number(argsInput.topK) : undefined,
     ].find(value => typeof value === "number" && Number.isFinite(value));
+    const fusionModeRaw = [
+      typeof args.fusion_mode === "string" ? args.fusion_mode : "",
+      typeof argsRecord.fusion_mode === "string" ? String(argsRecord.fusion_mode) : "",
+      typeof argsRecord.fusionMode === "string" ? String(argsRecord.fusionMode) : "",
+      typeof argsInput?.fusion_mode === "string" ? String(argsInput.fusion_mode) : "",
+      typeof argsInput?.fusionMode === "string" ? String(argsInput.fusionMode) : "",
+    ].find(value => value === "auto" || value === "authoritative" || value === "candidates" || value === "off");
+    const trackHitsRaw = [
+      typeof args.track_hits === "boolean" ? args.track_hits : undefined,
+      typeof argsRecord.track_hits === "boolean" ? Boolean(argsRecord.track_hits) : undefined,
+      typeof argsRecord.trackHits === "boolean" ? Boolean(argsRecord.trackHits) : undefined,
+      typeof argsInput?.track_hits === "boolean" ? Boolean(argsInput.track_hits) : undefined,
+      typeof argsInput?.trackHits === "boolean" ? Boolean(argsInput.trackHits) : undefined,
+    ].find(value => typeof value === "boolean");
     const result = await deps.readStore.searchMemory({
       query,
       topK: typeof topKRaw === "number" && topKRaw > 0 ? Math.floor(topKRaw) : 3,
+      fusionMode: fusionModeRaw || "auto",
+      trackHits: trackHitsRaw !== false,
     });
     return {
       success: true,
@@ -1865,7 +1905,10 @@ export function createTsEngine(deps: TsEngineDeps): MemoryEngine {
         results: result.results,
         vector_semantic_results: result.semantic_results,
         vector_keyword_results: result.keyword_results,
+        channel_results: result.channel_results,
         vector_search_strategy: result.strategy,
+        timing_ms: result.timing_ms,
+        debug: result.debug,
       },
     };
   }
@@ -1892,6 +1935,7 @@ export function createTsEngine(deps: TsEngineDeps): MemoryEngine {
       includeHot: includeHotRaw !== false,
       sessionId,
       cachedAutoSearch: cached ?? undefined,
+      recentMessages: getRecentSessionMessages(sessionId, 8),
     });
     if (!result.auto_search && !result.hot_context) {
       return {
@@ -2011,9 +2055,17 @@ export function createTsEngine(deps: TsEngineDeps): MemoryEngine {
 
     if (role === "user" && text.length > 5) {
       try {
-        const searchResult = await deps.readStore.searchMemory({ query: text, topK: 3, mode: "lightweight" });
+        const historical = isHistoricalMemoryQuery(text);
+        const query = buildAutoSearchQuery(sessionId, text, historical);
+        const searchResult = await deps.readStore.searchMemory({
+          query,
+          topK: 3,
+          mode: historical ? "auto" : "lightweight",
+          fusionMode: "off",
+          trackHits: false,
+        });
         if (searchResult.results.length > 0) {
-          deps.setSessionAutoSearchCache(sessionId, text, searchResult.results);
+          deps.setSessionAutoSearchCache(sessionId, query, searchResult.results);
           deps.logger.info(`TS auto-search cached ${searchResult.results.length} results for context`);
         }
       } catch (error) {
