@@ -4,7 +4,7 @@ const os = require('os');
 const path = require('path');
 const plugin = require('../dist/index.js');
 
-const PLUGIN_ID = 'openclaw-cortex-memory';
+const PLUGIN_ID = 'cortex-memory-pro';
 const requiredTools = [
   'search_memory',
   'store_event',

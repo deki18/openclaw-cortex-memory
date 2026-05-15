@@ -771,7 +771,7 @@ const WRITE_GATE_REGRESSION_SAMPLES = [
   "Example A: \"Discussed three options today, no final decision yet\" => active_only",
   "Example B: \"Decided to use plan B and completed rollout, error rate dropped to 0.2%\" => archive_event",
   "Example C: \"ok received thanks\" => skip",
-  "Example D: \"请优化 openclaw-cortex-memory 的历史记忆导入质量；已修复并通过 npm run typecheck；用户确认可以\" => archive_event",
+  "Example D: \"请优化 cortex-memory-pro 的历史记忆导入质量；已修复并通过 npm run typecheck；用户确认可以\" => archive_event",
   "Example E: \"收到，辛苦了\" => skip",
 ];
 
@@ -2126,7 +2126,7 @@ async function extractGateDecisionsWithLlm(args: {
       "- write_plan.archive_payloads[] item (C2): {candidate_id,source_slice,event_type,summary,cause,process,result,entities,entity_types,relations,confidence}",
       "- write_plan.graph_payloads[] item (C3): {candidate_id,source_slice,summary,source_text_nav,entities,entity_types,relations,confidence}",
       "Top-level output schema:",
-      "{\"write_plan\":{\"active_payloads\":[{\"candidate_id\":\"c1\",\"source_slice\":\"...\",\"summary\":\"...\"}],\"archive_payloads\":[{\"candidate_id\":\"c2\",\"source_slice\":\"...\",\"event_type\":\"decision\",\"summary\":\"...\",\"cause\":\"...\",\"process\":\"...\",\"result\":\"...\",\"entities\":[\"openclaw-cortex-memory\"],\"entity_types\":{\"openclaw-cortex-memory\":\"Project\"},\"relations\":[],\"confidence\":0.82}],\"graph_payloads\":[{\"candidate_id\":\"c1\",\"source_slice\":\"...\",\"summary\":\"任务A depends_on 资源B。\",\"source_text_nav\":{\"layer\":\"active_only\",\"session_id\":\"s1\",\"source_file\":\"daily_summary:2026-04-03.md\",\"source_memory_id\":\"evt_1\",\"source_event_id\":\"evt_1\"},\"entities\":[\"任务A\",\"资源B\"],\"entity_types\":{\"任务A\":\"Task\",\"资源B\":\"Resource\"},\"relations\":[{\"source\":\"任务A\",\"target\":\"资源B\",\"type\":\"depends_on\",\"relation_origin\":\"canonical\",\"evidence_span\":\"任务A 依赖 资源B\",\"context_chunk\":\"用户说明任务A依赖资源B，需要后续处理。\",\"confidence\":0.9}],\"confidence\":0.8}]}}",
+      "{\"write_plan\":{\"active_payloads\":[{\"candidate_id\":\"c1\",\"source_slice\":\"...\",\"summary\":\"...\"}],\"archive_payloads\":[{\"candidate_id\":\"c2\",\"source_slice\":\"...\",\"event_type\":\"decision\",\"summary\":\"...\",\"cause\":\"...\",\"process\":\"...\",\"result\":\"...\",\"entities\":[\"cortex-memory-pro\"],\"entity_types\":{\"cortex-memory-pro\":\"Project\"},\"relations\":[],\"confidence\":0.82}],\"graph_payloads\":[{\"candidate_id\":\"c1\",\"source_slice\":\"...\",\"summary\":\"任务A depends_on 资源B。\",\"source_text_nav\":{\"layer\":\"active_only\",\"session_id\":\"s1\",\"source_file\":\"daily_summary:2026-04-03.md\",\"source_memory_id\":\"evt_1\",\"source_event_id\":\"evt_1\"},\"entities\":[\"任务A\",\"资源B\"],\"entity_types\":{\"任务A\":\"Task\",\"资源B\":\"Resource\"},\"relations\":[{\"source\":\"任务A\",\"target\":\"资源B\",\"type\":\"depends_on\",\"relation_origin\":\"canonical\",\"evidence_span\":\"任务A 依赖 资源B\",\"context_chunk\":\"用户说明任务A依赖资源B，需要后续处理。\",\"confidence\":0.9}],\"confidence\":0.8}]}}",
       "Output JSON only. Do NOT output merge_hints/graph_rewrite.",
       "",
       "[CANDIDATES]",

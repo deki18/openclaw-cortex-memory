@@ -204,12 +204,12 @@ const ERROR_CODES: Record<string, UserFriendlyError> = {
   PLUGIN_DISABLED: {
     code: "E006",
     message: "Cortex Memory plugin is disabled",
-    suggestion: "Enable the plugin using 'openclaw plugins enable openclaw-cortex-memory' or check openclaw.json"
+    suggestion: "Enable the plugin using 'openclaw plugins enable cortex-memory-pro' or check openclaw.json"
   }
 };
 
 const SENSITIVE_KEYS = ["API_KEY", "SECRET", "TOKEN", "PASSWORD", "APIKEY"];
-const PLUGIN_ID = "openclaw-cortex-memory";
+const PLUGIN_ID = "cortex-memory-pro";
 const TOOL_NAME_CORTEX_DIAGNOSTICS = "cortex_diagnostics";
 const TOOL_NAME_DIAGNOSTICS_LEGACY = "diagnostics";
 

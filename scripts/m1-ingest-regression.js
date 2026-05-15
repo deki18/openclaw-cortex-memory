@@ -171,7 +171,7 @@ async function main() {
     assert(graphCalls.length >= 1, "skip branch should still attempt graph append when graph payload exists");
     const promptBodies = receivedRequests.join("\n");
     assert(!/[闂濠婵閸鈧]/.test(promptBodies), "write-gate prompts should not contain mojibake examples");
-    assert(promptBodies.includes("请优化 openclaw-cortex-memory"), "Chinese write-gate regression sample missing");
+    assert(promptBodies.includes("请优化 cortex-memory-pro"), "Chinese write-gate regression sample missing");
 
     const firstGraph = graphCalls[0];
     const graphRelations = Array.isArray(firstGraph.relations) ? firstGraph.relations : [];
@@ -332,7 +332,7 @@ async function main() {
         (_, index) => `[assistant] 状态记录 ${index + 1}：普通进展记录。`,
       ).join("\n");
       const lifecycleTranscript = [
-        "[用户] 请优化 openclaw-cortex-memory 的历史记忆导入质量，并修复中文导入的问题。",
+        "[用户] 请优化 cortex-memory-pro 的历史记忆导入质量，并修复中文导入的问题。",
         filler,
         "[assistant] 已完成 prompt 乱码修复，并通过 npm run typecheck。",
         "[用户] ok，效果可以，接受。",
@@ -346,17 +346,17 @@ async function main() {
       assert(lifecycleRouted.archiveEvent === 1, "Chinese lifecycle fallback should archive one event");
       assert(lifecycleArchiveEvents.length === 1, "Chinese lifecycle fallback should send one archive event");
       assert(
-        lifecycleArchiveEvents[0].cause.includes("优化 openclaw-cortex-memory"),
+        lifecycleArchiveEvents[0].cause.includes("优化 cortex-memory-pro"),
         "Chinese lifecycle archive cause should preserve the user task",
       );
       assert(
-        lifecycleMock.receivedRequests[0].includes("请优化 openclaw-cortex-memory"),
+        lifecycleMock.receivedRequests[0].includes("请优化 cortex-memory-pro"),
         "event snippet should preserve the first Chinese task line",
       );
       assert(lifecycleGraphCalls.length >= 1, "lifecycle fallback should derive graph when a concrete project is mentioned");
       const lifecycleGraph = lifecycleGraphCalls[0];
       assert(
-        Array.isArray(lifecycleGraph.entities) && lifecycleGraph.entities.includes("openclaw-cortex-memory"),
+        Array.isArray(lifecycleGraph.entities) && lifecycleGraph.entities.includes("cortex-memory-pro"),
         "lifecycle fallback graph should include the concrete project entity",
       );
     } finally {
@@ -376,7 +376,7 @@ async function main() {
         generic_entity_rejected: genericEntityResult.valid === false,
         prompt_mojibake_removed: !/[闂濠婵閸鈧]/.test(promptBodies),
         chinese_lifecycle_fallback_archive: lifecycleArchiveEvents.length === 1 && lifecycleRouted && lifecycleRouted.archiveEvent === 1,
-        chinese_snippet_preserved: lifecycleMock.receivedRequests[0].includes("请优化 openclaw-cortex-memory"),
+        chinese_snippet_preserved: lifecycleMock.receivedRequests[0].includes("请优化 cortex-memory-pro"),
         lifecycle_fallback_graph_derived: lifecycleGraphCalls.length >= 1,
         sync_graph_quality_mode_strict: firstGraph.qualityMode === "strict",
       },

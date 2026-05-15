@@ -3,7 +3,7 @@
 const fs = require('fs');
 const path = require('path');
 
-const PLUGIN_NAME = 'openclaw-cortex-memory';
+const PLUGIN_NAME = 'cortex-memory-pro';
 const EXCLUSIVE_MEMORY_PLUGINS = ['memory-core', 'memory-lancedb'];
 
 function findOpenClawConfig() {
@@ -264,7 +264,7 @@ Configuration:
   The plugin state is stored in openclaw.json under:
   {
     "plugins": {
-      "allow": ["openclaw-cortex-memory"],
+      "allow": ["cortex-memory-pro"],
       "slots": {
         "memory": "none"
       },
@@ -275,13 +275,13 @@ Configuration:
         "memory-lancedb": {
           "enabled": false
         },
-        "openclaw-cortex-memory": {
+        "cortex-memory-pro": {
           "enabled": true/false
         }
       }
     }
   }
-  Note: do not set plugins.slots.memory to "openclaw-cortex-memory".
+  Note: do not set plugins.slots.memory to "cortex-memory-pro".
 
 Fallback Behavior:
   When disabled, the plugin will fall back to OpenClaw's builtin

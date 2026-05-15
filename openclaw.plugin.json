@@ -1,7 +1,7 @@
 {
-  "id": "openclaw-cortex-memory",
+  "id": "cortex-memory-pro",
   "name": "Cortex Memory",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Long-term memory system with semantic, episodic, and procedural memory for AI Agents",
   "main": "dist/index.js",
   "author": "deki18",
@@ -420,7 +420,7 @@
       },
       "dbPath": {
         "type": "string",
-        "description": "Path to the memory database directory (default: <openclaw_base>/workspace/memory/openclaw-cortex-memory)"
+        "description": "Path to the memory database directory (default: <openclaw_base>/workspace/memory/cortex-memory-pro)"
       },
       "autoSync": {
         "type": "boolean",

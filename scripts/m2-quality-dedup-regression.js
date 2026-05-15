@@ -53,12 +53,12 @@ async function main() {
     assert(lowValue.status === "skipped", "low-value acknowledgement should be skipped");
     assert(lowValue.reason === "low_quality", "low-value acknowledgement should fail quality gate");
 
-    const activeText = "Decision: keep openclaw-cortex-memory import quality gate, track source_slice coverage, and verify with npm run test:m2-quality-dedup.";
+    const activeText = "Decision: keep cortex-memory-pro import quality gate, track source_slice coverage, and verify with npm run test:m2-quality-dedup.";
     const firstActive = await writeStore.writeMemory({
       text: activeText,
-      summary: "Keep openclaw-cortex-memory import quality gate and verify with npm run test:m2-quality-dedup",
+      summary: "Keep cortex-memory-pro import quality gate and verify with npm run test:m2-quality-dedup",
       sourceText: [
-        "[user] 需要提高 openclaw-cortex-memory 历史记忆导入质量。",
+        "[user] 需要提高 cortex-memory-pro 历史记忆导入质量。",
         "[assistant] Decision: keep import quality gate, track source_slice coverage, and verify with npm run test:m2-quality-dedup.",
       ].join("\n"),
       role: "assistant",
@@ -69,11 +69,11 @@ async function main() {
     assert(firstActive.quality && firstActive.quality.score >= 0.45, "valuable active memory should meet semantic quality threshold");
 
     const duplicateActive = await writeStore.writeMemory({
-      text: "Keep openclaw-cortex-memory import quality gate and verify with npm run test:m2-quality-dedup.",
-      summary: "Keep openclaw-cortex-memory import quality gate and verify with npm run test:m2-quality-dedup",
+      text: "Keep cortex-memory-pro import quality gate and verify with npm run test:m2-quality-dedup.",
+      summary: "Keep cortex-memory-pro import quality gate and verify with npm run test:m2-quality-dedup",
       sourceText: [
         "[user] 这是另一段历史会话，尾部证据不同。",
-        "[assistant] Keep openclaw-cortex-memory import quality gate and verify with npm run test:m2-quality-dedup.",
+        "[assistant] Keep cortex-memory-pro import quality gate and verify with npm run test:m2-quality-dedup.",
       ].join("\n"),
       role: "assistant",
       source: "m2-quality-dedup",
@@ -112,7 +112,7 @@ async function main() {
 
     const baseArchiveEvent = {
       event_type: "fix",
-      summary: "优化 openclaw-cortex-memory 历史记忆导入质量并完成验证",
+      summary: "优化 cortex-memory-pro 历史记忆导入质量并完成验证",
       cause: "用户要求提高历史记忆导入质量并改善 wiki 生成来源。",
       process: "修复导入质量门、active 语义评分和归档 dedup，并执行验证。",
       result: "npm run test:m2-quality-dedup 通过，用户接受第二阶段结果。",

@@ -3,7 +3,7 @@
 const fs = require('fs');
 const path = require('path');
 
-const PLUGIN_NAME = 'openclaw-cortex-memory';
+const PLUGIN_NAME = 'cortex-memory-pro';
 
 function findProjectRoot() {
   let current = __dirname;
@@ -201,7 +201,7 @@ function uninstall(args) {
   }
   
   console.log('\nTo reinstall the plugin:');
-  console.log('  cd /path/to/openclaw-cortex-memory/plugin');
+  console.log('  cd /path/to/cortex-memory-pro/plugin');
   console.log('  npm install');
 }
 
