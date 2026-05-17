@@ -173,11 +173,8 @@ interface OpenClawPluginApi {
     handler?: (...params: unknown[]) => Promise<unknown>;
   }, options?: { optional?: boolean }): void;
   unregisterTool?(name: string): void;
-  registerHook(hook: {
-    event: string;
-    handler: (payload: unknown, context: ToolContext) => Promise<void>;
-  }): void;
-  on(event: string, handler: (payload: unknown, context: ToolContext) => Promise<void> | void, options?: { priority?: number }): void;
+  registerHook?: (...params: unknown[]) => void;
+  on?(event: string, handler: (payload: unknown, context: ToolContext) => Promise<void> | void, options?: { priority?: number }): void;
   off?(event: string, handler: (payload: unknown, context: ToolContext) => Promise<void> | void): void;
   unregisterHook?(event: string): void;
   getLogger?(): Logger;
@@ -216,6 +213,7 @@ const TOOL_NAME_DIAGNOSTICS_LEGACY = "diagnostics";
 type PluginEntryLike = {
   id?: string;
   name?: string;
+  kind?: "memory";
   register: typeof register;
   unregister?: typeof unregister;
   enable?: typeof enable;
@@ -1233,9 +1231,9 @@ async function onTimerHandler(payload: unknown, context: ToolContext): Promise<v
   await resolveEngine().onTimer(payload, context);
 }
 
-function registerTools(): void {
-  if (!api) return;
-  const apiObj = api as any;
+function registerTools(targetApi: OpenClawPluginApi | null = api, trackRegistration = true): void {
+  if (!targetApi) return;
+  const apiObj = targetApi as any;
   logger.info(
     `registerTools API capability: registerTool=${typeof apiObj.registerTool === "function"}, registerTools=${typeof apiObj.registerTools === "function"}, tools.register=${typeof apiObj.tools?.register === "function"}`,
   );
@@ -1592,8 +1590,10 @@ function registerTools(): void {
   let successCount = 0;
   for (const tool of tools) {
     try {
-      registerToolCompat(tool);
-      registeredTools.push(tool.name);
+      registerToolCompat(tool, targetApi);
+      if (trackRegistration && !registeredTools.includes(tool.name)) {
+        registeredTools.push(tool.name);
+      }
       successCount += 1;
     } catch (error) {
       logger.error(`Failed to register tool ${tool.name}: ${error instanceof Error ? error.message : String(error)}`);
@@ -1663,8 +1663,8 @@ function sanitizeToolParametersSchema(schema: Record<string, unknown>): Record<s
   return sanitized;
 }
 
-function registerToolCompat(tool: RegisteredToolDefinition): void {
-  if (!api) return;
+function registerToolCompat(tool: RegisteredToolDefinition, targetApi: OpenClawPluginApi | null = api): void {
+  if (!targetApi) return;
   const normalizeContext = (value: unknown): ToolContext => {
     const contextObj = asRecord(value) || {};
     return {
@@ -1802,7 +1802,7 @@ function registerToolCompat(tool: RegisteredToolDefinition): void {
     execute: invoke,
     handler: invoke,
   };
-  const apiObj = api as any;
+  const apiObj = targetApi as any;
   if (typeof apiObj.registerTool === "function") {
     if (tool.optional) {
       apiObj.registerTool(payload, { optional: true });
@@ -1835,13 +1835,13 @@ function unregisterTools(): void {
   registeredTools = [];
 }
 
-function registerFallbackTools(): void {
-  if (!api || !builtinMemory) return;
+function registerFallbackTools(targetApi: OpenClawPluginApi | null = api, trackRegistration = true): void {
+  if (!targetApi || !builtinMemory) return;
   
   for (const name of ["search_memory", "store_event", "cortex_memory_status"]) {
     try {
-      if (api.unregisterTool) {
-        api.unregisterTool(name);
+      if ((targetApi as any).unregisterTool) {
+        (targetApi as any).unregisterTool(name);
         logger.info(`Unregistered existing tool ${name} before registering fallback`);
       }
     } catch (e) {
@@ -1875,8 +1875,10 @@ function registerFallbackTools(): void {
         return { success: false, error: `Builtin memory error: ${message}` };
       }
     },
-  });
-  registeredFallbackTools.push("search_memory");
+  }, targetApi);
+  if (trackRegistration && !registeredFallbackTools.includes("search_memory")) {
+    registeredFallbackTools.push("search_memory");
+  }
   
   registerToolCompat({
     name: "store_event",
@@ -1900,8 +1902,10 @@ function registerFallbackTools(): void {
         return { success: false, error: `Builtin memory error: ${message}` };
       }
     },
-  });
-  registeredFallbackTools.push("store_event");
+  }, targetApi);
+  if (trackRegistration && !registeredFallbackTools.includes("store_event")) {
+    registeredFallbackTools.push("store_event");
+  }
   
   registerToolCompat({
     name: "cortex_memory_status",
@@ -1922,10 +1926,12 @@ function registerFallbackTools(): void {
         }
       };
     },
-  });
-  registeredFallbackTools.push("cortex_memory_status");
+  }, targetApi);
+  if (trackRegistration && !registeredFallbackTools.includes("cortex_memory_status")) {
+    registeredFallbackTools.push("cortex_memory_status");
+  }
   
-  logger.info(`Registered ${registeredFallbackTools.length} fallback tools`);
+  logger.info(`Registered fallback tools for current OpenClaw registry surface`);
 }
 
 function unregisterFallbackTools(): void {
@@ -1940,8 +1946,8 @@ function unregisterFallbackTools(): void {
   registeredFallbackTools = [];
 }
 
-function registerHooks(): void {
-  if (!api) return;
+function registerHooks(targetApi: OpenClawPluginApi | null = api, trackRegistration = true): void {
+  if (!targetApi) return;
   
   const hooks = [
     { event: "message_received", handler: onMessageHandler },
@@ -1950,14 +1956,26 @@ function registerHooks(): void {
   
   for (const hook of hooks) {
     try {
-      if (typeof (api as any).on === 'function') {
-        (api as any).on(hook.event, hook.handler);
-        registeredHooks.push(hook.event);
-        registeredHookHandlers.set(hook.event, hook.handler);
-      } else if (typeof (api as any).registerHook === "function") {
-        (api as any).registerHook({ event: hook.event, handler: hook.handler });
-        registeredHooks.push(hook.event);
-        registeredHookHandlers.set(hook.event, hook.handler);
+      if (typeof (targetApi as any).registerHook === "function") {
+        const registerHook = (targetApi as any).registerHook;
+        if (registerHook.length >= 2) {
+          registerHook.call(targetApi, hook.event, hook.handler, {
+            name: `${PLUGIN_ID}.${hook.event}`,
+            description: `Cortex Memory ${hook.event} hook`,
+          });
+        } else {
+          registerHook.call(targetApi, { event: hook.event, handler: hook.handler });
+        }
+        if (trackRegistration && !registeredHooks.includes(hook.event)) {
+          registeredHooks.push(hook.event);
+          registeredHookHandlers.set(hook.event, hook.handler);
+        }
+      } else if (typeof (targetApi as any).on === 'function') {
+        (targetApi as any).on(hook.event, hook.handler);
+        if (trackRegistration && !registeredHooks.includes(hook.event)) {
+          registeredHooks.push(hook.event);
+          registeredHookHandlers.set(hook.event, hook.handler);
+        }
       } else {
         logger.warn(`No supported hook registration API found, skipping ${hook.event}`);
       }
@@ -2100,7 +2118,18 @@ export async function unregister(): Promise<void> {
 }
 
 export function register(pluginApi: OpenClawPluginApi, userConfig?: Partial<CortexMemoryConfig>): void {
-  if (isInitializing || isRegistered) {
+  if (isInitializing) {
+    return;
+  }
+  if (isRegistered) {
+    const enabledForSurface = config?.enabled !== false && loadPluginEnabledState();
+    logger.info("Cortex Memory plugin already initialized; registering tools/hooks for current OpenClaw registry surface");
+    if (enabledForSurface) {
+      registerTools(pluginApi, false);
+      registerHooks(pluginApi, false);
+    } else if (config?.fallbackToBuiltin && builtinMemory) {
+      registerFallbackTools(pluginApi, false);
+    }
     return;
   }
   isInitializing = true;
@@ -2271,6 +2300,7 @@ export function register(pluginApi: OpenClawPluginApi, userConfig?: Partial<Cort
 const pluginEntry = definePluginEntryCompat({
   id: PLUGIN_ID,
   name: "Cortex Memory",
+  kind: "memory" as const,
   register,
   unregister,
   enable,

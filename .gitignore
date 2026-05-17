@@ -15,6 +15,10 @@ data/
 eval/
 tmp/
 
+# Development-only regression/evaluation scripts under scripts/
+scripts/*-regression.js
+scripts/*-eval.js
+
 # IDE rules
 .trae/
 .cursor/
