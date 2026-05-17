@@ -34,11 +34,24 @@ function loadConfig(configPath) {
   }
   
   try {
-    const content = fs.readFileSync(configPath, 'utf-8');
+    const content = fs.readFileSync(configPath, 'utf-8').replace(/^\uFEFF/, '');
     return JSON.parse(content);
   } catch (e) {
     console.error(`Error loading config: ${e.message}`);
     return { plugins: {} };
+  }
+}
+
+function loadConfigStrict(configPath) {
+  if (!configPath || !fs.existsSync(configPath)) {
+    return { plugins: {} };
+  }
+
+  try {
+    const content = fs.readFileSync(configPath, 'utf-8').replace(/^\uFEFF/, '');
+    return JSON.parse(content);
+  } catch (error) {
+    throw new Error(`OpenClaw config is not valid JSON: ${configPath}. Fix the JSON syntax before running the updater fallback. ${error instanceof Error ? error.message : String(error)}`);
   }
 }
 
@@ -93,11 +106,12 @@ function spawnCommand(command, args, options = {}) {
   return childProcess.spawnSync(commandName(command), args, options);
 }
 
-function runCommand(command, args) {
+function runCommand(command, args, options = {}) {
   const display = [command, ...args].join(' ');
   console.log(`\n> ${display}`);
   const result = spawnCommand(command, args, {
-    stdio: 'inherit'
+    stdio: 'inherit',
+    ...options
   });
 
   if (result.error) {
@@ -106,6 +120,34 @@ function runCommand(command, args) {
   if (result.status !== 0) {
     throw new Error(`Command failed with exit code ${result.status}: ${display}`);
   }
+}
+
+function runCommandForResult(command, args) {
+  const display = [command, ...args].join(' ');
+  console.log(`\n> ${display}`);
+  const result = spawnCommand(command, args, {
+    encoding: 'utf8'
+  });
+
+  if (result.stdout) {
+    process.stdout.write(result.stdout);
+  }
+  if (result.stderr) {
+    process.stderr.write(result.stderr);
+  }
+  if (result.error) {
+    return {
+      ok: false,
+      output: `${result.stdout || ''}${result.stderr || ''}`,
+      error: result.error,
+      status: result.status
+    };
+  }
+  return {
+    ok: result.status === 0,
+    output: `${result.stdout || ''}${result.stderr || ''}`,
+    status: result.status
+  };
 }
 
 function runOptionalCommand(command, args) {
@@ -140,17 +182,21 @@ function resolveOpenClawBasePath() {
   return homePath ? path.join(homePath, '.openclaw') : path.join(process.cwd(), '.openclaw');
 }
 
-function resolveExtensionDir(explicitExtensionDir) {
-  if (explicitExtensionDir) {
-    return path.resolve(expandHomePath(explicitExtensionDir));
-  }
-  return path.join(resolveOpenClawBasePath(), 'extensions', PLUGIN_NAME);
+function resolveManagedNpmRoot() {
+  return path.join(resolveOpenClawBasePath(), 'npm');
 }
 
-function assertSafePluginExtensionDir(extensionDir) {
-  const resolved = path.resolve(extensionDir);
-  if (path.basename(resolved) !== PLUGIN_NAME || path.basename(path.dirname(resolved)) !== 'extensions') {
-    throw new Error(`Refusing to remove unexpected extension directory: ${resolved}`);
+function resolveManagedPluginDir(explicitInstallDir) {
+  if (explicitInstallDir) {
+    return path.resolve(expandHomePath(explicitInstallDir));
+  }
+  return path.join(resolveManagedNpmRoot(), 'node_modules', PLUGIN_NAME);
+}
+
+function assertSafeManagedPluginDir(installDir) {
+  const resolved = path.resolve(installDir);
+  if (path.basename(resolved) !== PLUGIN_NAME || path.basename(path.dirname(resolved)) !== 'node_modules') {
+    throw new Error(`Refusing to modify unexpected managed npm plugin directory: ${resolved}`);
   }
   return resolved;
 }
@@ -185,14 +231,22 @@ function packNpmPackage(packageSpec) {
     throw new Error(`Unable to parse npm pack output: ${error instanceof Error ? error.message : String(error)}`);
   }
 
-  const packedFile = Array.isArray(packResult) ? packResult[0]?.filename : packResult?.filename;
+  const packed = Array.isArray(packResult) ? packResult[0] : packResult;
+  const packedFile = packed?.filename;
   if (!packedFile) {
     throw new Error('npm pack did not return a package filename.');
   }
 
   const packedPath = path.resolve(process.cwd(), packedFile);
   console.log(`Packed: ${packedPath}`);
-  return packedPath;
+  return {
+    path: packedPath,
+    name: packed.name || PLUGIN_NAME,
+    version: packed.version || '',
+    integrity: packed.integrity || '',
+    shasum: packed.shasum || '',
+    packageSpec
+  };
 }
 
 function ensureExclusiveMemoryMode(config) {
@@ -366,7 +420,7 @@ function parseUpdateArgs(args) {
     packageSpec: `${PLUGIN_NAME}@latest`,
     restart: false,
     removeExisting: true,
-    extensionDir: '',
+    installDir: '',
     help: false
   };
 
@@ -394,12 +448,12 @@ function parseUpdateArgs(args) {
         }
         options.packageSpec = args[i];
         break;
-      case '--extensions-dir':
+      case '--install-dir':
         i += 1;
         if (!args[i]) {
-          throw new Error('--extensions-dir requires a path.');
+          throw new Error('--install-dir requires a path.');
         }
-        options.extensionDir = args[i];
+        options.installDir = args[i];
         break;
       default:
         if (!arg.startsWith('-') && options.packageSpec === `${PLUGIN_NAME}@latest`) {
@@ -413,15 +467,212 @@ function parseUpdateArgs(args) {
   return options;
 }
 
-function removeExistingExtension(extensionDir) {
-  const safeExtensionDir = assertSafePluginExtensionDir(extensionDir);
-  if (!fs.existsSync(safeExtensionDir)) {
-    console.log(`No existing extension directory found: ${safeExtensionDir}`);
+function removeExistingManagedPluginDir(installDir) {
+  const safeInstallDir = assertSafeManagedPluginDir(installDir);
+  if (!fs.existsSync(safeInstallDir)) {
+    console.log(`No existing managed npm plugin directory found: ${safeInstallDir}`);
     return;
   }
 
-  console.log(`Removing existing extension directory: ${safeExtensionDir}`);
-  fs.rmSync(safeExtensionDir, { recursive: true, force: true });
+  console.log(`Removing existing managed npm plugin directory: ${safeInstallDir}`);
+  fs.rmSync(safeInstallDir, { recursive: true, force: true });
+}
+
+function isInvalidConfigInstallFailure(result) {
+  const output = result && typeof result.output === 'string' ? result.output : '';
+  return /Config invalid|OpenClaw config is invalid|Invalid config at/i.test(output);
+}
+
+function buildNpmPackInstallSpec(packedPackage) {
+  return `npm-pack:${packedPackage.path}`;
+}
+
+function installPackedPackageWithOpenClaw(packedPackage, options) {
+  const args = ['plugins', 'install', buildNpmPackInstallSpec(packedPackage)];
+  if (options.removeExisting) {
+    args.push('--force');
+  }
+  const result = runCommandForResult('openclaw', args);
+  if (result.ok) {
+    return true;
+  }
+  if (isInvalidConfigInstallFailure(result)) {
+    console.warn('\nOpenClaw refused plugin install because the current config is invalid.');
+    console.warn('Falling back to direct package installation for cortex-memory-pro only.');
+    return false;
+  }
+  if (result.error) {
+    throw result.error;
+  }
+  throw new Error(`Command failed with exit code ${result.status}: openclaw ${args.join(' ')}`);
+}
+
+function readJsonFile(filePath) {
+  return JSON.parse(fs.readFileSync(filePath, 'utf8'));
+}
+
+function installPackedPackageToManagedNpmRoot(packedPackage, installDir, removeExisting) {
+  const safeInstallDir = assertSafeManagedPluginDir(installDir);
+  const npmRoot = path.dirname(path.dirname(safeInstallDir));
+
+  if (fs.existsSync(safeInstallDir)) {
+    if (!removeExisting) {
+      throw new Error(`Managed npm plugin directory already exists: ${safeInstallDir}. Re-run without --skip-remove to replace it.`);
+    }
+    removeExistingManagedPluginDir(safeInstallDir);
+  } else {
+    console.log(`No existing managed npm plugin directory found: ${safeInstallDir}`);
+  }
+
+  fs.mkdirSync(npmRoot, { recursive: true });
+  runCommand('npm', [
+    'install',
+    '--prefix',
+    npmRoot,
+    '--no-save',
+    '--ignore-scripts',
+    '--no-audit',
+    '--no-fund',
+    packedPackage.path
+  ]);
+
+  const packageJsonPath = path.join(safeInstallDir, 'package.json');
+  const pluginManifestPath = path.join(safeInstallDir, 'openclaw.plugin.json');
+  if (!fs.existsSync(packageJsonPath) || !fs.existsSync(pluginManifestPath)) {
+    throw new Error(`Packed package did not install to expected managed npm plugin directory: ${safeInstallDir}`);
+  }
+
+  const packageJson = readJsonFile(packageJsonPath);
+  const pluginManifest = readJsonFile(pluginManifestPath);
+  if (packageJson.name !== PLUGIN_NAME || pluginManifest.id !== PLUGIN_NAME) {
+    throw new Error(`Refusing to install unexpected package: package=${packageJson.name}, plugin=${pluginManifest.id}`);
+  }
+
+  console.log(`Installed package files directly to managed npm plugin directory: ${safeInstallDir}`);
+  return {
+    packageJson,
+    pluginManifest,
+    installPath: safeInstallDir
+  };
+}
+
+function resolveDefaultConfigPath() {
+  return process.env.OPENCLAW_CONFIG_PATH
+    || (process.env.OPENCLAW_STATE_DIR ? path.join(process.env.OPENCLAW_STATE_DIR, 'openclaw.json') : '')
+    || (process.env.OPENCLAW_BASE_PATH ? path.join(process.env.OPENCLAW_BASE_PATH, 'openclaw.json') : '')
+    || path.join(process.env.USERPROFILE || process.env.HOME || '', '.openclaw', 'openclaw.json');
+}
+
+function buildDirectInstallRecord(packedPackage, installResult) {
+  const version = installResult.packageJson.version || packedPackage.version || '';
+  return {
+    source: 'npm',
+    spec: packedPackage.packageSpec,
+    resolvedName: packedPackage.name || PLUGIN_NAME,
+    resolvedVersion: version,
+    resolvedSpec: version ? `${packedPackage.name || PLUGIN_NAME}@${version}` : packedPackage.packageSpec,
+    installPath: installResult.installPath,
+    version,
+    ...(packedPackage.integrity ? { integrity: packedPackage.integrity } : {}),
+    ...(packedPackage.shasum ? { shasum: packedPackage.shasum } : {}),
+    resolvedAt: new Date().toISOString(),
+    installedAt: new Date().toISOString()
+  };
+}
+
+function resolvePluginInstallIndexPath() {
+  return path.join(resolveOpenClawBasePath(), 'plugins', 'installs.json');
+}
+
+function readJsonObjectFile(filePath) {
+  if (!fs.existsSync(filePath)) {
+    return {};
+  }
+  const parsed = readJsonFile(filePath);
+  return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+}
+
+function readPluginInstallRecords(index) {
+  const records = index && typeof index.installRecords === 'object' && index.installRecords && !Array.isArray(index.installRecords)
+    ? index.installRecords
+    : {};
+  return { ...records };
+}
+
+function saveDirectInstallRecordToPluginIndex(installRecord) {
+  const indexPath = resolvePluginInstallIndexPath();
+  try {
+    const index = readJsonObjectFile(indexPath);
+    const installRecords = readPluginInstallRecords(index);
+    installRecords[PLUGIN_NAME] = {
+      ...installRecords[PLUGIN_NAME],
+      ...installRecord
+    };
+
+    const nextIndex = {
+      ...index,
+      warning: index.warning || 'This file is managed by OpenClaw. Do not edit by hand.',
+      installRecords
+    };
+    fs.mkdirSync(path.dirname(indexPath), { recursive: true });
+    fs.writeFileSync(indexPath, `${JSON.stringify(nextIndex, null, 2)}\n`);
+    console.log(`Recorded direct plugin install in plugin index: ${indexPath}`);
+  } catch (error) {
+    console.warn(`Could not update OpenClaw plugin index (${indexPath}): ${error instanceof Error ? error.message : String(error)}`);
+    console.warn('The legacy plugins.installs config record was still written.');
+  }
+}
+
+function recordDirectInstall(packedPackage, installResult) {
+  const installRecord = buildDirectInstallRecord(packedPackage, installResult);
+  const configPath = findOpenClawConfig() || resolveDefaultConfigPath();
+  const config = loadConfigStrict(configPath);
+  if (!config.plugins) {
+    config.plugins = {};
+  }
+  if (!Array.isArray(config.plugins.allow)) {
+    config.plugins.allow = [];
+  }
+  if (!config.plugins.allow.includes(PLUGIN_NAME)) {
+    config.plugins.allow.push(PLUGIN_NAME);
+  }
+  if (!config.plugins.entries) {
+    config.plugins.entries = {};
+  }
+  config.plugins.entries[PLUGIN_NAME] = {
+    ...config.plugins.entries[PLUGIN_NAME],
+    enabled: true
+  };
+  ensureExclusiveMemoryMode(config);
+
+  if (!config.plugins.installs) {
+    config.plugins.installs = {};
+  }
+  config.plugins.installs[PLUGIN_NAME] = {
+    ...config.plugins.installs[PLUGIN_NAME],
+    ...installRecord
+  };
+
+  saveConfig(configPath, config);
+  console.log(`Recorded direct plugin install in config: ${configPath}`);
+  saveDirectInstallRecordToPluginIndex(installRecord);
+}
+
+function installPackedPackageDirectly(packedPackage, installDir, removeExisting) {
+  const installResult = installPackedPackageToManagedNpmRoot(packedPackage, installDir, removeExisting);
+  recordDirectInstall(packedPackage, installResult);
+}
+
+function restartGatewayAfterUpdate() {
+  try {
+    runCommand('openclaw', ['gateway', 'restart']);
+    return true;
+  } catch (error) {
+    console.error(`\nUpdate installed, but OpenClaw gateway restart failed: ${error instanceof Error ? error.message : String(error)}`);
+    console.error('Fix the OpenClaw config/runtime issue, then run: openclaw gateway restart');
+    process.exitCode = 1;
+    return false;
+  }
 }
 
 function updatePlugin(args) {
@@ -440,32 +691,32 @@ function updatePlugin(args) {
     return;
   }
 
-  const extensionDir = resolveExtensionDir(options.extensionDir);
-  let packedPath = '';
+  const installDir = resolveManagedPluginDir(options.installDir);
+  let packedPackage = null;
 
   console.log('='.repeat(50));
   console.log('Cortex Memory Plugin Updater');
   console.log('='.repeat(50));
   console.log(`Package: ${options.packageSpec}`);
-  console.log(`Extension directory: ${extensionDir}`);
+  console.log(`Managed npm plugin directory: ${installDir}`);
 
   try {
     ensureCommandAvailable('openclaw');
-    packedPath = packNpmPackage(options.packageSpec);
+    packedPackage = packNpmPackage(options.packageSpec);
 
-    if (options.removeExisting) {
-      removeExistingExtension(extensionDir);
+    const installedWithOpenClaw = installPackedPackageWithOpenClaw(packedPackage, options);
+    if (installedWithOpenClaw) {
+      runCommand('openclaw', ['plugins', 'enable', PLUGIN_NAME]);
+      enablePlugin();
     } else {
-      console.log('Skipping extension directory removal (--skip-remove).');
+      installPackedPackageDirectly(packedPackage, installDir, options.removeExisting);
     }
-
-    runCommand('openclaw', ['plugins', 'install', packedPath]);
-    runCommand('openclaw', ['plugins', 'enable', PLUGIN_NAME]);
-    enablePlugin();
     runOptionalCommand('openclaw', ['plugins', 'list', '--enabled']);
 
     if (options.restart) {
-      runCommand('openclaw', ['gateway', 'restart']);
+      if (!restartGatewayAfterUpdate()) {
+        return;
+      }
     } else {
       console.log('\nUpdate installed. Restart OpenClaw gateway to load the new plugin code:');
       console.log('  openclaw gateway restart');
@@ -476,10 +727,10 @@ function updatePlugin(args) {
     console.error(`\nUpdate failed: ${error instanceof Error ? error.message : String(error)}`);
     process.exitCode = 1;
   } finally {
-    if (packedPath && fs.existsSync(packedPath)) {
+    if (packedPackage?.path && fs.existsSync(packedPackage.path)) {
       try {
-        fs.unlinkSync(packedPath);
-        console.log(`Removed temporary package: ${packedPath}`);
+        fs.unlinkSync(packedPackage.path);
+        console.log(`Removed temporary package: ${packedPackage.path}`);
       } catch (error) {
         console.warn(`Failed to remove temporary package: ${error instanceof Error ? error.message : String(error)}`);
       }
@@ -517,8 +768,8 @@ Options:
   --no-restart              Install only and print the restart command (default)
   --package <spec>          npm package spec to install (default: ${PLUGIN_NAME}@latest)
   --from <spec>             Alias for --package
-  --extensions-dir <path>   Override the plugin extension directory
-  --skip-remove             Do not remove the existing extension directory first
+  --install-dir <path>      Override the managed npm plugin directory
+  --skip-remove             Do not remove the existing managed plugin directory first
   --help                    Show this help message
 
 Examples:

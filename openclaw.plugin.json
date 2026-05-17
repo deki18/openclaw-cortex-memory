@@ -1,7 +1,7 @@
 {
   "id": "cortex-memory-pro",
   "name": "Cortex Memory",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "Long-term memory system with semantic, episodic, and procedural memory for AI Agents",
   "main": "dist/index.js",
   "author": "deki18",

@@ -131,10 +131,10 @@ openclaw plugins enable cortex-memory-pro
 如果 `npm` 安装出现 `fetch failed`，可改用 npm 包本地安装（推荐兜底）：
 
 ```bash
-npm pack cortex-memory-pro@latest
-openclaw plugins install ./cortex-memory-pro-*.tgz
+PKG="$(npm pack cortex-memory-pro@latest --silent)"
+openclaw plugins install "npm-pack:./$PKG"
 openclaw plugins enable cortex-memory-pro
-rm ./cortex-memory-pro-*.tgz
+rm "./$PKG"
 ```
 
 完成安装后，请先按下方"最小配置"示例配置 `openclaw.json`，确认配置无误后再启动 gateway。
@@ -155,14 +155,15 @@ cortex-memory update --restart
 
 该命令会重新安装 `cortex-memory-pro@latest`、刷新启用状态，并保持 `plugins.slots.memory = "none"`、`memory-core`/`memory-lancedb` 禁用；不会删除 workspace memory 或 `data/memory` 里的记忆数据。
 
+如果当前 `openclaw.json` 因其他插件配置无效导致 `openclaw plugins install` 被 OpenClaw 拒绝，升级器会自动改用直接安装兜底路径：只替换 OpenClaw 管理的 npm 插件目录 `~/.openclaw/npm/node_modules/cortex-memory-pro`，并写入 `plugins.installs` 与 `plugins/installs.json` 安装记录。之后仍建议修复原始配置问题，再重启 gateway。
+
 如需手动兜底更新，可执行：
 
 ```bash
-rm -r ~/.openclaw/extensions/cortex-memory-pro
-npm pack cortex-memory-pro@latest
-openclaw plugins install ./cortex-memory-pro-*.tgz
+PKG="$(npm pack cortex-memory-pro@latest --silent)"
+openclaw plugins install "npm-pack:./$PKG" --force
 openclaw plugins enable cortex-memory-pro
-rm ./cortex-memory-pro-*.tgz
+rm "./$PKG"
 openclaw plugins list --enabled
 openclaw gateway restart
 ```
